@@ -63,7 +63,7 @@ make_home() {  # <name>
 }
 
 write_fixture() {  # <home>
-  local home=$1
+  local home=$1 fixture_gen
   mkdir -p "$home/projects/alpha-worktree" "$home/projects/scout-worktree" "$home/secondmate-home"
   cat > "$home/data/backlog.md" <<EOF
 ## In flight
@@ -84,12 +84,18 @@ EOF
     "window=firstmate:fm-ship-task" \
     "worktree=$home/projects/alpha-worktree" \
     "project=alpha" \
-    "harness=codex" \
+    "harness=claude" \
     "kind=ship" \
     "mode=ship" \
     "yolo=off" \
     "pr=https://github.com/kunchenguid/firstmate/pull/9"
   printf 'needs-decision: choose an API shape\n' > "$home/state/ship-task.status"
+  # A working ship task proves it through its own semantic busy-state record
+  # (bin/fm-busy-lib.sh), which is what the snapshot's current-state read
+  # consults; rendered pane text is no longer a state source.
+  fixture_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" ship-task)
+  "$ROOT/bin/fm-busy-event.sh" apply "$home/state" ship-task busy --gen "$fixture_gen" \
+    --source claude-hook --event user-prompt-submit
   fm_write_meta "$home/state/scout-task.meta" \
     "window=firstmate:fm-scout-task" \
     "worktree=$home/projects/scout-worktree" \
@@ -343,7 +349,7 @@ EOF
 }
 
 test_event_hints_follow_reconciled_current_state() {
-  local home fakebin out
+  local home fakebin out hint_gen
   home=$(make_home event-hints)
   mkdir -p \
     "$home/projects/active-decision" \
@@ -370,17 +376,23 @@ test_event_hints_follow_reconciled_current_state() {
     "window=firstmate:fm-stale-decision-ship-task" \
     "worktree=$home/projects/stale-decision" \
     "project=alpha" \
-    "harness=codex" \
+    "harness=claude" \
     "kind=ship" \
     "mode=ship"
+  hint_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" stale-decision)
+  "$ROOT/bin/fm-busy-event.sh" apply "$home/state" stale-decision busy --gen "$hint_gen" \
+    --source claude-hook --event user-prompt-submit
   printf 'needs-decision: already answered\n' > "$home/state/stale-decision.status"
   fm_write_meta "$home/state/stale-blocked.meta" \
     "window=firstmate:fm-stale-blocked-ship-task" \
     "worktree=$home/projects/stale-blocked" \
     "project=alpha" \
-    "harness=codex" \
+    "harness=claude" \
     "kind=ship" \
     "mode=ship"
+  hint_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" stale-blocked)
+  "$ROOT/bin/fm-busy-event.sh" apply "$home/state" stale-blocked busy --gen "$hint_gen" \
+    --source claude-hook --event user-prompt-submit
   printf 'blocked: old failure\n' > "$home/state/stale-blocked.status"
   fakebin=$(make_fakebin "$home")
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
