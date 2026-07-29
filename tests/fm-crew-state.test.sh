@@ -88,7 +88,7 @@ case "${1:-}" in
     printf '%%1\n' ;;
   capture-pane)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
-    if [ "${FM_FAKE_BUSY:-0}" = 1 ]; then printf 'work in progress\nesc to interrupt\n'
+    if [ "${FM_FAKE_BUSY:-0}" = 1 ]; then printf 'work in progress\n%s\n' "${FM_FAKE_BUSY_TEXT:-esc to interrupt}"
     else printf 'all quiet\n> \n'; fi ;;
 esac
 exit 0
@@ -780,15 +780,59 @@ test_no_run_busy_pane() {
   local d; d=$(new_case busy)
   make_repo_on_branch "$d/wt" fm/feat-h
   make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-h.meta" "window=fm:fm-feat-h" "worktree=$d/wt" "kind=ship"
-  # No matching run anywhere.
+  fm_write_meta "$d/state/feat-h.meta" "window=fm:fm-feat-h" "worktree=$d/wt" "kind=ship" "harness=claude"
+  # No matching run anywhere. The busy verdict comes from the crew's own
+  # semantic lifecycle record (bin/fm-busy-lib.sh), not from rendered text.
   FM_FAKE_AXI_STATUS=""
   FM_FAKE_RUNS_LIST=""
   FM_FAKE_BUSY=1
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-h)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-h busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
   local out; out=$(run_crew_state "$d" feat-h)
-  assert_contains "$out" "state: working" "busy pane -> working"
-  assert_contains "$out" "source: pane" "busy pane -> pane source"
-  pass "no run + busy pane reads working from the pane"
+  assert_contains "$out" "state: working" "busy record -> working"
+  assert_contains "$out" "source: pane" "busy record -> pane source"
+  assert_contains "$out" "claude-hook" "the working verdict names its semantic source"
+  pass "no run + a busy semantic record reads working, attributed to its source"
+}
+
+# A converted adapter must NOT read working from rendered footer text: the
+# redesign removed that dependency, so a pane painting "esc to interrupt" with
+# no semantic record is unknown, never working and never silently idle.
+test_no_run_footer_text_alone_is_not_working() {
+  reset_fakes
+  local d; d=$(new_case busy-footer-only)
+  make_repo_on_branch "$d/wt" fm/feat-h2
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-h2.meta" "window=fm:fm-feat-h2" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  local out; out=$(run_crew_state "$d" feat-h2)
+  assert_not_contains "$out" "state: working" "a footer alone must not read working for a converted adapter"
+  assert_contains "$out" "state: unknown" "no semantic record -> unknown"
+  pass "a converted adapter never reads working from rendered footer text"
+}
+
+# Grok keeps its isolated temporary rendered-tail fallback until its structured
+# lifecycle is live-verified, so a grok crew still reads working from its own
+# verified signature.
+test_no_run_grok_uses_isolated_fallback() {
+  reset_fakes
+  local d; d=$(new_case busy-grok)
+  make_repo_on_branch "$d/wt" fm/feat-h3
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-h3.meta" "window=fm:fm-feat-h3" "worktree=$d/wt" "kind=ship" "harness=grok"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  FM_FAKE_BUSY_TEXT='Ctrl+c:cancel'
+  export FM_FAKE_BUSY_TEXT
+  local out; out=$(run_crew_state "$d" feat-h3)
+  assert_contains "$out" "state: working" "grok busy tail -> working"
+  assert_contains "$out" "grok-regex" "the grok verdict names its isolated fallback source"
+  unset FM_FAKE_BUSY_TEXT
+  pass "grok still reads working through its isolated rendered-tail fallback"
 }
 
 test_no_run_herdr_unknown_uses_backend_capture() {
@@ -797,68 +841,76 @@ test_no_run_herdr_unknown_uses_backend_capture() {
   local d; d=$(new_case herdr-busy)
   make_repo_on_branch "$d/wt" fm/feat-herdr
   make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-herdr.meta" "window=default:w1:p2" "worktree=$d/wt" "kind=ship" "backend=herdr"
+  fm_write_meta "$d/state/feat-herdr.meta" "window=default:w1:p2" "worktree=$d/wt" "kind=ship" \
+    "backend=herdr" "harness=claude"
   FM_FAKE_AXI_STATUS=""
   FM_FAKE_RUNS_LIST=""
   FM_FAKE_TMUX_MISSING=1
   FM_FAKE_HERDR_BUSY=1
-  FM_FAKE_HERDR_AGENT_STATUS=""
+  FM_FAKE_HERDR_AGENT_STATUS=working
   local out; out=$(run_crew_state "$d" feat-herdr)
-  assert_contains "$out" "state: working" "herdr busy pane -> working"
-  assert_contains "$out" "source: pane" "herdr busy pane -> pane source"
-  pass "herdr unknown native state falls back to backend capture busy regex"
+  assert_contains "$out" "state: working" "herdr native busy -> working"
+  assert_contains "$out" "source: pane" "herdr native busy -> pane source"
+  assert_contains "$out" "herdr-native" "the herdr verdict names its native source"
+  pass "herdr's native busy verdict reads working with no record present"
 }
 
-# Regression: herdr's agent.get reports generation state ("working" only while
-# the model is actively streaming a turn - docs/herdr-backend.md "Busy state"),
-# not "this crew's tool call is still in progress". A crew blocked on its own
-# long-running foreground `no-mistakes axi run` (no --yes; blocks until a gate
-# or outcome) is not generating for that whole span, so agent.get can read
-# idle while the pane's own rendered text still shows the busy banner
-# (BUSY_REGEX) for the entire call. `idle` must be corroborated with that text
-# exactly like `unknown` already is, not trusted outright - the bug this
-# regression pins: crew_pane_is_busy previously returned "not busy" on a bare
-# `idle` verdict without ever looking at the pane.
-test_no_run_herdr_idle_agent_status_corroborated_by_busy_pane() {
+# Regression (2026-07 herdr false-surface incident, now solved semantically):
+# herdr's agent.get reports generation state ("working" only while the model is
+# actively streaming - docs/herdr-backend.md "Busy state"), not "this crew's
+# turn is still in progress". A crew blocked on its own long-running foreground
+# `no-mistakes axi run` (no --yes; blocks until a gate or outcome) is not
+# generating for that whole span, so agent.get reads idle. The crew's own
+# semantic lifecycle record still says busy for the whole turn, and it outranks
+# the narrower native verdict - so the crew is no longer misread as not-working.
+test_no_run_herdr_idle_agent_status_outranked_by_record() {
   command -v jq >/dev/null 2>&1 || { pass "herdr idle corroboration skipped without jq"; return; }
   reset_fakes
-  local d; d=$(new_case herdr-idle-busy-pane)
+  local d; d=$(new_case herdr-idle-busy-record)
   make_repo_on_branch "$d/wt" fm/feat-herdr-idle
   make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-herdr-idle.meta" "window=default:w1:p3" "worktree=$d/wt" "kind=ship" "backend=herdr"
+  fm_write_meta "$d/state/feat-herdr-idle.meta" "window=default:w1:p3" "worktree=$d/wt" "kind=ship" \
+    "backend=herdr" "harness=claude"
   # No run attributable (mirrors a no-mistakes run-step lookup that found no
-  # matching row within the configured runs-list window): the pane fallback is
-  # the only remaining signal.
+  # matching row within the configured runs-list window): the crew's semantic
+  # busy state is the only remaining signal.
   FM_FAKE_AXI_STATUS=""
   FM_FAKE_RUNS_LIST=""
   FM_FAKE_TMUX_MISSING=1
   FM_FAKE_HERDR_AGENT_STATUS=idle
-  FM_FAKE_HERDR_BUSY=1
+  FM_FAKE_HERDR_BUSY=0
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-herdr-idle)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-herdr-idle busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
   local out; out=$(run_crew_state "$d" feat-herdr-idle)
-  assert_contains "$out" "state: working" "herdr idle agent_status with a busy-banner pane -> working"
-  assert_contains "$out" "source: pane" "herdr idle agent_status with a busy-banner pane -> pane source"
-  pass "herdr idle agent_status is corroborated by the pane text, not trusted outright"
+  assert_contains "$out" "state: working" "a busy record with herdr idle agent_status -> working"
+  assert_contains "$out" "claude-hook" "the record's source outranks herdr's narrower native verdict"
+  pass "a mid-tool-call crew stays working because its record outranks herdr's generation state"
 }
 
-# The corroboration must not mask a genuinely idle/human-blocked agent: idle
-# agent_status AND an idle-looking pane (no busy banner) still reads not-busy.
-test_no_run_herdr_idle_agent_status_and_idle_pane_stays_idle() {
-  command -v jq >/dev/null 2>&1 || { pass "herdr idle+idle-pane skipped without jq"; return; }
+# The record must not mask a genuinely idle or human-blocked agent: an idle
+# record with idle agent_status still reads not-busy.
+test_no_run_herdr_idle_agent_status_and_idle_record_stays_idle() {
+  command -v jq >/dev/null 2>&1 || { pass "herdr idle+idle-record skipped without jq"; return; }
   reset_fakes
-  local d; d=$(new_case herdr-idle-idle-pane)
+  local d; d=$(new_case herdr-idle-idle-record)
   make_repo_on_branch "$d/wt" fm/feat-herdr-stopped
   make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-herdr-stopped.meta" "window=default:w1:p4" "worktree=$d/wt" "kind=ship" "backend=herdr"
+  fm_write_meta "$d/state/feat-herdr-stopped.meta" "window=default:w1:p4" "worktree=$d/wt" "kind=ship" \
+    "backend=herdr" "harness=claude"
   printf 'working: implementing\n' > "$d/state/feat-herdr-stopped.status"
   FM_FAKE_AXI_STATUS=""
   FM_FAKE_RUNS_LIST=""
   FM_FAKE_TMUX_MISSING=1
   FM_FAKE_HERDR_AGENT_STATUS=idle
   FM_FAKE_HERDR_BUSY=0
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-herdr-stopped)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-herdr-stopped idle --gen "$gen" \
+    --source claude-hook --event stop
   local out; out=$(run_crew_state "$d" feat-herdr-stopped)
-  assert_not_contains "$out" "source: pane" "herdr idle agent_status with an idle pane must not read as busy from the pane"
-  assert_contains "$out" "source: status-log" "herdr idle agent_status with an idle pane falls to the status log"
-  pass "herdr idle agent_status with a genuinely idle pane stays not-busy (no regression for a human-blocked agent)"
+  assert_not_contains "$out" "source: pane" "an idle record must not read as busy"
+  assert_contains "$out" "source: status-log" "an idle record falls to the status log"
+  pass "an idle record with idle agent_status stays not-busy (no regression for a human-blocked agent)"
 }
 
 # (g) no run + idle pane -> the status-log verb, as-is
@@ -1033,8 +1085,12 @@ while :; do :; done
 SH
   chmod +x "$d/fakebin/no-mistakes"
   toolbin=$(make_no_timeout_toolbin "$d")
-  fm_write_meta "$d/state/feat-timeout.meta" "window=fm:fm-feat-timeout" "worktree=$d/wt" "kind=ship"
+  fm_write_meta "$d/state/feat-timeout.meta" "window=fm:fm-feat-timeout" "worktree=$d/wt" "kind=ship" \
+    "harness=claude"
   FM_FAKE_BUSY=1
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-timeout)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-timeout busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
   start=$SECONDS
   out=$(FM_FAKE_NM_CALLS="$calls_file" PATH="$d/fakebin:$toolbin" FM_STATE_OVERRIDE="$d/state" FM_CREW_STATE_NM_TIMEOUT=1 "$CREW_STATE" feat-timeout)
   elapsed=$((SECONDS - start))
@@ -1052,13 +1108,17 @@ test_scout_skips_run_lookup() {
   local d; d=$(new_case scout)
   make_repo_on_branch "$d/wt" fm/scout-j
   make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/scout-j.meta" "window=fm:fm-scout-j" "worktree=$d/wt" "kind=scout"
+  fm_write_meta "$d/state/scout-j.meta" "window=fm:fm-scout-j" "worktree=$d/wt" "kind=scout" \
+    "harness=claude"
   # Even if a run existed on this branch, a scout must not read it.
   FM_FAKE_AXI_STATUS="$(run_running fm/scout-j)"
   FM_FAKE_BUSY=1
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" scout-j)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" scout-j busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
   local out; out=$(run_crew_state "$d" scout-j)
   assert_not_contains "$out" "source: run-step" "scout ignores no-mistakes run-step"
-  assert_contains "$out" "source: pane" "scout reads pane busy-signature"
+  assert_contains "$out" "source: pane" "scout reads its semantic busy state"
   pass "scout skips the run lookup"
 }
 
@@ -1257,9 +1317,11 @@ test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_no_run_busy_pane
+test_no_run_footer_text_alone_is_not_working
+test_no_run_grok_uses_isolated_fallback
 test_no_run_herdr_unknown_uses_backend_capture
-test_no_run_herdr_idle_agent_status_corroborated_by_busy_pane
-test_no_run_herdr_idle_agent_status_and_idle_pane_stays_idle
+test_no_run_herdr_idle_agent_status_outranked_by_record
+test_no_run_herdr_idle_agent_status_and_idle_record_stays_idle
 test_no_run_idle_pane_uses_log
 test_no_run_idle_pane_uses_keyed_log
 test_no_run_idle_pane_paused

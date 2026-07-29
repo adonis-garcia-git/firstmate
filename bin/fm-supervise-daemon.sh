@@ -174,6 +174,12 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-supervisor-target-lib.sh
 . "$FM_DAEMON_DIR/fm-supervisor-target-lib.sh"
 
+# The single owner of semantic busy state for recorded tasks
+# (fm_busy_classify). The supervisor pane itself is not a recorded task, so it
+# keeps its own rendered-text reader below.
+# shellcheck source=bin/fm-busy-lib.sh
+. "$FM_DAEMON_DIR/fm-busy-lib.sh"
+
 # --- tunables ---------------------------------------------------------------
 # Supervisor backends this daemon knows how to inject into today. zellij, orca,
 # and cmux are real backends elsewhere in firstmate (bin/fm-backend.sh) but this
@@ -553,25 +559,32 @@ mark_escalated_seen() {  # <kind> <arg> <state>
 # and future verdicts. The detector drops dim/faint ghost text and strips the
 # harness's composer box borders, so an aligned ghost-only or idle bordered
 # claude composer ("│ > … │") is correctly proven empty.
-# pane_is_busy / pane_input_pending: BACKEND-AWARE now (previously tmux-only
-# direct calls). <backend> defaults to tmux when omitted, so every existing
-# caller/test that passes only <target> is unaffected. Dispatch goes through
-# bin/fm-backend.sh's generic per-backend primitives (fm_backend_busy_state,
-# fm_backend_capture, fm_backend_composer_state) rather than hand-rolling a
-# case statement here, mirroring the fallback order stale_window_is_busy uses
-# for per-task panes: try the backend's native busy state first, then match
-# captured output. The supervisor pane has no recorded task harness and uses
-# the historical combined fallback; stale task panes select the recorded
-# harness's verified signature.
+# pane_is_busy / pane_input_pending: BACKEND-AWARE (dispatch goes through
+# bin/fm-backend.sh's generic per-backend primitives rather than a hand-rolled
+# case statement here). <backend> defaults to tmux when omitted, so every
+# existing caller/test that passes only <target> is unaffected.
+#
+# This reader is for the SUPERVISOR pane - firstmate's own pane, which is not a
+# recorded task and therefore has no semantic busy-state record to read
+# (recorded task panes go through stale_window_is_busy and the contract in
+# bin/fm-busy-lib.sh). It is used only to defer an injection into a pane that
+# is mid-turn, so a rendered-text read is adequate and the failure mode is a
+# deferred escalation, never a wrong task state. It is scoped to firstmate's
+# own detected primary harness (FM_DAEMON_PRIMARY_HARNESS) instead of the old
+# global OR of every vendor signature, so one harness's output can no longer
+# make another harness's pane read busy.
+FM_DAEMON_PRIMARY_HARNESS=${FM_DAEMON_PRIMARY_HARNESS:-$("$FM_DAEMON_DIR/fm-harness.sh" 2>/dev/null || printf 'unknown')}
+
 pane_is_busy() {  # <target> [backend]
-  local target=$1 backend=${2:-tmux} bs tail40
+  local target=$1 backend=${2:-tmux} bs tail40 harness=$FM_DAEMON_PRIMARY_HARNESS
   bs=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null)
   case "$bs" in
     busy) return 0 ;;
   esac
+  case "$harness" in unknown|'') harness= ;; esac
   tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || return 1
   printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12 \
-    | fm_busy_lines_match
+    | fm_busy_lines_match "$harness"
 }
 
 # pane_input_pending dispatches through fm_backend_composer_state and treats
@@ -596,18 +609,20 @@ task_window_harness() {  # <window> <state>
   grep '^harness=' "$meta" | cut -d= -f2- || true
 }
 
+# stale_window_is_busy: 0 when the task is PROVABLY working through the
+# semantic busy-state contract (bin/fm-busy-lib.sh), 1 when it is not, and 2
+# when the endpoint could not be read at all. Only an exact busy verdict is
+# working: unknown semantic state never becomes busy and never becomes a
+# silent idle, so a stale pane whose state cannot be proven surfaces.
 stale_window_is_busy() {  # <window> <state>
-  local win=$1 state=$2 backend harness label tail40 bs
+  local win=$1 state=$2 backend harness label task tail40 verdict
   backend=$(task_window_backend "$win" "$state")
   harness=$(task_window_harness "$win" "$state")
-  label="fm-$(window_to_task "$win" "$state")"
+  task=$(window_to_task "$win" "$state")
+  label="fm-$task"
   tail40=$(fm_backend_capture "$backend" "$win" 40 "$label" 2>/dev/null) || return 2
-  bs=$(fm_backend_busy_state "$backend" "$win" 2>/dev/null)
-  case "$bs" in
-    busy) return 0 ;;
-  esac
-  printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12 \
-    | fm_busy_lines_match "$harness"
+  verdict=$(fm_busy_classify "$backend" "$win" "$harness" "$task" "$state" "$tail40")
+  [ "${verdict%% *}" = busy ]
 }
 
 escalate_add() {  # <state> <distilled-item>
