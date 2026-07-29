@@ -107,6 +107,26 @@ test_retire_serializes_and_rejects_stale_gen() {
   pass "retire waits for the writer lock and cannot remove a new incarnation"
 }
 
+test_retire_missing_sidecar_is_idempotent() {
+  local state gen
+  state=$(new_state_dir retire-missing)
+  gen=$("$EV" arm "$state" t1)
+  rm -f "$state/t1.busy-gen"
+
+  "$EV" retire "$state" t1 --gen "$gen" || fail "exact-gen retire rejected a missing sidecar"
+  [ ! -e "$state/t1.busy-state" ] || fail "retire left an orphan record behind"
+  "$EV" retire "$state" t1 --gen "$gen" || fail "repeated exact-gen retire was not idempotent"
+  "$EV" retire "$state" t1 --current-gen || fail "current-gen retire was not idempotent"
+
+  printf 'malformed gen\n' > "$state/t1.busy-gen"
+  printf 'orphan\n' > "$state/t1.busy-state"
+  if "$EV" retire "$state" t1 --gen "$gen" 2>/dev/null; then
+    fail "retire accepted a malformed existing sidecar"
+  fi
+  [ -e "$state/t1.busy-state" ] || fail "retire removed the record for a malformed existing sidecar"
+  pass "retire treats only an absent sidecar as already retired"
+}
+
 # --- stale event rejection ----------------------------------------------------
 
 test_stale_gen_event_rejected() {
@@ -341,6 +361,7 @@ test_apply_advances_seq_and_source
 test_apply_current_gen_reset
 test_apply_unarmed_refused
 test_retire_serializes_and_rejects_stale_gen
+test_retire_missing_sidecar_is_idempotent
 test_stale_gen_event_rejected
 test_stale_gen_record_unknown
 test_missing_record_unknown_not_idle

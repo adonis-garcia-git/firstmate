@@ -25,7 +25,8 @@
 #   retire <state-dir> <id> (--gen G | --current-gen)
 #       Remove one incarnation's sidecar and record while holding the same
 #       writer lock used by arm and apply. An exact gen prevents teardown for
-#       an old task from retiring a newly armed incarnation.
+#       an old task from retiring a newly armed incarnation. A missing sidecar
+#       is already retired, so any orphan record is removed idempotently.
 #
 # Exit codes: 0 applied; 1 refused (stale gen, unarmed task, lock timeout,
 # invalid input); 2 usage. Adapter hook command lines append `|| true` so a
@@ -141,22 +142,38 @@ if [ "$CMD" = arm ]; then
 fi
 
 # apply / retire
-if [ "$USE_CURRENT_GEN" = 1 ]; then
+if [ "$USE_CURRENT_GEN" = 1 ] && [ "$CMD" != retire ]; then
   GEN=$(fm_busy_current_gen "$STATE" "$ID") || {
     umask "$old_umask"
     echo "error: no armed busy-state gen for $ID" >&2
     exit 1
   }
 fi
-fm_busy_token_valid "$GEN" || { umask "$old_umask"; echo "error: invalid --gen" >&2; exit 1; }
+if [ "$USE_CURRENT_GEN" != 1 ] || [ "$CMD" != retire ]; then
+  fm_busy_token_valid "$GEN" || { umask "$old_umask"; echo "error: invalid --gen" >&2; exit 1; }
+fi
 
 lock_acquire || { umask "$old_umask"; exit 1; }
 CURRENT=$(fm_busy_current_gen "$STATE" "$ID") || {
+  if [ "$CMD" = retire ] && [ ! -e "$GEN_FILE" ] && [ ! -L "$GEN_FILE" ]; then
+    rm -f "$REC" || {
+      lock_release
+      umask "$old_umask"
+      echo "error: busy-state retirement failed for $ID" >&2
+      exit 1
+    }
+    lock_release
+    umask "$old_umask"
+    exit 0
+  fi
   lock_release
   umask "$old_umask"
   echo "error: no armed busy-state gen for $ID" >&2
   exit 1
 }
+if [ "$CMD" = retire ] && [ "$USE_CURRENT_GEN" = 1 ]; then
+  GEN=$CURRENT
+fi
 if [ "$GEN" != "$CURRENT" ]; then
   lock_release
   umask "$old_umask"
