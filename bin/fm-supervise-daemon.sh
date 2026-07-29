@@ -573,10 +573,20 @@ mark_escalated_seen() {  # <kind> <arg> <state>
 # own detected primary harness (FM_DAEMON_PRIMARY_HARNESS) instead of the old
 # global OR of every vendor signature, so one harness's output can no longer
 # make another harness's pane read busy.
-FM_DAEMON_PRIMARY_HARNESS=${FM_DAEMON_PRIMARY_HARNESS:-$("$FM_DAEMON_DIR/fm-harness.sh" 2>/dev/null || printf 'unknown')}
+# Resolved lazily and memoized: harness detection walks process ancestry, which
+# is too heavy to pay on every source of this library (the unit tests and the
+# launcher source it purely for its pure functions).
+fm_daemon_primary_harness() {
+  if [ -z "${FM_DAEMON_PRIMARY_HARNESS:-}" ]; then
+    FM_DAEMON_PRIMARY_HARNESS=$("$FM_DAEMON_DIR/fm-harness.sh" 2>/dev/null || printf 'unknown')
+    [ -n "$FM_DAEMON_PRIMARY_HARNESS" ] || FM_DAEMON_PRIMARY_HARNESS=unknown
+  fi
+  printf '%s' "$FM_DAEMON_PRIMARY_HARNESS"
+}
 
 pane_is_busy() {  # <target> [backend]
-  local target=$1 backend=${2:-tmux} bs tail40 harness=$FM_DAEMON_PRIMARY_HARNESS
+  local target=$1 backend=${2:-tmux} bs tail40 harness
+  harness=$(fm_daemon_primary_harness)
   bs=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null)
   case "$bs" in
     busy) return 0 ;;
