@@ -114,11 +114,13 @@ test_stale_gen_record_unknown() {
 test_missing_record_unknown_not_idle() {
   local state out h
   state=$(new_state_dir missing)
-  for h in claude codex opencode pi pi-signed; do
+  for h in claude opencode pi pi-signed; do
     out=$(fm_busy_classify tmux w1 "$h" t1 "$state")
     [ "$out" = "unknown missing" ] || fail "$h with no record must be 'unknown missing', got '$out'"
   done
-  pass "a converted adapter with no record classifies unknown missing, never idle"
+  out=$(fm_busy_classify tmux w1 codex t1 "$state")
+  [ "$out" = "unknown codex-unverified" ] || fail "codex with no verified source must be 'unknown codex-unverified', got '$out'"
+  pass "a converted adapter with no record classifies unknown, never idle"
 }
 
 test_malformed_record_unknown() {
@@ -174,10 +176,12 @@ test_converted_adapters_ignore_footer_text() {
    ■■■■⬝⬝⬝⬝  esc interrupt
 Working...
 Ctrl+c:cancel'
-  for h in claude codex opencode pi pi-signed; do
+  for h in claude opencode pi pi-signed; do
     out=$(fm_busy_classify tmux w1 "$h" t1 "$state" "$tail")
     [ "$out" = "unknown missing" ] || fail "$h must never classify from footer text, got '$out'"
   done
+  out=$(fm_busy_classify tmux w1 codex t1 "$state" "$tail")
+  [ "$out" = "unknown codex-unverified" ] || fail "codex must never classify from footer text, got '$out'"
   pass "converted adapters never classify busy from rendered footer text"
 }
 
@@ -197,6 +201,18 @@ Ctrl+c:cancel')
 }
 
 # --- kimi verification gate -----------------------------------------------------
+
+test_codex_unverified_gate() {
+  local state gen out
+  state=$(new_state_dir codex-gate)
+  gen=$("$EV" arm "$state" t1)
+  "$EV" apply "$state" t1 busy --gen "$gen" --source codex-hook --event user-prompt-submit
+  out=$(fm_busy_classify tmux w1 codex t1 "$state")
+  [ "$out" = "unknown codex-unverified" ] || fail "unverified codex must classify unknown, got '$out'"
+  [ -z "$(fm_busy_sources_for_harness codex)" ] \
+    || fail "codex must trust no semantic source until one is verified"
+  pass "codex classifies unknown until a semantic source passes its verification gate"
+}
 
 test_kimi_unverified_gate() {
   local state gen out
@@ -280,6 +296,7 @@ test_record_without_sidecar_unknown
 test_source_mismatch_cross_adapter
 test_converted_adapters_ignore_footer_text
 test_grok_regex_isolated
+test_codex_unverified_gate
 test_kimi_unverified_gate
 test_dead_endpoint_overrides
 test_herdr_native_busy_only

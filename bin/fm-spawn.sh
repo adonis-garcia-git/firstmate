@@ -1342,7 +1342,15 @@ if [ "$KIND" != secondmate ]; then
   # opens, so neither is armed here.
   BUSY_GEN=
   case "$HARNESS" in
-    claude*|codex*|opencode*|pi|pi-signed)
+    codex*)
+      if fm_busy_codex_semantic_source; then
+        echo "error: codex semantic busy-state wiring is not implemented; extend the probe only together with verified wiring" >&2
+        exit 1
+      fi
+      ;;
+  esac
+  case "$HARNESS" in
+    claude*|opencode*|pi|pi-signed)
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
         exit 1
@@ -1467,7 +1475,14 @@ export default function (pi: any) {
 EOF
       ;;
     codex*)
-      # codex: turn-end rides the launch command via -c notify=[...] and __TURNEND__.
+      # Semantic busy-state source negotiation (bin/fm-busy-lib.sh owns the
+      # probes and the evidence). Neither Codex path is usable on the
+      # installed binary: a pane worker's turns are not observable through
+      # the app-server protocol, and its lifecycle hooks did not fire for a
+      # firstmate-launched worker. Codex therefore classifies unknown with
+      # an explicit reason rather than falling back to idle, and no busy
+      # wiring is installed. The turn-end NOTIFICATION marker still rides
+      # the launch command via -c notify=[...] and __TURNEND__.
       ;;
     grok*)
       # grok fires a Stop hook at every turn boundary (verified, grok 0.2.73), the

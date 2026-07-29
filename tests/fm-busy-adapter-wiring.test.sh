@@ -285,10 +285,28 @@ test_claude_hooks_stale_incarnation_harmless() {
   pass "claude hook events from a superseded incarnation are rejected without breaking the hook"
 }
 
+test_codex_unverified_until_a_semantic_source_exists() {
+  local rec id=busy-cx-1 out state
+  rec=$(make_spawn_case codex-unverified codex "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "codex spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  assert_absent "$state/$id.busy-gen" "codex must not arm a busy contract with no verified semantic source"
+  assert_absent "$WT_DIR/.codex/hooks.json" "codex must not install unverified busy hooks"
+  assert_contains "$out" 'spawned '"$id"' harness=codex' "codex spawn did not complete normally"
+  out=$(classify codex "$id" "$state")
+  [ "$out" = "unknown codex-unverified" ] || fail "codex must classify 'unknown codex-unverified', got '$out'"
+  out=$(fm_busy_classify tmux fake:w codex "$id" "$state" '• Working (6s • esc to interrupt)')
+  [ "$out" = "unknown codex-unverified" ] || fail "codex must not fall back to footer text, got '$out'"
+  pass "codex classifies unknown until a semantic source is verified, never idle or footer-matched"
+}
+
 test_pi_extension_semantic_lifecycle
 test_pi_extension_stale_incarnation_rejected
 test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless
+test_codex_unverified_until_a_semantic_source_exists
 
 echo "all fm-busy-adapter-wiring tests passed"
