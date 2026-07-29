@@ -1357,11 +1357,13 @@ if [ "$KIND" != secondmate ]; then
       }
       ;;
     kimi*)
+      # Standalone Kimi stays unknown until fm_busy_kimi_verified opens on a
+      # live-verified installed version (bin/fm-busy-lib.sh owns the gate and
+      # the required evidence). Arming without wiring would seed a busy record
+      # nothing can ever clear, so the arm waits for the wiring.
       if fm_busy_kimi_verified; then
-        BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
-          echo "error: failed to arm the busy-state contract for $ID" >&2
-          exit 1
-        }
+        echo "error: kimi semantic busy-state wiring is not implemented; open the gate only together with verified wiring" >&2
+        exit 1
       fi
       ;;
   esac

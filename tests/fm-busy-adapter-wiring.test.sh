@@ -302,8 +302,24 @@ test_codex_unverified_until_a_semantic_source_exists() {
   pass "codex classifies unknown until a semantic source is verified, never idle or footer-matched"
 }
 
+test_kimi_and_grok_install_no_unverified_wiring() {
+  local state out
+  state="$TMP_ROOT/gates/state"
+  mkdir -p "$state"
+  [ -z "$(fm_busy_sources_for_harness kimi)" ] \
+    || fail "standalone kimi must trust no semantic source until it is verified"
+  [ -z "$(fm_busy_sources_for_harness grok)" ] \
+    || fail "grok must trust no semantic source while its structured path is unverified"
+  out=$(fm_busy_classify tmux fake:w kimi gate-k "$state" '🌒 · thinking')
+  [ "$out" = "unknown kimi-unverified" ] || fail "kimi must classify unknown, not from its spinner, got '$out'"
+  out=$(fm_busy_classify tmux fake:w grok gate-g "$state" 'Ctrl+c:cancel')
+  [ "$out" = "busy grok-regex" ] || fail "grok must classify through its isolated fallback, got '$out'"
+  pass "kimi and grok install no unverified semantic wiring and classify through their own gates"
+}
+
 test_pi_extension_semantic_lifecycle
 test_pi_extension_stale_incarnation_rejected
+test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless
