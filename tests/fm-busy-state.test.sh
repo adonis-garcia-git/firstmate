@@ -81,6 +81,32 @@ test_apply_unarmed_refused() {
   pass "apply is refused for a task whose busy contract was never armed"
 }
 
+test_retire_serializes_and_rejects_stale_gen() {
+  local state old_gen new_gen out retire_pid i=0
+  state=$(new_state_dir retire)
+  old_gen=$("$EV" arm "$state" t1)
+  mkdir "$state/t1.busy-state.lock"
+  "$EV" retire "$state" t1 --gen "$old_gen" >/dev/null 2>&1 &
+  retire_pid=$!
+  while [ "$i" -lt 20 ] && ! kill -0 "$retire_pid" 2>/dev/null; do
+    i=$((i + 1))
+  done
+  [ -e "$state/t1.busy-state" ] || fail "retire bypassed the writer lock"
+  rmdir "$state/t1.busy-state.lock"
+  wait "$retire_pid" || fail "retire failed after acquiring the writer lock"
+  [ ! -e "$state/t1.busy-state" ] || fail "retire left the record behind"
+  [ ! -e "$state/t1.busy-gen" ] || fail "retire left the gen sidecar behind"
+
+  new_gen=$("$EV" arm "$state" t1)
+  if "$EV" retire "$state" t1 --gen "$old_gen" 2>/dev/null; then
+    fail "retire accepted a superseded incarnation"
+  fi
+  out=$(fm_busy_classify tmux w1 claude t1 "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "stale retirement changed the new incarnation, got '$out'"
+  [ "$(cat "$state/t1.busy-gen")" = "$new_gen" ] || fail "stale retirement changed the new gen"
+  pass "retire waits for the writer lock and cannot remove a new incarnation"
+}
+
 # --- stale event rejection ----------------------------------------------------
 
 test_stale_gen_event_rejected() {
@@ -314,6 +340,7 @@ test_arm_seeds_busy_spawn
 test_apply_advances_seq_and_source
 test_apply_current_gen_reset
 test_apply_unarmed_refused
+test_retire_serializes_and_rejects_stale_gen
 test_stale_gen_event_rejected
 test_stale_gen_record_unknown
 test_missing_record_unknown_not_idle

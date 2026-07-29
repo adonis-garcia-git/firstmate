@@ -91,10 +91,16 @@ switch (process.env.MODE) {
   case "agent-start": await handlers["agent_start"]({}, ctx); break;
   case "settle-idle": await handlers["agent_settled"]({}, ctx); break;
   case "settle-continuing": await handlers["agent_settled"]({}, ctx); break;
+  case "settle-then-start":
+    await handlers["agent_settled"]({}, ctx);
+    await handlers["agent_start"]({}, ctx);
+    break;
   case "turn-end": await handlers["turn_end"]({}, ctx); break;
   default: throw new Error("unknown mode " + process.env.MODE);
 }
-await new Promise((resolve) => setTimeout(resolve, 200));
+if (process.env.MODE === "turn-end") {
+  await new Promise((resolve) => setTimeout(resolve, 200));
+}
 EOF
 }
 
@@ -133,6 +139,21 @@ test_pi_extension_semantic_lifecycle() {
   out=$(classify pi "$id" "$state")
   [ "$out" = "idle pi-ext" ] || fail "the final settle must classify idle, got '$out'"
   pass "pi extension reports agent_start busy, settles idle only via ctx.isIdle(), and keeps turn_end a notification"
+}
+
+test_pi_extension_serializes_settle_before_next_start() {
+  local rec id=busy-pi-order out state ext
+  rec=$(make_spawn_case pi-order pi "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "pi spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.pi-ext.ts"
+
+  out=$(drive_pi_ext "$ext" settle-then-start) || fail "settle/start drive failed: $out"
+  out=$(classify pi "$id" "$state")
+  [ "$out" = "busy pi-ext" ] || fail "a fresh agent_start after agent_settled must win, got '$out'"
+  pass "pi extension awaits agent_settled before the next agent_start without a test delay"
 }
 
 test_pi_extension_stale_incarnation_rejected() {
@@ -318,6 +339,7 @@ test_kimi_and_grok_install_no_unverified_wiring() {
 }
 
 test_pi_extension_semantic_lifecycle
+test_pi_extension_serializes_settle_before_next_start
 test_pi_extension_stale_incarnation_rejected
 test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle

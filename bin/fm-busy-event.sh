@@ -22,6 +22,11 @@
 #       paths (fm-interrupt, fm-recovery) may pass --current-gen to bind to
 #       whatever incarnation is armed right now.
 #
+#   retire <state-dir> <id> (--gen G | --current-gen)
+#       Remove one incarnation's sidecar and record while holding the same
+#       writer lock used by arm and apply. An exact gen prevents teardown for
+#       an old task from retiring a newly armed incarnation.
+#
 # Exit codes: 0 applied; 1 refused (stale gen, unarmed task, lock timeout,
 # invalid input); 2 usage. Adapter hook command lines append `|| true` so a
 # refusal never breaks the harness's own lifecycle.
@@ -32,6 +37,7 @@ usage() {
 usage:
   fm-busy-event.sh arm <state-dir> <id> [--state busy|idle|unknown] [--source S] [--event E]
   fm-busy-event.sh apply <state-dir> <id> <busy|idle|unknown> (--gen G | --current-gen) --source S --event E
+  fm-busy-event.sh retire <state-dir> <id> (--gen G | --current-gen)
 See the header comment for the full contract.
 EOF
   exit 2
@@ -43,7 +49,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 CMD=${1:-}
 case "$CMD" in
-  arm|apply) shift ;;
+  arm|apply|retire) shift ;;
   *) usage ;;
 esac
 
@@ -62,7 +68,7 @@ EVENT=
 if [ "$CMD" = apply ]; then
   NEW_STATE=${1:-}
   case "$NEW_STATE" in busy|idle|unknown) shift ;; *) usage ;; esac
-else
+elif [ "$CMD" = arm ]; then
   NEW_STATE=busy
   SOURCE=fm-spawn
   EVENT=launch-brief
@@ -77,9 +83,11 @@ while [ $# -gt 0 ]; do
     *) usage ;;
   esac
 done
-case "$NEW_STATE" in busy|idle|unknown) : ;; *) usage ;; esac
-fm_busy_token_valid "$SOURCE" || { echo "error: invalid --source" >&2; exit 1; }
-fm_busy_token_valid "$EVENT" || { echo "error: invalid --event" >&2; exit 1; }
+if [ "$CMD" != retire ]; then
+  case "$NEW_STATE" in busy|idle|unknown) : ;; *) usage ;; esac
+  fm_busy_token_valid "$SOURCE" || { echo "error: invalid --source" >&2; exit 1; }
+  fm_busy_token_valid "$EVENT" || { echo "error: invalid --event" >&2; exit 1; }
+fi
 
 REC=$(fm_busy_record_path "$STATE" "$ID")
 GEN_FILE=$(fm_busy_gen_path "$STATE" "$ID")
@@ -132,7 +140,7 @@ if [ "$CMD" = arm ]; then
   exit 0
 fi
 
-# apply
+# apply / retire
 if [ "$USE_CURRENT_GEN" = 1 ]; then
   GEN=$(fm_busy_current_gen "$STATE" "$ID") || {
     umask "$old_umask"
@@ -154,6 +162,17 @@ if [ "$GEN" != "$CURRENT" ]; then
   umask "$old_umask"
   echo "error: stale busy-state gen for $ID (event rejected)" >&2
   exit 1
+fi
+if [ "$CMD" = retire ]; then
+  rm -f "$GEN_FILE" "$REC" || {
+    lock_release
+    umask "$old_umask"
+    echo "error: busy-state retirement failed for $ID" >&2
+    exit 1
+  }
+  lock_release
+  umask "$old_umask"
+  exit 0
 fi
 OLD_SEQ=0
 if [ -f "$REC" ]; then
