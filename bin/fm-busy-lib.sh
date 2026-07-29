@@ -215,14 +215,13 @@ fm_busy_record_read() {  # <state-dir> <id>
     printf 'malformed'
     return 1
   }
-  set -f
-  # shellcheck disable=SC2086 # deliberate word split of the validated record line
-  set -- $line
-  set +f
-  ver=${1:-}
-  shift 2>/dev/null || true
+  # `read -a` rather than `set --`: it never glob-expands a field and never
+  # touches the caller's positional parameters or shell options.
+  local -a fields
+  IFS=' ' read -r -a fields <<< "$line"
+  ver=${fields[0]:-}
   [ "$ver" = "$FM_BUSY_LIB_VERSION" ] || { printf 'malformed'; return 1; }
-  for f in "$@"; do
+  for f in "${fields[@]:1}"; do
     case "$f" in
       gen=*) r_gen=${f#gen=} ;;
       seq=*) r_seq=${f#seq=} ;;

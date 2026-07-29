@@ -268,6 +268,32 @@ test_herdr_native_busy_only() {
   pass "herdr's native verdict is trusted for busy only, and records outrank it"
 }
 
+# The record parser runs inside sourcing callers (the watcher, the daemon, the
+# crew-state reader), so it must not disturb their shell: no clobbered
+# positional parameters and no changed glob setting.
+test_record_read_leaves_caller_shell_intact() {
+  local state out
+  state=$(new_state_dir parser-isolation)
+  "$EV" arm "$state" t1 >/dev/null
+  out=$(bash -c '
+    set -f
+    . "$1/bin/fm-busy-lib.sh"
+    set -- keepme second
+    fm_busy_record_read "$2" t1 >/dev/null
+    printf "%s|%s|%s" "$1" "$#" "$-"
+  ' _ "$ROOT" "$state")
+  case "$out" in
+    keepme\|2\|*f*) : ;;
+    *) fail "record parsing disturbed the caller's shell: $out" ;;
+  esac
+  # A glob-shaped field must survive parsing literally rather than expanding.
+  printf 'v1 gen=%s seq=1 state=busy source=* event=x ts=1\n' "$(cat "$state/t1.busy-gen")" \
+    > "$state/t1.busy-state"
+  out=$(fm_busy_classify tmux w1 claude t1 "$state")
+  [ "$out" = "unknown malformed" ] || fail "a glob-shaped source must be rejected, not expanded, got '$out'"
+  pass "record parsing never clobbers the caller's positional parameters, glob setting, or fields"
+}
+
 test_boolean_view_never_promotes_unknown() {
   local state gen
   state=$(new_state_dir boolean)
@@ -300,6 +326,7 @@ test_codex_unverified_gate
 test_kimi_unverified_gate
 test_dead_endpoint_overrides
 test_herdr_native_busy_only
+test_record_read_leaves_caller_shell_intact
 test_boolean_view_never_promotes_unknown
 
 echo "all fm-busy-state tests passed"
