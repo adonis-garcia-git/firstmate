@@ -581,16 +581,16 @@ pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACK
 
 # Secondmates idle on their own watcher (idle pane = healthy), so the busy
 # state is not meaningful for them; read their state from the status log only.
-# Only an exact busy verdict reports working here. An unknown verdict - missing,
-# malformed, stale, or unverified semantic state - never becomes working and
-# never becomes idle either: it falls through to the status log below, and then
-# to the explicit unknown default, so an unreadable crew is surfaced rather than
-# silently reported as done working.
+# Only an exact busy verdict reports working here, and only an exact idle
+# verdict permits the status-log fallback below. Missing, malformed, stale, or
+# unverified semantic state remains unknown.
 if [ "$KIND" != secondmate ]; then
   BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
-  if [ "${BUSY_VERDICT%% *}" = busy ]; then
-    emit working pane "harness busy (${BUSY_VERDICT#* })"
-  fi
+  case "${BUSY_VERDICT%% *}" in
+    busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
+    idle) ;;
+    *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
+  esac
 fi
 
 # Fall back to the status log's last line, but ONLY when its verb maps to a real

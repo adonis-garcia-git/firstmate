@@ -96,7 +96,8 @@
 #                                   (default 300)
 #          FM_HOUSEKEEPING_TICK     seconds between housekeeping passes while
 #                                   the watcher is mid-cycle (default 15)
-#          FM_BUSY_REGEX            optional global busy-signature override
+#          FM_BUSY_REGEX            optional Grok busy-fallback and
+#                                   submit-acknowledgement override
 #          FM_COMPOSER_IDLE_RE      empty-composer regex applied after dim-ghost
 #                                   and structural border stripping (default:
 #                                   bare prompt glyphs plus busy footers)
@@ -174,9 +175,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-supervisor-target-lib.sh
 . "$FM_DAEMON_DIR/fm-supervisor-target-lib.sh"
 
-# The single owner of semantic busy state for recorded tasks
-# (fm_busy_classify). The supervisor pane itself is not a recorded task, so it
-# keeps its own rendered-text reader below.
+# The single owner of semantic busy state, including the supervisor injection
+# guard (fm_busy_classify).
 # shellcheck source=bin/fm-busy-lib.sh
 . "$FM_DAEMON_DIR/fm-busy-lib.sh"
 
@@ -204,8 +204,8 @@ WEDGE_ALARM_NOTIFIER_PID=
 # The captain-relevant verb set and the status classifiers (last_status_line,
 # status_is_captain_relevant, window_to_task, scan_captain_relevant_statuses) now
 # live in bin/fm-classify-lib.sh, shared with the always-on watcher.
-# Composer-empty detection and harness-scoped busy-footer matching live in
-# bin/fm-tmux-lib.sh; FM_BUSY_REGEX still overrides every fallback here.
+# Composer-empty detection and submit acknowledgement live in
+# bin/fm-tmux-lib.sh. FM_BUSY_REGEX also overrides Grok's isolated fallback.
 INJECT_FAIL_SLEEP_DEFAULT=30
 INJECT_CONFIRM_RETRIES_DEFAULT=3
 INJECT_CONFIRM_SLEEP_DEFAULT=0.5
@@ -550,29 +550,20 @@ mark_escalated_seen() {  # <kind> <arg> <state>
   esac
 }
 
-# Busy + composer-empty detection are the shared primitives in fm-tmux-lib.sh
-# (one source of truth with fm-send.sh). These thin wrappers keep the daemon's
-# call sites and the unit tests stable.
+# Semantic turn state and composer-empty detection form the injection boundary.
+# These thin wrappers keep the daemon's call sites and unit tests stable.
 #
 # pane_input_pending returns 0 unless the composer is positively proven empty.
 # This includes real unsubmitted text, ambiguous structure, unreadable state,
 # and future verdicts. The detector drops dim/faint ghost text and strips the
 # harness's composer box borders, so an aligned ghost-only or idle bordered
 # claude composer ("│ > … │") is correctly proven empty.
-# pane_is_busy / pane_input_pending: BACKEND-AWARE (dispatch goes through
+# primary_busy_verdict / pane_is_busy / pane_input_pending: BACKEND-AWARE
+# (dispatch goes through
 # bin/fm-backend.sh's generic per-backend primitives rather than a hand-rolled
 # case statement here). <backend> defaults to tmux when omitted, so every
 # existing caller/test that passes only <target> is unaffected.
 #
-# This reader is for the SUPERVISOR pane - firstmate's own pane, which is not a
-# recorded task and therefore has no semantic busy-state record to read
-# (recorded task panes go through stale_window_is_busy and the contract in
-# bin/fm-busy-lib.sh). It is used only to defer an injection into a pane that
-# is mid-turn, so a rendered-text read is adequate and the failure mode is a
-# deferred escalation, never a wrong task state. It is scoped to firstmate's
-# own detected primary harness (FM_DAEMON_PRIMARY_HARNESS) instead of the old
-# global OR of every vendor signature, so one harness's output can no longer
-# make another harness's pane read busy.
 # Resolved lazily and memoized: harness detection walks process ancestry, which
 # is too heavy to pay on every source of this library (the unit tests and the
 # launcher source it purely for its pure functions).
@@ -584,17 +575,24 @@ fm_daemon_primary_harness() {
   printf '%s' "$FM_DAEMON_PRIMARY_HARNESS"
 }
 
-pane_is_busy() {  # <target> [backend]
-  local target=$1 backend=${2:-tmux} bs tail40 harness
+primary_busy_verdict() {  # <target> [backend] [state]
+  local target=$1 backend=${2:-tmux} state=${3:-$(_state_root)} tail40='' harness
   harness=$(fm_daemon_primary_harness)
-  bs=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null)
-  case "$bs" in
-    busy) return 0 ;;
+  case "$harness" in
+    grok*)
+      tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || {
+        printf 'unknown capture-failed'
+        return 0
+      }
+      ;;
   esac
-  case "$harness" in unknown|'') harness= ;; esac
-  tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || return 1
-  printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12 \
-    | fm_busy_lines_match "$harness"
+  fm_busy_classify "$backend" "$target" "$harness" .primary "$state" "$tail40"
+}
+
+pane_is_busy() {  # <target> [backend] [state]
+  local verdict
+  verdict=$(primary_busy_verdict "$@")
+  [ "${verdict%% *}" = busy ]
 }
 
 # pane_input_pending dispatches through fm_backend_composer_state and treats
@@ -1117,7 +1115,7 @@ window_for_task() {  # <task-key> [state]
 #     line, or a previous injection's unsent text), defer entirely - injecting
 #     would merge with the human's text.
 inject_msg() {  # <message> [state]
-  local msg=$1 state target backend retries sleep_s verdict composer encoded
+  local msg=$1 state target backend retries sleep_s verdict busy_verdict composer encoded
   state="${2:-$(_state_root)}"
   # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
   # daemon self-handles and stays quiet; firstmate drives the normal always-on
@@ -1138,12 +1136,19 @@ inject_msg() {  # <message> [state]
   # discovery), matching this function's pre-existing default assumption.
   backend="${FM_SUPERVISOR_BACKEND:-tmux}"
   fm_backend_target_exists "$backend" "$target" || return 1
-  # (3) Busy-guard: never inject into an in-use pane.
-  #   a) pane_is_busy: the harness shows a busy footer (agent mid-turn).
-  if pane_is_busy "$target" "$backend"; then
-    log "inject deferred: supervisor pane busy (agent mid-turn)"
-    return 1
-  fi
+  # (3) Turn-state guard: only an exact semantic idle verdict is safe.
+  busy_verdict=$(primary_busy_verdict "$target" "$backend" "$state")
+  case "${busy_verdict%% *}" in
+    idle) ;;
+    busy)
+      log "inject deferred: supervisor pane busy (${busy_verdict#* })"
+      return 1
+      ;;
+    *)
+      log "inject deferred: supervisor turn state unavailable ($busy_verdict)"
+      return 1
+      ;;
+  esac
   #   b) Composer-guard: inject ONLY into a confirmed-empty GENUINE agent
   #      composer. The shared classifier (fm_backend_composer_state ->
   #      fm_composer_classify_content, bin/fm-composer-lib.sh) reports 'pending'
