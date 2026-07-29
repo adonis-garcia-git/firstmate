@@ -1359,9 +1359,24 @@ if [ "$KIND" != secondmate ]; then
   esac
   case "$HARNESS" in
     claude*)
+      # Semantic busy-state hooks (bin/fm-busy-lib.sh): UserPromptSubmit opens
+      # a turn; Stop (normal completion), StopFailure (API-error turn end),
+      # and SessionEnd (process shutdown) all close it, so an abnormal end can
+      # never leave a stale busy record. Claude fires no hook for a manual
+      # interrupt, so the firstmate-controlled interruption procedure
+      # (harness-adapters) records idle/fm-interrupt itself. Stop keeps the
+      # turn-ended NOTIFICATION touch for the watcher. Every hook command
+      # tolerates a refused event (|| true) so a stale-gen writer can never
+      # break Claude's own lifecycle.
       mkdir -p "$WT/.claude"
+      busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
+      busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source claude-hook"
+      j_submit=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event user-prompt-submit 2>/dev/null || true")
+      j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
+      j_stopfail=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
+      j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
       cat > "$WT/.claude/settings.local.json" <<EOF
-{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"touch '$TURNEND'"}]}]}}
+{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
 EOF
       exclude_path '.claude/settings.local.json'
       ;;

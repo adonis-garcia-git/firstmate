@@ -224,8 +224,71 @@ test_opencode_plugin_semantic_lifecycle() {
   pass "opencode plugin classifies from session.status, scoped to the latched worker session"
 }
 
+run_claude_hook() {  # <settings.json> <hook-event>
+  local cmd
+  cmd=$(jq -r ".hooks[\"$2\"][0].hooks[0].command" "$1")
+  [ -n "$cmd" ] && [ "$cmd" != null ] || fail "no $2 hook command in $1"
+  sh -c "$cmd"
+}
+
+test_claude_hooks_semantic_lifecycle() {
+  local rec id=busy-cl-1 out state settings
+  rec=$(make_spawn_case claude-lifecycle claude "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "claude spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  settings="$WT_DIR/.claude/settings.local.json"
+  assert_present "$settings" "claude spawn did not write hook settings"
+  jq -e . "$settings" >/dev/null || fail "claude hook settings are not valid JSON"
+  for ev in UserPromptSubmit Stop StopFailure SessionEnd; do
+    jq -e ".hooks[\"$ev\"]" "$settings" >/dev/null || fail "claude hook settings lack $ev"
+  done
+
+  out=$(classify claude "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "seed after spawn must be 'busy fm-spawn', got '$out'"
+
+  rm -f "$state/$id.turn-ended"
+  run_claude_hook "$settings" Stop || fail "Stop hook command failed"
+  [ -f "$state/$id.turn-ended" ] || fail "Stop no longer touches the notification marker"
+  out=$(classify claude "$id" "$state")
+  [ "$out" = "idle claude-hook" ] || fail "Stop must classify 'idle claude-hook', got '$out'"
+
+  run_claude_hook "$settings" UserPromptSubmit || fail "UserPromptSubmit hook command failed"
+  out=$(classify claude "$id" "$state")
+  [ "$out" = "busy claude-hook" ] || fail "UserPromptSubmit must classify 'busy claude-hook', got '$out'"
+
+  run_claude_hook "$settings" StopFailure || fail "StopFailure hook command failed"
+  out=$(classify claude "$id" "$state")
+  [ "$out" = "idle claude-hook" ] || fail "StopFailure must classify idle so an API error cannot strand busy, got '$out'"
+
+  run_claude_hook "$settings" UserPromptSubmit
+  run_claude_hook "$settings" SessionEnd || fail "SessionEnd hook command failed"
+  out=$(classify claude "$id" "$state")
+  [ "$out" = "idle claude-hook" ] || fail "SessionEnd must classify idle, got '$out'"
+  pass "claude hooks open on UserPromptSubmit and close on Stop, StopFailure, and SessionEnd"
+}
+
+test_claude_hooks_stale_incarnation_harmless() {
+  local rec id=busy-cl-2 out state settings
+  rec=$(make_spawn_case claude-stale claude "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "claude spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  settings="$WT_DIR/.claude/settings.local.json"
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" "$id" >/dev/null
+  run_claude_hook "$settings" UserPromptSubmit \
+    || fail "a stale-gen hook must still exit 0 so Claude's lifecycle is never broken"
+  out=$(classify claude "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "a stale-gen hook event must not change state, got '$out'"
+  pass "claude hook events from a superseded incarnation are rejected without breaking the hook"
+}
+
 test_pi_extension_semantic_lifecycle
 test_pi_extension_stale_incarnation_rejected
 test_opencode_plugin_semantic_lifecycle
+test_claude_hooks_semantic_lifecycle
+test_claude_hooks_stale_incarnation_harmless
 
 echo "all fm-busy-adapter-wiring tests passed"
