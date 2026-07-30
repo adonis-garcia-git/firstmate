@@ -416,6 +416,29 @@ test_fm_lock_status_still_works_with_shared_lib() {
   pass "fm-lock: shared session-lock lib preserves the status path"
 }
 
+test_harness_identity_tolerates_dash_leading_comm() {
+  # A login shell reports its comm as "-zsh"; BSD basename without "--" parses
+  # that as flags and prints "basename: illegal option -- z" on every Stop-hook
+  # ancestry walk (issue #1280). The walk helpers must classify such a process
+  # silently: not a harness, no stderr noise.
+  local peer out rc
+  bash -c 'exec -a -zsh sleep 300' &
+  peer=$!
+  sleep 0.3
+  [ "$(ps -o comm= -p "$peer" 2>/dev/null)" = "-zsh" ] || {
+    kill "$peer" 2>/dev/null || true
+    wait "$peer" 2>/dev/null || true
+    fail "fixture process did not report a dash-leading comm"
+  }
+  out=$(bash -c '. "$1"; fm_harness_pid_alive "$2"' _ "$ROOT/bin/fm-session-lock-lib.sh" "$peer" 2>&1)
+  rc=$?
+  kill "$peer" 2>/dev/null || true
+  wait "$peer" 2>/dev/null || true
+  [ "$rc" -ne 0 ] || fail "a -zsh process was classified as a live harness"
+  [ -z "$out" ] || fail "dash-leading comm produced output/noise: $out"
+  pass "harness identity walk handles a dash-leading comm silently"
+}
+
 test_inert_in_child_worktree
 test_inert_without_session_lock
 test_reclaims_stale_session_lock_before_arming
@@ -433,3 +456,4 @@ test_need_vanished_mid_cycle_closes_quietly
 test_afk_mid_cycle_suppresses_rewake
 test_active_in_marked_secondmate_home
 test_fm_lock_status_still_works_with_shared_lib
+test_harness_identity_tolerates_dash_leading_comm
