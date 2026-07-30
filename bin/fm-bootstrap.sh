@@ -56,11 +56,9 @@
 #          tasks-axi default backend is silent. quota-axi is required for the
 #          agent-owned dispatch-profile array procedure in AGENTS.md section 4
 #          and .agents/skills/quota-array-dispatch/SKILL.md, and is also version
-#          gated at 0.1.16 - the first build that reports per-credential auth
-#          sources and Grok state.authStatus, without which a dispatch candidate
-#          cannot be scoped to its own authentication surface. An older build
-#          reports MISSING like no-mistakes rather than passing silently while
-#          emitting auth semantics the dispatch procedure cannot trust.
+#          gated by fm-quota-axi-lib.sh, which owns that floor and its rationale.
+#          An older build reports MISSING like no-mistakes rather than passing
+#          silently while emitting auth semantics dispatch cannot scope.
 #          On a primary home, the locked mutable path materializes the visible
 #          default config/startup-memory-budget=7500 when absent. It never
 #          guesses at malformed or unsafe existing files, and secondmate homes
@@ -102,6 +100,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-quota-axi-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-quota-axi-lib.sh"
 # shellcheck source=bin/fm-tangle-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
 # shellcheck source=bin/fm-ff-lib.sh disable=SC1091
@@ -536,7 +536,6 @@ if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then
 fi
 TOOLS="$BACKEND_TOOLS $COMMON_TOOLS"
 NO_MISTAKES_MIN=1.31.2
-QUOTA_AXI_MIN=0.1.16
 
 treehouse_supports_lease() {
   treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
@@ -876,7 +875,7 @@ fi
 if command -v no-mistakes >/dev/null 2>&1 && ! tool_version_at_least no-mistakes "$NO_MISTAKES_MIN"; then
   echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
 fi
-if command -v quota-axi >/dev/null 2>&1 && ! tool_version_at_least quota-axi "$QUOTA_AXI_MIN"; then
+if command -v quota-axi >/dev/null 2>&1 && ! fm_quota_axi_compatible; then
   echo "MISSING: quota-axi (install: $(install_cmd quota-axi))"
 fi
 if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then

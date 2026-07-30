@@ -43,9 +43,10 @@
 # never makes a candidate ineligible on its own - that is the whole point of the
 # captain's `dispatch-usable-auth-unknown-quota` decision.
 #
-# Requires quota-axi 0.1.16 or newer: older builds emit neither `state.authStatus`
-# nor the independent `pi:xai` source, so their data cannot scope a surface.
-# An older or missing binary is reported as unresolved rather than guessed around.
+# Requires a quota-axi at or above the floor owned by bin/fm-quota-axi-lib.sh:
+# older builds emit neither `state.authStatus` nor the independent Pi credential
+# source, so their data cannot scope a surface at all. An older or missing binary
+# is reported as unresolved rather than guessed around.
 #
 # docs/verification/dispatch-auth.md holds the dated producer-schema and vendor
 # probe evidence this script's pinned version and output patterns rest on.
@@ -60,7 +61,10 @@
 #   surface=            resolved auth source id (e.g. pi:xai, auth-json), or none
 #   authStatus=         usable | expired | unusable | unresolved (THIS surface)
 #   providerAuthStatus= quota-axi's aggregate provider authStatus, or none
-#   headroom=           effective percent remaining, or unknown
+#   headroom=           the most conservative known effective percent remaining
+#                       across the provider's scopes, or unknown. It is a
+#                       disclosure fact; the dispatch owner still reads the
+#                       applicable scope from the intake snapshot for ordering.
 #   preflight=          not-applicable | authenticated | unauthenticated |
 #                       indeterminate | timeout | unavailable
 #   probeVersion=       vendor CLI version when a probe ran, else none
@@ -88,6 +92,10 @@
 #   FM_AUTH_PREFLIGHT_TIMEOUT   hard per-command bound in seconds (default 20)
 set -u
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-quota-axi-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-quota-axi-lib.sh"
+
 VERIFIED_GROK_VERSION=0.2.112
 
 HARNESS=
@@ -100,8 +108,8 @@ usage() {
 fm-auth-preflight.sh - bounded, selected-surface authentication evidence for one
 dispatch tuple. Resolves the surface a concrete (harness, model) tuple actually
 authenticates through, reports whether that one surface is usable, and decides
-whether a captain-facing credential escalation is justified. It never selects or
-ranks a candidate, and it never launches another harness's CLI.
+whether that candidate is dispatchable. It never selects or ranks a candidate,
+and it never launches another harness's CLI.
 
 Usage:
   fm-auth-preflight.sh --harness <harness> --model <model>
@@ -118,7 +126,7 @@ probeVersionVerified, quotaRetry, eligible, reason.
 array; reach the captain only when no eligible candidate remains.
 
 Exit status: 0 when eligible=yes, 3 when eligible=no (fail closed), 2 on a usage
-error. Requires quota-axi 0.1.16 or newer.
+error. Requires a quota-axi at or above the floor in bin/fm-quota-axi-lib.sh.
 
 Environment:
   FM_AUTH_PREFLIGHT_TIMEOUT   hard per-command bound in seconds (default 20)
@@ -193,24 +201,6 @@ finish() {  # <eligible> <reason>
   emit
 }
 
-# quota-axi 0.1.16 is the floor: it is the first build that exposes
-# state.authStatus and the independent Pi credential source, which is exactly
-# what scoping a surface requires. bin/fm-bootstrap.sh owns the operator-facing
-# version diagnostic; this refusal keeps a stale binary from producing a
-# confident-looking wrong verdict in the meantime.
-quota_axi_usable() {
-  local version parts major minor patch extra
-  command -v quota-axi >/dev/null 2>&1 || return 1
-  version=$(run_timed "$TIMEOUT" quota-axi --version 2>/dev/null) || return 1
-  parts=$(printf '%s\n' "$version" | sed -nE 's/.*[vV]?([0-9]+)\.([0-9]+)\.([0-9]+).*/\1 \2 \3/p' | head -n 1)
-  IFS=' ' read -r major minor patch extra <<< "$parts"
-  [ -n "$major" ] && [ -n "$minor" ] && [ -n "$patch" ] && [ -z "$extra" ] || return 1
-  [ "$major" -gt 0 ] && return 0
-  [ "$minor" -gt 1 ] && return 0
-  [ "$minor" -eq 1 ] || return 1
-  [ "$patch" -ge 16 ]
-}
-
 # Resolve the surface from quota-axi's emitted auth sources. Prints
 # "<provider> <source-id> <status>"; a missing provider or source prints nothing
 # so the caller fails closed.
@@ -251,7 +241,12 @@ def sources_for(provider_name):
 
 
 def collapse(sources):
-    """Worst-case-honest status across the sources that ARE this surface."""
+    """Status across the sources that ARE this surface.
+
+    Any usable source means the surface authenticates, so `available` wins:
+    a harness with two working credential paths is not blocked because one of
+    them aged out. Scoping already excluded every source this tuple never reads.
+    """
     statuses = [s.get("status") for s in sources if isinstance(s, dict)]
     if not statuses:
         return None
@@ -380,8 +375,11 @@ grok_version() {
   printf '%s\n' "$output" | sed -nE 's/.*[^0-9]([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' | head -n 1 | grep . || printf 'none\n'
 }
 
-if ! quota_axi_usable; then
-  finish no quota-axi-below-0.1.16
+# bin/fm-quota-axi-lib.sh owns the floor; bootstrap turns the same check into the
+# operator-facing diagnostic. Refusing here keeps a stale binary from producing a
+# confident-looking but unscoped verdict in the meantime.
+if ! fm_quota_axi_compatible; then
+  finish no "quota-axi-below-$FM_QUOTA_AXI_MIN"
 fi
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-auth-preflight.XXXXXX") || finish no internal-error
