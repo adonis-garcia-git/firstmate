@@ -62,6 +62,13 @@ make_home() {  # <name>
   printf '%s\n' "$home"
 }
 
+record_claude_idle() {  # <state-dir> <id>
+  local state=$1 id=$2 gen
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$id")
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" idle --gen "$gen" \
+    --source claude-hook --event stop
+}
+
 write_fixture() {  # <home>
   local home=$1 fixture_gen
   mkdir -p "$home/projects/alpha-worktree" "$home/projects/scout-worktree" "$home/secondmate-home"
@@ -360,17 +367,19 @@ test_event_hints_follow_reconciled_current_state() {
     "window=firstmate:fm-active-decision" \
     "worktree=$home/projects/active-decision" \
     "project=alpha" \
-    "harness=codex" \
+    "harness=claude" \
     "kind=ship" \
     "mode=ship"
+  record_claude_idle "$home/state" active-decision
   printf 'needs-decision: choose an API shape\n' > "$home/state/active-decision.status"
   fm_write_meta "$home/state/active-blocked.meta" \
     "window=firstmate:fm-active-blocked" \
     "worktree=$home/projects/active-blocked" \
     "project=alpha" \
-    "harness=codex" \
+    "harness=claude" \
     "kind=ship" \
     "mode=ship"
+  record_claude_idle "$home/state" active-blocked
   printf 'blocked: waiting on access\n' > "$home/state/active-blocked.status"
   fm_write_meta "$home/state/stale-decision.meta" \
     "window=firstmate:fm-stale-decision-ship-task" \
@@ -459,9 +468,10 @@ EOF
     "window=firstmate:fm-bold-task" \
     "worktree=$projects/bold-worktree" \
     "project=alpha" \
-    "harness=codex" \
+    "harness=claude" \
     "kind=scout" \
     "mode=scout"
+  record_claude_idle "$home/state" bold-task
   printf 'done: report ready\n' > "$home/state/bold-task.status"
   fakebin=$(make_fakebin "$home")
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_DATA_OVERRIDE="$data" FM_PROJECTS_OVERRIDE="$projects" "$SNAPSHOT" --json)
@@ -721,9 +731,10 @@ test_completed_scout_report_is_pointer_not_pending() {
     "window=firstmate:fm-lavish-103" \
     "worktree=$home/projects/scout-wt" \
     "project=firstmate" \
-    "harness=codex" \
+    "harness=claude" \
     "kind=scout" \
     "mode=scout"
+  record_claude_idle "$home/state" lavish-103
   # Stale needs-decision, then the scout finished (done). No keyed resolution.
   printf 'needs-decision: adopt approach A or B for Lavish issue 103\n' > "$home/state/lavish-103.status"
   printf 'done: report ready at data/lavish-103/report.md\n' >> "$home/state/lavish-103.status"
@@ -752,9 +763,10 @@ test_parked_scout_decision_stays_pending() {
     "window=firstmate:fm-parked-scout" \
     "worktree=$home/projects/scout-wt2" \
     "project=firstmate" \
-    "harness=codex" \
+    "harness=claude" \
     "kind=scout" \
     "mode=scout"
+  record_claude_idle "$home/state" parked-scout
   printf 'needs-decision [key=q1]: adopt approach A or B\n' > "$home/state/parked-scout.status"
   fakebin=$(make_fakebin "$home")
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
