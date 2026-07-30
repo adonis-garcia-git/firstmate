@@ -117,7 +117,8 @@ now_ms() {
 # unclassified so new tests are still runnable and visible in summaries.
 family_for_basename() {
   case "$1" in
-    fm-arm-pretool-check.test.sh|fm-ask-user-authority.test.sh|fm-brief.test.sh|\
+    fm-arm-pretool-check.test.sh|fm-ask-user-authority.test.sh|\
+    fm-auth-preflight.test.sh|fm-brief.test.sh|\
     fm-calm-pi-extension.test.sh|fm-cd-pretool-check.test.sh|\
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
     fm-crew-state.test.sh|fm-decision-hold-lifecycle.test.sh|\
@@ -589,7 +590,7 @@ families_for_test_reference() {
 # Conservative path → family map. Over-selects rather than under-selects.
 # Never expands to the complete suite.
 families_for_changed_path() {
-  local path=$1
+  local path=$1 fixture_ref
   case "$path" in
     tests/fm-test-run.test.sh)
       printf '%s\n' pure-contract-unit
@@ -703,6 +704,18 @@ families_for_changed_path() {
     tests/lib.sh|tests/*-helpers.sh)
       families_for_test_reference "$(basename "$path")" \
         || printf '%s\n' "__unmapped__:$path"
+      ;;
+    tests/fixtures/*/*)
+      # A fixture belongs to whichever suite reads its directory, found by the
+      # same reference scan used for shared helpers. Keyed on the directory
+      # rather than the file so adding a fixture selects the same suite.
+      # A removed fixture directory has no consuming suite left to select.
+      fixture_ref=${path#tests/fixtures/}
+      fixture_ref=${fixture_ref%%/*}
+      if [ -d "tests/fixtures/$fixture_ref" ]; then
+        families_for_test_reference "fixtures/$fixture_ref" \
+          || printf '%s\n' "__unmapped__:$path"
+      fi
       ;;
     bin/*)
       families_for_test_reference "$(basename "$path")" \
