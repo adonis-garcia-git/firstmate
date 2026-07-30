@@ -434,7 +434,7 @@ fi
 [ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
 
 # The verified launch command per adapter. The knowledge half of each adapter
-# (busy signature, exit command, dialogs, quirks) lives in the harness-adapters skill.
+# (busy-state source, exit command, dialogs, quirks) lives in the harness-adapters skill.
 launch_template() {
   local harness=$1 kind=${2:-ship}
   # shellcheck disable=SC2016  # single quotes are deliberate: $(cat ...) expands in the crewmate pane, not here

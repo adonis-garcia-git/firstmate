@@ -950,8 +950,8 @@ EOF
           #   - paused: the crew declared an external wait, or a declared pause or
           #     captain hold is paired with a confidently dead agent, so absorb on
           #     the long PAUSE_RESURFACE_SECS cadence instead of wedge-escalating;
-          #   - none: no running pipeline, idle pane, no busy signature, no declared
-          #     pause - the crew has STOPPED. Surface immediately so firstmate peeks
+          #   - none: no running pipeline, no exact busy verdict, no declared pause.
+          #     Surface immediately so firstmate inspects the inconclusive state
           #     (it may be done via an interactive menu that wrote no done: status,
           #     waiting on a decision, or wedged) instead of leaving the finish to
           #     wait out the timer.

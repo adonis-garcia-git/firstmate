@@ -611,7 +611,7 @@ task_window_harness() {  # <window> <state>
   local win=$1 state=$2 task meta
   task=$(window_to_task "$win" "$state")
   meta="$state/$task.meta"
-  grep '^harness=' "$meta" | cut -d= -f2- || true
+  grep '^harness=' "$meta" 2>/dev/null | cut -d= -f2- || true
 }
 
 # stale_window_is_busy: 0 when the task is PROVABLY working through the

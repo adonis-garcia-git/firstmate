@@ -66,7 +66,7 @@
 # shellcheck source=bin/fm-composer-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-composer-lib.sh"
 
-# Busy footers per harness (mirror fm-watch.sh). claude/codex: "esc to
+# Delivery-only rendered busy footers per harness. claude/codex: "esc to
 # interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel".
 # Claude's current spinner has a rotating glyph and word, but every active-turn
 # line has an ellipsis followed by a parenthesized elapsed duration. Keep this
