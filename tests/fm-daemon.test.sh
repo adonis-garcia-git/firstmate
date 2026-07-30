@@ -25,13 +25,6 @@ TMP_ROOT=$(fm_test_tmproot fm-daemon-tests)
 FM_DAEMON_PRIMARY_HARNESS=claude
 export FM_DAEMON_PRIMARY_HARNESS
 
-arm_primary_record() {  # <state-dir> <busy|idle>
-  local state=$1 verdict=$2 gen
-  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" .primary)
-  "$ROOT/bin/fm-busy-event.sh" apply "$state" .primary "$verdict" --gen "$gen" \
-    --source claude-hook --event test
-}
-
 test_afk_start_refuses_when_flag_cannot_be_written() {
   local dir state out status
   dir=$(make_supercase afk-start-flag-unwritable)
@@ -599,7 +592,6 @@ test_escalate_batches_into_one_digest() {
   capture="$dir/pane.txt"; : > "$capture"
   escalate_add "$state" "event A: done: PR 1"
   escalate_add "$state" "event B: done: PR 2"
-  arm_primary_record "$state" idle
   afk_enter "$state"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
     FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" \
@@ -626,7 +618,6 @@ test_escalate_batch_age_uses_first_append() {
   capture="$dir/pane.txt"; : > "$capture"
   escalate_add "$state" "event A: done: PR 1"
   escalate_add "$state" "event B: done: PR 2"
-  arm_primary_record "$state" idle
   echo $(( $(date +%s) - 100 )) > "$state/.subsuper-escalations.since"
   afk_enter "$state"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
@@ -762,7 +753,6 @@ test_busy_guard_defers_when_supervisor_busy() {
   capture="$dir/pane.txt"
   printf 'esc to interrupt\n' > "$capture"
   escalate_add "$state" "done: PR 1"
-  arm_primary_record "$state" busy
   afk_enter "$state"
   if PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
     FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state"; then
@@ -1140,7 +1130,6 @@ test_max_defer_empty_swallow_types_once_and_alarms() {
   printf '╭─────╮\n│ >   │\n╰─────╯\n' > "$dir/composer"
   touch "$dir/.swallow"
   escalate_add "$state" "needs-decision: pick A"
-  arm_primary_record "$state" idle
   echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
   afk_enter "$state"
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
@@ -1162,7 +1151,6 @@ test_max_defer_flushes_empty_idle_pane() {
   sent="$dir/sent.log"; : > "$sent"
   printf '╭─────╮\n│ >   │\n╰─────╯\n' > "$dir/composer"
   escalate_add "$state" "done: PR https://x/y/pull/1"
-  arm_primary_record "$state" idle
   echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
   afk_enter "$state"
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
@@ -1180,7 +1168,6 @@ test_max_defer_pending_composer_alarms_without_typing() {
   sent="$dir/sent.log"; : > "$sent"
   printf '╭─────────────────╮\n│ > human draft   │\n╰─────────────────╯\n' > "$dir/composer"
   escalate_add "$state" "needs-decision: pick B"
-  arm_primary_record "$state" idle
   echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
   afk_enter "$state"
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
@@ -1200,7 +1187,6 @@ test_normal_flush_clears_stale_wedge_marker() {
   sent="$dir/sent.log"; : > "$sent"
   printf 'old wedge\n' > "$state/.subsuper-inject-wedged"
   escalate_add "$state" "done: PR https://x/y/pull/2"
-  arm_primary_record "$state" idle
   afk_enter "$state"
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
     FM_INJECT_CONFIRM_SLEEP=0.05 escalate_flush "$state" \
@@ -1690,30 +1676,17 @@ test_pane_is_busy_herdr_native_busy_state() {
   pass "pane_is_busy: herdr native busy_state='busy' short-circuits without a capture fallback"
 }
 
-test_primary_busy_verdict_ignores_claude_rendered_text() {
-  local dir
-  dir=$(make_supercase primary-claude-unknown)
+test_primary_busy_guard_is_harness_scoped() {
   (
     fm_backend_busy_state() { printf 'unknown'; }
-    fm_backend_capture() { fail "converted adapters must not use rendered busy text"; }
-    local verdict
-    verdict=$(FM_DAEMON_PRIMARY_HARNESS=claude primary_busy_verdict "default:w1:p2" herdr "$dir/state")
-    [ "$verdict" = "unknown missing" ] || fail "Claude rendered text must stay outside busy classification: $verdict"
-  ) || fail "Claude semantic primary verdict subshell failed"
-  pass "primary busy verdict ignores rendered text for converted adapters"
-}
-
-test_primary_busy_verdict_herdr_idle_stays_unknown() {
-  local dir
-  dir=$(make_supercase primary-herdr-idle)
-  (
-    fm_backend_busy_state() { printf 'idle'; }
-    fm_backend_capture() { fail "native idle must not trigger a rendered fallback"; }
-    local verdict
-    verdict=$(FM_DAEMON_PRIMARY_HARNESS=claude primary_busy_verdict "default:w1:p2" herdr "$dir/state")
-    [ "$verdict" = "unknown missing" ] || fail "Herdr idle must not become semantic idle: $verdict"
-  ) || fail "Herdr idle semantic verdict subshell failed"
-  pass "primary busy verdict keeps Herdr native idle unknown"
+    fm_backend_capture() { printf 'esc interrupt\n'; }
+    if FM_DAEMON_PRIMARY_HARNESS=claude pane_is_busy "default:w1:p2" herdr; then
+      fail "OpenCode's rendered signature must not classify a Claude primary busy"
+    fi
+    FM_DAEMON_PRIMARY_HARNESS=opencode pane_is_busy "default:w1:p2" herdr \
+      || fail "OpenCode's rendered signature should classify an OpenCode primary busy"
+  ) || fail "harness-scoped primary busy guard subshell failed"
+  pass "primary busy guard isolates rendered signatures by detected harness"
 }
 
 test_pane_is_busy_defaults_to_tmux_when_backend_omitted() {
@@ -1752,7 +1725,7 @@ test_inject_msg_herdr_busy_guard_defers() {
   afk_enter "$state"
   (
     fm_backend_target_exists() { [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected target_exists args: $1 $2"; return 0; }
-    primary_busy_verdict() { printf 'busy herdr-native'; }
+    pane_is_busy() { return 0; }
     fm_backend_composer_state() { fail "composer_state should not be consulted once the busy-guard already deferred"; }
     fm_backend_send_text_submit() { fail "send_text_submit should not run when the busy-guard defers"; }
     if FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state"; then
@@ -1769,7 +1742,7 @@ test_inject_msg_herdr_composer_guard_defers() {
   afk_enter "$state"
   (
     fm_backend_target_exists() { return 0; }
-    primary_busy_verdict() { printf 'idle opencode-plugin'; }
+    pane_is_busy() { return 1; }
     fm_backend_composer_state() { [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected composer_state args: $1 $2"; printf 'pending'; }
     fm_backend_send_text_submit() { fail "send_text_submit should not run when the composer-guard defers"; }
     if FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state"; then
@@ -1786,7 +1759,7 @@ test_inject_msg_herdr_pane_gone_defers() {
   afk_enter "$state"
   (
     fm_backend_target_exists() { return 1; }
-    fm_backend_busy_state() { fail "busy_state should not be consulted once the pane-exists check already failed"; }
+    pane_is_busy() { fail "busy guard should not be consulted once the pane-exists check already failed"; }
     fm_backend_send_text_submit() { fail "send_text_submit should not run when the pane does not exist"; }
     if FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:gone" inject_msg "hello" "$state"; then
       fail "inject_msg should defer when the herdr target does not exist"
@@ -1802,7 +1775,7 @@ test_inject_msg_herdr_submits_through_backend_dispatch() {
   afk_enter "$state"
   (
     fm_backend_target_exists() { return 0; }
-    primary_busy_verdict() { printf 'idle opencode-plugin'; }
+    pane_is_busy() { return 1; }
     fm_backend_composer_state() { printf 'empty'; }
     fm_backend_send_text_submit() {
       [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected send_text_submit args: $1 $2"
@@ -1813,23 +1786,6 @@ test_inject_msg_herdr_submits_through_backend_dispatch() {
       || fail "inject_msg should succeed when send_text_submit confirms empty"
   ) || fail "herdr successful-submit inject_msg subshell failed"
   pass "inject_msg: dispatches busy-guard/composer-guard/submit through the herdr backend and succeeds on a confirmed empty composer"
-}
-
-test_inject_msg_defers_on_unknown_primary_state() {
-  local dir state
-  dir=$(make_supercase inject-unknown-primary)
-  state="$dir/state"
-  afk_enter "$state"
-  (
-    fm_backend_target_exists() { return 0; }
-    primary_busy_verdict() { printf 'unknown malformed'; }
-    fm_backend_composer_state() { fail "composer_state must not be consulted without exact semantic idle"; }
-    fm_backend_send_text_submit() { fail "send_text_submit must not run without exact semantic idle"; }
-    if FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state"; then
-      fail "inject_msg should defer when primary semantic state is unknown"
-    fi
-  ) || fail "unknown-primary inject_msg subshell failed"
-  pass "inject_msg: unknown primary semantic state defers before composer access"
 }
 
 # Safety-critical (task fm-composer-shellglyph-safety): the away-mode injector
@@ -1844,7 +1800,7 @@ test_inject_msg_defers_on_dead_shell_unknown() {
   afk_enter "$state"
   (
     fm_backend_target_exists() { return 0; }
-    primary_busy_verdict() { printf 'idle claude-hook'; }
+    pane_is_busy() { return 1; }
     fm_backend_composer_state() { printf 'unknown'; }
     fm_backend_send_text_submit() { fail "send_text_submit must NOT run when the composer is a dead shell (unknown)"; }
     if FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state"; then
@@ -1861,7 +1817,7 @@ test_inject_msg_defers_on_unrecognized_composer_state() {
   afk_enter "$state"
   (
     fm_backend_target_exists() { return 0; }
-    primary_busy_verdict() { printf 'idle claude-hook'; }
+    pane_is_busy() { return 1; }
     fm_backend_composer_state() { printf 'future-state'; }
     fm_backend_send_text_submit() { fail "send_text_submit must not run for an unrecognized composer state"; }
     if FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state"; then
@@ -1961,14 +1917,12 @@ test_fm_send_exits_nonzero_on_unproven_submit
 test_discover_supervisor_backend_precedence
 test_discover_supervisor_target_herdr
 test_pane_is_busy_herdr_native_busy_state
-test_primary_busy_verdict_ignores_claude_rendered_text
-test_primary_busy_verdict_herdr_idle_stays_unknown
+test_primary_busy_guard_is_harness_scoped
 test_pane_is_busy_defaults_to_tmux_when_backend_omitted
 test_pane_input_pending_herdr_dispatch
 test_inject_msg_herdr_busy_guard_defers
 test_inject_msg_herdr_composer_guard_defers
 test_inject_msg_herdr_pane_gone_defers
 test_inject_msg_herdr_submits_through_backend_dispatch
-test_inject_msg_defers_on_unknown_primary_state
 test_inject_msg_defers_on_dead_shell_unknown
 test_inject_msg_defers_on_unrecognized_composer_state

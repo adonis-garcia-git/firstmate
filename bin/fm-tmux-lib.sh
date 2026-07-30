@@ -50,11 +50,10 @@
 # matching used here.
 #
 # NOT a task-state source: task busy state is owned by bin/fm-busy-lib.sh's
-# semantic contract. The matching below serves only the submit acknowledgement
-# (did this Enter land, or did the harness queue it mid-turn?), which is a
-# delivery question about the pane in front of us, not a claim about what the
-# worker is doing. It stays harness-scoped so one harness's output cannot make
-# another read busy.
+# semantic contract. The matching below serves only delivery guards: the submit
+# acknowledgement and the away-mode supervisor-pane busy guard. Both ask about
+# the pane receiving input, not the state of a recorded worker task. Matching
+# stays harness-scoped so one harness's output cannot make another read busy.
 #
 # All functions are `set -u` and `set -e` safe (guarded tmux calls, explicit
 # returns) so they can be sourced into either context.
