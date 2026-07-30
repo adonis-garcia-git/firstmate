@@ -671,12 +671,14 @@ if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   BEAT="$STATE/.last-watcher-beat"
   if [ -n "${FM_LOCK_HELD_PID:-}" ]; then
     if [ -e "$BEAT" ]; then
-      beat_age=$(fm_path_age "$BEAT")
+      # Awake-time age (fm_path_age_since_system_wake): a holder whose beacon
+      # merely predates a system sleep window is healthy, not wedged.
+      beat_age=$(fm_path_age_since_system_wake "$BEAT")
       if [ "$beat_age" -ge "$WATCHER_STALE_GRACE" ]; then
-        echo "watcher: lock held by live pid $FM_LOCK_HELD_PID but heartbeat is stale for ${beat_age}s (>${WATCHER_STALE_GRACE}s); inspect or stop that watcher before re-arming." >&2
+        echo "watcher: lock held by live pid $FM_LOCK_HELD_PID but heartbeat is stale for ${beat_age}s of awake time (>${WATCHER_STALE_GRACE}s); inspect or stop that watcher before re-arming." >&2
         exit 1
       fi
-    elif [ "$(fm_path_age "$WATCH_LOCK")" -ge "$WATCHER_STALE_GRACE" ]; then
+    elif [ "$(fm_path_age_since_system_wake "$WATCH_LOCK")" -ge "$WATCHER_STALE_GRACE" ]; then
       echo "watcher: lock held by live pid $FM_LOCK_HELD_PID but no heartbeat exists; inspect or stop that watcher before re-arming." >&2
       exit 1
     fi

@@ -29,7 +29,7 @@ For an in-scope primary, the guard counts in-flight work from `state/*.meta`.
 The default cross-harness mode exits silently with no work in flight.
 Claude's `--claude` mode also treats `state/x-watch.check.sh` as supervision need, so X-mode relay polling remains guarded without an in-flight task.
 Otherwise it calls `fm_watcher_healthy <state-dir> <watch-path> [grace-seconds] [home]` from `bin/fm-wake-lib.sh`, the same identity-matched lock and fresh-beacon check used by `bin/fm-watch-arm.sh`.
-A stale beacon blocks even when a watcher pid is live.
+A stale beacon blocks even when a watcher pid is live; staleness counts awake time only, so a beacon predating a system sleep window does not block after the wake (`fm_path_age_since_system_wake` in `bin/fm-wake-lib.sh`).
 A fresh leftover beacon blocks when the lock is missing, dead, or identity-mismatched.
 
 `FM_STATE_OVERRIDE` wins over `FM_HOME/state`, and `FM_HOME` wins over repository-root `state/`.

@@ -27,6 +27,8 @@ fm_sup_stat_mtime() {
 #   FM_SUP_WATCHER_FRESH  true/false - a watcher beacon within the grace window
 #   FM_SUP_BEACON_DESC    human-readable beacon age, for banners ("never" if absent)
 #   FM_SUP_QUEUE_PENDING  true/false - state/.wake-queue has unread records
+# Beacon age counts awake time only when bin/fm-wake-lib.sh is loaded: time the
+# system spent asleep before its last wake never counts against the watcher.
 # grace-seconds defaults to $FM_GUARD_GRACE, then 300, matching fm-guard.sh.
 # Always returns 0; callers read the vars, or use fm_supervision_unhealthy below.
 fm_supervision_status() {
@@ -49,7 +51,16 @@ fm_supervision_status() {
   if [ -e "$beat" ]; then
     m=$(fm_sup_stat_mtime "$beat")
     if [ -n "$m" ]; then
-      age=$(( $(date +%s) - m ))
+      # Awake-time beacon age via bin/fm-wake-lib.sh's
+      # fm_path_age_since_system_wake (the one owner of that contract) when
+      # that lib is loaded, which every production consumer of these fields
+      # does. The plain wall-clock fallback keeps this file independently
+      # sourceable.
+      if declare -F fm_path_age_since_system_wake >/dev/null; then
+        age=$(fm_path_age_since_system_wake "$beat")
+      else
+        age=$(( $(date +%s) - m ))
+      fi
       FM_SUP_BEACON_DESC="${age}s ago"
       [ "$age" -lt "$grace" ] && FM_SUP_WATCHER_FRESH=true
     else

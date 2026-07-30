@@ -1011,6 +1011,129 @@ test_msys_pid_identity_uses_proc() {
   pass "MSYS process identity uses compatible /proc fields"
 }
 
+# The 2026-07-30 false watcher-death incident: a clamshell Mac cycling ~900s
+# maintenance sleeps suspends the watcher along with everything else, so its
+# beacon reads 900s+ stale in wall-clock terms the moment each wake window
+# starts, while the watcher itself is healthy and beats seconds later. The
+# health predicate must judge beacon staleness in awake time (clamped to the
+# system's last wake), never in wall-clock time across a sleep window.
+test_watcher_healthy_ignores_pre_sleep_beacon_staleness() {
+  local dir state peer identity now
+  dir=$(make_case sleep-aware-healthy)
+  state="$dir/state"
+  sleep 300 &
+  peer=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") || fail "could not identify peer pid"
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$peer" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  # Beacon far outside the grace window in wall-clock terms.
+  touch -t 200001010000 "$state/.last-watcher-beat"
+  now=$(date +%s)
+  # System woke seconds ago: the pre-sleep beacon age must not count.
+  FM_SYSTEM_WAKE_EPOCH_OVERRIDE=$((now - 5)) FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$1"; fm_watcher_healthy "$2" "$3" 300 "$4" && [ "$FM_WATCHER_HEALTHY_PID" = "$5" ]' _ "$LIB" "$state" "$WATCH" "$dir" "$peer" \
+    || fail "live watcher was judged dead off a pre-sleep beacon age"
+  # Same beacon with no system sleep: a genuine awake hang stays unhealthy.
+  if FM_SYSTEM_WAKE_EPOCH_OVERRIDE=0 FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$1"; fm_watcher_healthy "$2" "$3" 300 "$4"' _ "$LIB" "$state" "$WATCH" "$dir"; then
+    fail "awake-stale beacon was judged healthy"
+  fi
+  # A wake even older than the beacon must change nothing.
+  if FM_SYSTEM_WAKE_EPOCH_OVERRIDE=1 FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$1"; fm_watcher_healthy "$2" "$3" 300 "$4"' _ "$LIB" "$state" "$WATCH" "$dir"; then
+    fail "a pre-beacon wake epoch resurrected a stale beacon"
+  fi
+  kill "$peer" 2>/dev/null || true
+  wait "$peer" 2>/dev/null || true
+  pass "watcher health judges beacon staleness in awake time, not across system sleep"
+}
+
+test_attached_arm_survives_system_sleep_window() {
+  local dir state fakebin armout peer identity now armpid i status
+  dir=$(make_case attach-survives-sleep)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  sleep 300 &
+  peer=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") || fail "could not identify peer pid"
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$peer" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  touch "$state/.last-watcher-beat"
+  now=$(date +%s)
+  PATH="$fakebin:$PATH" FM_SYSTEM_WAKE_EPOCH_OVERRIDE=$((now - 5)) FM_HOME="$dir" \
+    FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF "watcher: attached pid=$peer" "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=$peer" "$armout" || fail "arm did not attach to the healthy peer: $(cat "$armout")"
+  # Simulate waking from a sleep window: the beacon is now ancient in
+  # wall-clock terms while the recorded system wake stays seconds old.
+  touch -t 200001010000 "$state/.last-watcher-beat"
+  sleep 2
+  is_live_non_zombie "$armpid" || fail "attached arm declared a sleeping-system beacon dead: $(cat "$armout")"
+  ! grep -qF 'watcher: FAILED' "$armout" || fail "attached arm reported FAILED across a simulated sleep window: $(cat "$armout")"
+  # The cycle genuinely ending still fails loudly with the typed reason.
+  kill "$peer" 2>/dev/null || true
+  wait "$peer" 2>/dev/null || true
+  wait_for_exit "$armpid" 80
+  status=$?
+  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "attached arm did not fail after the peer died (status $status)"
+  grep -qF 'watcher: FAILED - cycle ended without an actionable reason' "$armout" || fail "dead-peer close lost the typed cycle-end failure"
+  pass "attached arm survives a system sleep window and still fails loudly on a genuine cycle end"
+}
+
+test_attached_arm_reports_live_holder_hang() {
+  local dir state fakebin armout peer identity armpid status i
+  dir=$(make_case attach-live-holder-hang)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  sleep 300 &
+  peer=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") || fail "could not identify peer pid"
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$peer" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  touch "$state/.last-watcher-beat"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    grep -qF "watcher: attached pid=$peer" "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -qF "watcher: attached pid=$peer" "$armout" || fail "arm did not attach to the healthy peer: $(cat "$armout")"
+  # No system sleep involved (the suite pins the wake override to 0): a live
+  # identity-matched holder whose beacon stops moving is a hang, and the FAILED
+  # reason must say so instead of claiming the cycle ended.
+  touch -t 200001010000 "$state/.last-watcher-beat"
+  wait_for_exit "$armpid" 80
+  status=$?
+  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "arm did not fail for a live holder with a frozen beacon (status $status)"
+  grep -qE "watcher: FAILED - watcher pid $peer is alive but its beacon has not moved for [0-9]+s of awake time" "$armout" \
+    || fail "live-holder hang did not print the actionable hang reason: $(cat "$armout")"
+  ! grep -qF 'watcher: FAILED - cycle ended without an actionable reason' "$armout" \
+    || fail "live-holder hang was misreported as a cycle end"
+  is_live_non_zombie "$peer" || fail "arm killed the hung holder instead of reporting it"
+  kill "$peer" 2>/dev/null || true
+  wait "$peer" 2>/dev/null || true
+  pass "attached arm reports a live hung holder with an actionable reason"
+}
+
 test_singleton_start
 test_pid_identity_is_locale_invariant
 test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse
@@ -1039,3 +1162,6 @@ test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_cycle_exit_ledger_links_successor_and_stays_bounded
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified
+test_watcher_healthy_ignores_pre_sleep_beacon_staleness
+test_attached_arm_survives_system_sleep_window
+test_attached_arm_reports_live_holder_hang

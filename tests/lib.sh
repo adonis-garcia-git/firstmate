@@ -34,6 +34,15 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+# Pin watcher-liveness math to "the system never slept" (bin/fm-wake-lib.sh
+# fm_system_wake_epoch). Beacon-staleness tests backdate mtimes to simulate a
+# hung-while-awake watcher; on a host that recently woke from a real sleep
+# (e.g. a clamshell laptop dark-waking every ~15 minutes), the live
+# kern.waketime read would clamp those backdated ages to seconds and flip the
+# expected verdicts. Sleep-aware tests override this per invocation with an
+# explicit epoch.
+export FM_SYSTEM_WAKE_EPOCH_OVERRIDE=0
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034

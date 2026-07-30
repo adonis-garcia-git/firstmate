@@ -66,6 +66,31 @@ test_predicate_healthy_fresh_beacon() {
   pass "fm_supervision_unhealthy: false with in-flight task and a fresh beacon"
 }
 
+test_predicate_beacon_freshness_is_sleep_aware() {
+  # With bin/fm-wake-lib.sh loaded (as every production consumer loads it), a
+  # beacon that is only stale because the system slept reads fresh after the
+  # wake, while a genuinely awake-stale beacon stays unfresh (the 2026-07-30
+  # false watcher-death incident).
+  local state="$TMP_ROOT/pred-sleep-aware/state" now
+  mkdir -p "$state"
+  : > "$state/task1.meta"
+  touch -t 202001010000 "$state/.last-watcher-beat"
+  now=$(date +%s)
+  FM_STATE_OVERRIDE="$state" FM_SYSTEM_WAKE_EPOCH_OVERRIDE=$((now - 5)) bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    . "$1/bin/fm-supervision-lib.sh"
+    fm_supervision_status "$2" 300
+    [ "$FM_SUP_WATCHER_FRESH" = true ]
+  ' _ "$ROOT" "$state" || fail "a pre-sleep beacon age counted against the watcher after a system wake"
+  FM_STATE_OVERRIDE="$state" FM_SYSTEM_WAKE_EPOCH_OVERRIDE=0 bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    . "$1/bin/fm-supervision-lib.sh"
+    fm_supervision_status "$2" 300
+    [ "$FM_SUP_WATCHER_FRESH" = false ]
+  ' _ "$ROOT" "$state" || fail "an awake-stale beacon read as fresh"
+  pass "fm_supervision_status: beacon freshness counts awake time only"
+}
+
 test_predicate_queue_pending_flag() {
   local state="$TMP_ROOT/pred-queue/state"
   mkdir -p "$state"
@@ -1108,6 +1133,7 @@ test_predicate_healthy_no_inflight
 test_predicate_unhealthy_no_beacon
 test_predicate_unhealthy_stale_beacon
 test_predicate_healthy_fresh_beacon
+test_predicate_beacon_freshness_is_sleep_aware
 test_predicate_queue_pending_flag
 test_predicate_x_mode_needs_supervision
 test_hook_silent_when_no_work_in_flight

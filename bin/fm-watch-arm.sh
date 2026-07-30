@@ -32,6 +32,15 @@
 #   watcher: FAILED - cycle ended without an actionable reason
 #                                                        - a clean cycle ended with no wake and no
 #                                                          verified healthy successor
+#   watcher: FAILED - watcher pid <N> is alive but its beacon has not moved ...
+#                                                        - the holder never ended its cycle; it
+#                                                          stopped beating while the system was
+#                                                          awake, so inspect it as a possible hang
+# Beacon freshness is judged in AWAKE time (fm_path_age_since_system_wake in
+# bin/fm-wake-lib.sh): time the system spent asleep before its last wake never
+# counts against the watcher, so a clamshell sleep cycle cannot read as a death.
+# The lifecycle ledger's beacon_age field stays wall-clock on purpose - raw
+# evidence that lets a reader correlate cycles with system sleep windows.
 # It NEVER reports started/attached/healthy off a stale beacon or a dead/reused pid: a
 # stale-beacon or dead-pid holder either self-heals (the fresh child steals the
 # dead lock per the singleton self-eviction/steal path and is confirmed) or this
@@ -237,7 +246,9 @@ healthy_watcher() {
 
 report_attached() {
   local age
-  age=$(fm_path_age "$BEAT")
+  # The same awake-time age the health predicate just judged, so this line can
+  # never print a wall-clock age past the grace it claims to have verified.
+  age=$(fm_path_age_since_system_wake "$BEAT")
   echo "watcher: attached pid=$HEALTHY_PID (beacon ${age}s)"
 }
 
@@ -257,7 +268,18 @@ wait_for_healthy_successor() {
 }
 
 fail_unexplained_cycle() {
-  echo "watcher: FAILED - cycle ended without an actionable reason"
+  local pid age
+  # Distinguish the two honest failure shapes so the printed reason is
+  # actionable: a lock holder that is still alive and identity-matched did NOT
+  # end its cycle - it stopped beating while the system was awake, which is a
+  # hang to inspect, not a silent death to re-arm past.
+  pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
+  if fm_pid_alive "$pid" && fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$pid" "$FM_HOME"; then
+    age=$(fm_path_age_since_system_wake "$BEAT")
+    echo "watcher: FAILED - watcher pid $pid is alive but its beacon has not moved for ${age}s of awake time; inspect or stop that watcher (possible hang)"
+  else
+    echo "watcher: FAILED - cycle ended without an actionable reason"
+  fi
   return 1
 }
 
