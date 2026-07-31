@@ -45,7 +45,7 @@ When the failed health check still shows a live identity-matched lock holder, th
 Beacon staleness is judged in awake time: time the system spent asleep before its last wake never counts against the watcher (`fm_path_age_since_system_wake` in `bin/fm-wake-lib.sh` owns that contract), so a clamshell sleep cycle cannot read as a watcher death.
 
 The arm layer appends one tab-separated record per observed cycle to `state/.watch-cycle-exits.log`.
-Each record includes arm and watcher PIDs, start and end timestamps, exit code and signal, classified reason, beacon age, lock identity before and after close, and successor disposition.
+Each record includes arm and watcher PIDs, start and end timestamps, exit code and signal, classified reason, beacon age (deliberately wall-clock, so rows can be correlated with system sleep windows), lock identity before and after close, and successor disposition.
 The file is size-capped through `FM_WATCH_CYCLE_LOG_MAX_BYTES` and `FM_WATCH_CYCLE_LOG_KEEP_LINES`.
 `state/.watch-triage.log` remains only the watcher's bounded absorbed-wake debug log and carries no lifecycle semantics.
 
