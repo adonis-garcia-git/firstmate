@@ -28,6 +28,10 @@ Observed source statuses are `available`, `expired` (with an `error` slug), and 
 Neither field exists before 0.1.16, so a surface cannot be scoped on an older build.
 `bin/fm-bootstrap.sh` enforces that floor and `bin/fm-auth-preflight.sh` refuses rather than emitting an unscoped verdict.
 
+OpenCode is a verified harness, but this producer schema does not model the selected OpenCode credential surface.
+When its model has a valid provider/model relationship, the preflight emits `authStatus=unknown`, `headroom=unknown`, `reason=no-auth-evidence`, and `eligible=yes` without selecting a quota provider or probing another harness.
+Malformed OpenCode model relationships and unverified harnesses remain ineligible.
+
 Grok also reports `credits.remaining: 0` alongside `percentRemaining: 42` on a healthy account.
 That zero is a prepaid balance, not the subscription window, and is never headroom.
 

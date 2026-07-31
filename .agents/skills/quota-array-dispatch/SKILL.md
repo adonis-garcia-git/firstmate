@@ -39,6 +39,7 @@ A candidate authenticates through its own tuple's surface; another harness's CLI
 Run it per candidate instead of resolving a surface by hand or launching a vendor CLI yourself.
 Read its verdict as facts, not as a route: `eligible=no` means drop that candidate and state the omission with its reason, and only an array with no eligible candidate left reaches the captain.
 `authStatus=usable` with `headroom=unknown` means authentication is fine and headroom is unmeasured, never a credential or login problem.
+`authStatus=unknown` with `reason=no-auth-evidence` means a verified harness/model relationship has no quota-axi authentication surface; keep it eligible with unknown auth and headroom, do not launch another harness's CLI, and prefer known sustainable evidence when comparable.
 `authStatus=expired` is a short-lived session token the owning vendor renews on next use, not a sign-out.
 Reserve login wording for `authStatus=unusable` or a failed preflight.
 

@@ -529,8 +529,8 @@ test_fixtures_are_nonsecret() {
 
 test_unknown_harness_is_unresolved() {
   local line
-  run_preflight unknown-harness opencode anthropic/claude-opus-5 \
-    "FM_FAKE_AUTH_DOC=$FIXTURES/auth-grok-cli-and-pi-available.json" \
+  run_preflight unknown-harness unverified anthropic/claude-opus-5 \
+    "FM_FAKE_AUTH_DOC=$FIXTURES/auth-other-providers.json" \
     "FM_FAKE_QUOTA_DOC=$FIXTURES/quota-grok-fresh.json"
   line=$RUN_LINE
   expect_code 3 "$RUN_RC" "a harness with no modelled auth surface must fail closed"
@@ -538,6 +538,41 @@ test_unknown_harness_is_unresolved() {
   assert_field "$line" reason surface-unresolved "the verdict must name the unresolved surface"
   assert_grok_never_ran "unknown harness case"
   pass "a harness with no modelled authentication surface is unresolved rather than guessed"
+}
+
+test_opencode_without_auth_surface_stays_eligible() {
+  local line reads
+  run_preflight opencode-no-auth-evidence opencode anthropic/claude-opus-5 \
+    "FM_FAKE_AUTH_DOC=$FIXTURES/auth-other-providers.json" \
+    "FM_FAKE_QUOTA_DOC=$FIXTURES/quota-grok-fresh.json"
+  line=$RUN_LINE
+  expect_code 0 "$RUN_RC" "a verified OpenCode tuple without a quota surface stays eligible"
+  assert_field "$line" provider none "OpenCode must not guess a quota provider"
+  assert_field "$line" surface none "OpenCode must disclose no selected auth surface"
+  assert_field "$line" authStatus unknown "OpenCode auth evidence is unknown, not usable"
+  assert_field "$line" providerAuthStatus none "OpenCode must not claim provider auth status"
+  assert_field "$line" headroom unknown "OpenCode headroom is unmeasured"
+  assert_field "$line" preflight not-applicable "OpenCode has no registered vendor probe"
+  assert_field "$line" quotaRetry none "OpenCode has no quota provider to retry"
+  assert_field "$line" eligible yes "missing OpenCode auth evidence must not drop a verified tuple"
+  assert_field "$line" reason no-auth-evidence "the no-evidence condition must be explicit"
+  assert_grok_never_ran "OpenCode no-auth-evidence case"
+  reads=$(quota_reads)
+  [ "$reads" -eq 0 ] || fail "OpenCode must not read a guessed quota provider, got $reads reads"
+  pass "a verified OpenCode tuple stays eligible with explicit unknown auth evidence"
+}
+
+test_opencode_malformed_model_relationship_is_unresolved() {
+  local line
+  run_preflight opencode-malformed opencode claude-opus-5 \
+    "FM_FAKE_AUTH_DOC=$FIXTURES/auth-other-providers.json" \
+    "FM_FAKE_QUOTA_DOC=$FIXTURES/quota-grok-fresh.json"
+  line=$RUN_LINE
+  expect_code 3 "$RUN_RC" "an OpenCode model without a provider must fail closed"
+  assert_field "$line" authStatus unresolved "a malformed OpenCode relationship is unresolved"
+  assert_field "$line" reason surface-unresolved "the malformed relationship must be named"
+  assert_grok_never_ran "malformed OpenCode relationship case"
+  pass "a malformed OpenCode provider/model relationship remains ineligible"
 }
 
 test_absent_provider_is_unresolved() {
@@ -650,6 +685,8 @@ test_quota_axi_is_only_ever_read
 test_verdict_line_carries_no_credential_material
 test_fixtures_are_nonsecret
 test_unknown_harness_is_unresolved
+test_opencode_without_auth_surface_stays_eligible
+test_opencode_malformed_model_relationship_is_unresolved
 test_absent_provider_is_unresolved
 test_hanging_quota_axi_version_is_bounded
 test_pi_model_without_provider_prefix_is_unresolved

@@ -23,6 +23,8 @@
 #   harness=claude          -> the claude provider's own non-Pi sources
 #   harness=codex           -> the codex provider's own non-Pi sources
 #   harness=kimi            -> the kimi provider's own non-Pi sources
+#   verified harnesses without a quota-axi surface
+#                          -> explicit no-auth-evidence with unknown auth/headroom
 #   anything else           -> unresolved (quota-axi models no such provider)
 # The quota provider is whichever provider actually lists that source, so the
 # mapping cannot drift from what the tool emits.
@@ -60,7 +62,7 @@
 #   model=              the requested model
 #   provider=           quota-axi provider owning the resolved surface, or none
 #   surface=            resolved auth source id (e.g. pi:xai, auth-json), or none
-#   authStatus=         usable | expired | unusable | unresolved (THIS surface)
+#   authStatus=         usable | expired | unusable | unknown | unresolved (THIS surface)
 #   providerAuthStatus= quota-axi's aggregate provider authStatus, or none
 #   headroom=           the most conservative known effective percent remaining
 #                       across the provider's scopes, or unknown when any
@@ -238,6 +240,15 @@ const ownStore = {
   codex: "codex",
   kimi: "kimi",
 };
+const verifiedHarnesses = new Set([
+  "claude",
+  "codex",
+  "opencode",
+  "pi",
+  "pi-signed",
+  "grok",
+  "kimi",
+]);
 
 function sourcesFor(providerName) {
   for (const entry of entries) {
@@ -278,6 +289,13 @@ if (harness === "pi" || harness === "pi-signed") {
     process.exit(0);
   }
   fail();
+}
+
+if (!Object.prototype.hasOwnProperty.call(ownStore, harness) && verifiedHarnesses.has(harness)) {
+  const separator = model.indexOf("/");
+  if (separator <= 0 || separator === model.length - 1) fail();
+  console.log("none none unknown");
+  process.exit(0);
 }
 
 const providerName = ownStore[harness];
@@ -401,6 +419,8 @@ if ! resolved=$(resolve_surface "$TMP/auth.json" "$HARNESS" "$MODEL"); then
   finish no surface-unresolved
 fi
 read -r PROVIDER SURFACE AUTH_STATUS <<< "$resolved"
+[ "$AUTH_STATUS" = unknown ] && [ "$PROVIDER" = none ] && [ "$SURFACE" = none ] \
+  && finish yes no-auth-evidence
 [ -n "$PROVIDER" ] && [ -n "$SURFACE" ] && [ -n "$AUTH_STATUS" ] || finish no surface-unresolved
 
 if [ -n "$QUOTA_JSON" ]; then
