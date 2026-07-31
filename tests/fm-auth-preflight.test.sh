@@ -22,6 +22,7 @@ BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-auth-preflight-tests)
 FIXTURES="$ROOT/tests/fixtures/auth-preflight"
 SCRIPT="$ROOT/bin/fm-auth-preflight.sh"
+NODE_BIN=$(command -v node 2>/dev/null) || fail "tests require node because it is a common runtime tool"
 
 # A stdin payload the script must never leak into a probed vendor CLI.
 STDIN_SENTINEL='SENTINEL-STDIN-MUST-NOT-REACH-VENDOR-CLI'
@@ -34,10 +35,17 @@ STDIN_SENTINEL='SENTINEL-STDIN-MUST-NOT-REACH-VENDOR-CLI'
 make_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
+  ln -s "$NODE_BIN" "$fakebin/node"
+  cat > "$fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+exit 125
+SH
+  chmod +x "$fakebin/python3"
   cat > "$fakebin/quota-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_FAKE_QUOTA_LOG"
 if [ "${1:-}" = --version ]; then
+  [ "${FM_FAKE_QUOTA_AXI_VERSION_HANG:-}" = 1 ] && sleep 30
   printf '%s\n' "${FM_FAKE_QUOTA_AXI_VERSION:-0.1.16}"
   exit 0
 fi
@@ -537,6 +545,23 @@ test_stale_quota_axi_refuses_rather_than_guessing() {
   pass "a quota-axi below the 0.1.16 floor refuses instead of emitting an unscoped verdict"
 }
 
+test_hanging_quota_axi_version_is_bounded() {
+  local line started finished
+  started=$(date +%s)
+  run_preflight quota-version-hang pi xai/grok-4.5 \
+    "FM_FAKE_AUTH_DOC=$FIXTURES/auth-grok-cli-and-pi-available.json" \
+    "FM_FAKE_QUOTA_DOC=$FIXTURES/quota-grok-fresh.json" \
+    "FM_FAKE_QUOTA_AXI_VERSION_HANG=1" \
+    "FM_AUTH_PREFLIGHT_TIMEOUT=2"
+  line=$RUN_LINE
+  finished=$(date +%s)
+  expect_code 3 "$RUN_RC" "a hanging quota-axi version check must fail closed"
+  assert_field "$line" reason quota-axi-below-0.1.16 "a failed version check must not emit a candidate verdict"
+  [ $((finished - started)) -lt 25 ] \
+    || fail "the quota-axi version check was not bounded: took $((finished - started))s against a 2s bound"
+  pass "a hanging quota-axi version check is hard-bounded before the preflight verdict"
+}
+
 test_usage_errors_are_distinct_from_verdicts() {
   local rc=0
   "$SCRIPT" --harness grok >/dev/null 2>&1 || rc=$?
@@ -588,6 +613,7 @@ test_verdict_line_carries_no_credential_material
 test_fixtures_are_nonsecret
 test_unknown_harness_is_unresolved
 test_absent_provider_is_unresolved
+test_hanging_quota_axi_version_is_bounded
 test_pi_model_without_provider_prefix_is_unresolved
 test_stale_quota_axi_refuses_rather_than_guessing
 test_usage_errors_are_distinct_from_verdicts

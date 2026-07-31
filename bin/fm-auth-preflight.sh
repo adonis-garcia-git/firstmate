@@ -205,145 +205,145 @@ finish() {  # <eligible> <reason>
 # "<provider> <source-id> <status>"; a missing provider or source prints nothing
 # so the caller fails closed.
 resolve_surface() {  # <auth-json-path> <harness> <model>
-  python3 - "$@" <<'PY'
-import json
-import sys
+  node - "$@" <<'NODE'
+const fs = require("fs");
 
-path, harness, model = sys.argv[1:4]
+const args = process.argv.slice(1);
+if (args[0] === "-") args.shift();
+const [path, harness, model] = args;
 
-try:
-    with open(path, encoding="utf-8") as handle:
-        document = json.load(handle)
-except (OSError, ValueError):
-    raise SystemExit(1)
-
-entries = document.get("auth")
-if not isinstance(entries, list):
-    raise SystemExit(1)
-
-# harness -> quota-axi provider for harnesses that own their own credential
-# store. Pi is deliberately absent: it is multi-provider, so its surface is
-# resolved from the model's provider prefix instead.
-OWN_STORE = {
-    "grok": "grok",
-    "claude": "claude",
-    "codex": "codex",
-    "kimi": "kimi",
+function isObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+function fail() {
+  process.exit(1);
+}
 
-def sources_for(provider_name):
-    for entry in entries:
-        if entry.get("provider") == provider_name:
-            found = entry.get("sources")
-            return found if isinstance(found, list) else []
-    return None
+let document;
+try {
+  document = JSON.parse(fs.readFileSync(path, "utf8"));
+} catch (error) {
+  fail();
+}
 
+const entries = document && document.auth;
+if (!Array.isArray(entries)) fail();
 
-def collapse(sources):
-    """Status across the sources that ARE this surface.
+const ownStore = {
+  grok: "grok",
+  claude: "claude",
+  codex: "codex",
+  kimi: "kimi",
+};
 
-    Any usable source means the surface authenticates, so `available` wins:
-    a harness with two working credential paths is not blocked because one of
-    them aged out. Scoping already excluded every source this tuple never reads.
-    """
-    statuses = [s.get("status") for s in sources if isinstance(s, dict)]
-    if not statuses:
-        return None
-    if "available" in statuses:
-        return "usable"
-    if "expired" in statuses:
-        return "expired"
-    if "missing" in statuses:
-        return "unusable"
-    return None
+function sourcesFor(providerName) {
+  for (const entry of entries) {
+    if (isObject(entry) && entry.provider === providerName) {
+      return Array.isArray(entry.sources) ? entry.sources : [];
+    }
+  }
+  return null;
+}
 
+function collapse(sources) {
+  const statuses = sources
+    .filter((source) => isObject(source))
+    .map((source) => source.status);
+  if (statuses.length === 0) return null;
+  if (statuses.includes("available")) return "usable";
+  if (statuses.includes("expired")) return "expired";
+  if (statuses.includes("missing")) return "unusable";
+  return null;
+}
 
-if harness in ("pi", "pi-signed"):
-    prefix = model.split("/", 1)[0] if "/" in model else ""
-    if not prefix:
-        raise SystemExit(1)
-    source_id = "pi:" + prefix
-    for entry in entries:
-        provider_name = entry.get("provider")
-        sources = entry.get("sources")
-        if not isinstance(sources, list):
-            continue
-        scoped = [s for s in sources if isinstance(s, dict) and s.get("source") == source_id]
-        if not scoped:
-            continue
-        status = collapse(scoped)
-        if status is None:
-            raise SystemExit(1)
-        print(provider_name, source_id, status)
-        raise SystemExit(0)
-    raise SystemExit(1)
+if (harness === "pi" || harness === "pi-signed") {
+  const separator = model.indexOf("/");
+  const prefix = separator >= 0 ? model.slice(0, separator) : "";
+  if (!prefix) fail();
+  const sourceId = `pi:${prefix}`;
+  for (const entry of entries) {
+    if (!isObject(entry) || typeof entry.provider !== "string" || !Array.isArray(entry.sources)) {
+      continue;
+    }
+    const scoped = entry.sources.filter(
+      (source) => isObject(source) && source.source === sourceId,
+    );
+    if (scoped.length === 0) continue;
+    const status = collapse(scoped);
+    if (status === null) fail();
+    console.log(entry.provider, sourceId, status);
+    process.exit(0);
+  }
+  fail();
+}
 
-provider_name = OWN_STORE.get(harness)
-if provider_name is None:
-    raise SystemExit(1)
-sources = sources_for(provider_name)
-if not sources:
-    raise SystemExit(1)
-# The harness's own store is every source that is not another agent's borrowed
-# credential, so a Pi-owned entry can never stand in for the harness's own login.
-scoped = [s for s in sources if isinstance(s, dict) and not str(s.get("source", "")).startswith("pi:")]
-if not scoped:
-    raise SystemExit(1)
-status = collapse(scoped)
-if status is None:
-    raise SystemExit(1)
-print(provider_name, ",".join(str(s.get("source")) for s in scoped), status)
-PY
+const providerName = ownStore[harness];
+if (!providerName) fail();
+const sources = sourcesFor(providerName);
+if (!sources || sources.length === 0) fail();
+const scoped = sources.filter(
+  (source) => isObject(source) && typeof source.source === "string" && !source.source.startsWith("pi:"),
+);
+if (scoped.length === 0) fail();
+const status = collapse(scoped);
+if (status === null) fail();
+console.log(providerName, scoped.map((source) => source.source).join(","), status);
+NODE
 }
 
 # Print "<providerAuthStatus> <headroom>" from a quota document. Both fall back
 # to "none"/"unknown" rather than being invented.
 read_quota() {  # <quota-json-path> <provider>
-  python3 - "$@" <<'PY'
-import json
-import sys
+  node - "$@" <<'NODE'
+const fs = require("fs");
 
-path, provider_name = sys.argv[1:3]
+const args = process.argv.slice(1);
+if (args[0] === "-") args.shift();
+const [path, providerName] = args;
 
-try:
-    with open(path, encoding="utf-8") as handle:
-        document = json.load(handle)
-except (OSError, ValueError):
-    print("none unknown")
-    raise SystemExit(0)
+function isObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
 
-providers = document.get("providers")
-if not isinstance(providers, list):
-    print("none unknown")
-    raise SystemExit(0)
+let document;
+try {
+  document = JSON.parse(fs.readFileSync(path, "utf8"));
+} catch (error) {
+  console.log("none unknown");
+  process.exit(0);
+}
 
-auth_status = "none"
-headroom = "unknown"
-for entry in providers:
-    if not isinstance(entry, dict) or entry.get("provider") != provider_name:
-        continue
-    state = entry.get("state")
-    if isinstance(state, dict) and isinstance(state.get("authStatus"), str):
-        auth_status = state["authStatus"]
-    semantics = entry.get("quotaSemantics")
-    if isinstance(semantics, dict):
-        available = semantics.get("effectiveAvailability")
-        if isinstance(available, list):
-            # A stale or unknown scope is diagnostic, never headroom.
-            known = [
-                scope.get("effectivePercentRemaining")
-                for scope in available
-                if isinstance(scope, dict)
-                and scope.get("status") == "known"
-                and isinstance(scope.get("effectivePercentRemaining"), (int, float))
-            ]
-            if known:
-                headroom = str(int(min(known)))
-    break
+const providers = document && document.providers;
+if (!Array.isArray(providers)) {
+  console.log("none unknown");
+  process.exit(0);
+}
 
-print(auth_status, headroom)
-PY
+let authStatus = "none";
+let headroom = "unknown";
+for (const entry of providers) {
+  if (!isObject(entry) || entry.provider !== providerName) continue;
+  if (isObject(entry.state) && typeof entry.state.authStatus === "string") {
+    authStatus = entry.state.authStatus;
+  }
+  if (isObject(entry.quotaSemantics) && Array.isArray(entry.quotaSemantics.effectiveAvailability)) {
+    const known = entry.quotaSemantics.effectiveAvailability
+      .filter(
+        (scope) =>
+          isObject(scope) &&
+          scope.status === "known" &&
+          typeof scope.effectivePercentRemaining === "number" &&
+          Number.isFinite(scope.effectivePercentRemaining),
+      )
+      .map((scope) => scope.effectivePercentRemaining);
+    if (known.length > 0) headroom = String(Math.trunc(Math.min(...known)));
+  }
+  break;
+}
+
+console.log(authStatus, headroom);
+NODE
 }
 
 # One bounded, non-interactive probe of the tuple's own vendor CLI. The argv is
@@ -378,7 +378,7 @@ grok_version() {
 # bin/fm-quota-axi-lib.sh owns the floor; bootstrap turns the same check into the
 # operator-facing diagnostic. Refusing here keeps a stale binary from producing a
 # confident-looking but unscoped verdict in the meantime.
-if ! fm_quota_axi_compatible; then
+if ! fm_quota_axi_compatible "$TIMEOUT"; then
   finish no "quota-axi-below-$FM_QUOTA_AXI_MIN"
 fi
 

@@ -15,10 +15,25 @@
 FM_QUOTA_AXI_MIN=0.1.16
 
 fm_quota_axi_compatible() {
-  local output parts major minor patch extra
+  local timeout=${1:-} output parts major minor patch extra
   local min_major min_minor min_patch min_extra
   command -v quota-axi >/dev/null 2>&1 || return 1
-  output=$(quota-axi --version 2>/dev/null) || return 1
+  if [ -n "$timeout" ]; then
+    case "$timeout" in
+      ''|*[!0-9]*|0) return 1 ;;
+    esac
+    if command -v timeout >/dev/null 2>&1; then
+      output=$(timeout "$timeout" quota-axi --version 2>/dev/null </dev/null) || return 1
+    elif command -v gtimeout >/dev/null 2>&1; then
+      output=$(gtimeout "$timeout" quota-axi --version 2>/dev/null </dev/null) || return 1
+    elif command -v perl >/dev/null 2>&1; then
+      output=$(perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$timeout" quota-axi --version 2>/dev/null </dev/null) || return 1
+    else
+      return 1
+    fi
+  else
+    output=$(quota-axi --version 2>/dev/null </dev/null) || return 1
+  fi
   parts=$(printf '%s\n' "$output" |
     sed -n 's/.*\([0-9][0-9]*\)\.\([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\1 \2 \3/p' |
     head -1)
