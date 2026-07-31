@@ -7,6 +7,15 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-pi-watch-extension)
 EXT="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
+# Both watch extensions spawn arm children through "bash -lc", so every spawn
+# sources $HOME's login profile. Point HOME at an empty hermetic dir: a
+# developer profile that takes longer than an arm-readiness budget (e.g.
+# FM_PI_ARM_READY_TIMEOUT_MS=250 in the hung-successor tests, vs ~1s for a
+# typical nvm-loading profile) otherwise gets the successor retired before its
+# first line of output, failing the suite on that machine only. Nothing in
+# this suite reads the real HOME.
+HOME=$(mktemp -d "$TMP_ROOT/hermetic-home.XXXXXX")
+export HOME
 # Node 24 warns when these test-only dynamic imports load tracked ESM plugins
 # from a clean checkout with no tracked .opencode/package.json. The warning is
 # unrelated to plugin output, which the assertions intentionally require empty.
