@@ -562,17 +562,27 @@ test_opencode_without_auth_surface_stays_eligible() {
   pass "a verified OpenCode tuple stays eligible with explicit unknown auth evidence"
 }
 
-test_opencode_malformed_model_relationship_is_unresolved() {
-  local line
-  run_preflight opencode-malformed opencode claude-opus-5 \
-    "FM_FAKE_AUTH_DOC=$FIXTURES/auth-other-providers.json" \
-    "FM_FAKE_QUOTA_DOC=$FIXTURES/quota-grok-fresh.json"
-  line=$RUN_LINE
-  expect_code 3 "$RUN_RC" "an OpenCode model without a provider must fail closed"
-  assert_field "$line" authStatus unresolved "a malformed OpenCode relationship is unresolved"
-  assert_field "$line" reason surface-unresolved "the malformed relationship must be named"
-  assert_grok_never_ran "malformed OpenCode relationship case"
-  pass "a malformed OpenCode provider/model relationship remains ineligible"
+test_opencode_malformed_model_relationships_are_unresolved() {
+  local line label model
+  for label in empty-provider whitespace-provider empty-model whitespace-model extra-separator; do
+    case "$label" in
+      empty-provider) model='/claude-opus-5' ;;
+      whitespace-provider) model='   /claude-opus-5' ;;
+      empty-model) model='anthropic/' ;;
+      whitespace-model) model='anthropic/   ' ;;
+      extra-separator) model='anthropic//claude-opus-5' ;;
+    esac
+    run_preflight "opencode-malformed-$label" opencode "$model" \
+      "FM_FAKE_AUTH_DOC=$FIXTURES/auth-other-providers.json" \
+      "FM_FAKE_QUOTA_DOC=$FIXTURES/quota-grok-fresh.json"
+    line=$RUN_LINE
+    expect_code 3 "$RUN_RC" "an OpenCode $label relationship must fail closed"
+    assert_field "$line" authStatus unresolved "an OpenCode $label relationship is unresolved"
+    assert_field "$line" reason surface-unresolved "the OpenCode $label relationship must be named"
+    assert_grok_never_ran "malformed OpenCode $label relationship case"
+    [ "$(quota_reads)" -eq 0 ] || fail "malformed OpenCode $label relationship must not read quota"
+  done
+  pass "malformed OpenCode provider/model relationships remain ineligible"
 }
 
 test_absent_provider_is_unresolved() {
@@ -686,7 +696,7 @@ test_verdict_line_carries_no_credential_material
 test_fixtures_are_nonsecret
 test_unknown_harness_is_unresolved
 test_opencode_without_auth_surface_stays_eligible
-test_opencode_malformed_model_relationship_is_unresolved
+test_opencode_malformed_model_relationships_are_unresolved
 test_absent_provider_is_unresolved
 test_hanging_quota_axi_version_is_bounded
 test_pi_model_without_provider_prefix_is_unresolved

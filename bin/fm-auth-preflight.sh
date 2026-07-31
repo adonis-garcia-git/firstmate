@@ -292,8 +292,8 @@ if (harness === "pi" || harness === "pi-signed") {
 }
 
 if (!Object.prototype.hasOwnProperty.call(ownStore, harness) && verifiedHarnesses.has(harness)) {
-  const separator = model.indexOf("/");
-  if (separator <= 0 || separator === model.length - 1) fail();
+  const parts = model.split("/");
+  if (parts.length !== 2 || parts.some((part) => part.trim() === "")) fail();
   console.log("none none unknown");
   process.exit(0);
 }
