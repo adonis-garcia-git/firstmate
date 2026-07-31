@@ -39,9 +39,10 @@
 # interactive TUI are never invoked; the probe argv is fixed, not caller-supplied.
 #
 # Quota is read at most twice: once from the caller's intake snapshot or a first
-# read, then exactly one retry when headroom is still unknown. Unknown headroom
-# never makes a candidate ineligible on its own - that is the whole point of the
-# captain's `dispatch-usable-auth-unknown-quota` decision.
+# read, then exactly one retry after the selected-surface preflight for every
+# resolved candidate. Any unknown applicable scope makes headroom unknown, and
+# unknown headroom never makes a candidate ineligible on its own - that is the
+# whole point of the captain's `dispatch-usable-auth-unknown-quota` decision.
 #
 # Requires a quota-axi at or above the floor owned by bin/fm-quota-axi-lib.sh:
 # older builds emit neither `state.authStatus` nor the independent Pi credential
@@ -62,9 +63,10 @@
 #   authStatus=         usable | expired | unusable | unresolved (THIS surface)
 #   providerAuthStatus= quota-axi's aggregate provider authStatus, or none
 #   headroom=           the most conservative known effective percent remaining
-#                       across the provider's scopes, or unknown. It is a
-#                       disclosure fact; the dispatch owner still reads the
-#                       applicable scope from the intake snapshot for ordering.
+#                       across the provider's scopes, or unknown when any
+#                       applicable scope is unknown. It is a disclosure fact;
+#                       the dispatch owner still reads the applicable scope from
+#                       the intake snapshot for ordering.
 #   preflight=          not-applicable | authenticated | unauthenticated |
 #                       indeterminate | timeout | unavailable
 #   probeVersion=       vendor CLI version when a probe ran, else none
@@ -328,16 +330,19 @@ for (const entry of providers) {
     authStatus = entry.state.authStatus;
   }
   if (isObject(entry.quotaSemantics) && Array.isArray(entry.quotaSemantics.effectiveAvailability)) {
-    const known = entry.quotaSemantics.effectiveAvailability
-      .filter(
-        (scope) =>
-          isObject(scope) &&
-          scope.status === "known" &&
-          typeof scope.effectivePercentRemaining === "number" &&
-          Number.isFinite(scope.effectivePercentRemaining),
-      )
-      .map((scope) => scope.effectivePercentRemaining);
-    if (known.length > 0) headroom = String(Math.trunc(Math.min(...known)));
+    const availability = entry.quotaSemantics.effectiveAvailability;
+    const known = availability.filter(
+      (scope) =>
+        isObject(scope) &&
+        scope.status === "known" &&
+        typeof scope.effectivePercentRemaining === "number" &&
+        Number.isFinite(scope.effectivePercentRemaining),
+    );
+    if (known.length === availability.length && known.length > 0) {
+      headroom = String(
+        Math.trunc(Math.min(...known.map((scope) => scope.effectivePercentRemaining))),
+      );
+    }
   }
   break;
 }
@@ -360,7 +365,7 @@ probe_grok() {
   # The exit status is deliberately ignored: grok 0.2.112 exits 0 in both the
   # authenticated and unauthenticated cases, so only the first stdout line
   # discriminates. Raw output is classified here and never printed.
-  first=$(printf '%s\n' "$output" | grep -v '^[[:space:]]*$' | head -n 1)
+  first=$(printf '%s\n' "$output" | head -n 1)
   case "$first" in
     "You are logged in with "*) printf 'authenticated\n' ;;
     "You are not authenticated."*) printf 'unauthenticated\n' ;;
@@ -414,8 +419,9 @@ case "$AUTH_STATUS" in
   expired|unusable) PROBE_NEEDED=yes ;;
 esac
 
-# Exactly one quota re-read, ever. It refreshes headroom and the aggregate
-# provider status but never changes the authentication verdict.
+# Exactly one quota re-read, ever, after the selected-surface preflight. It
+# refreshes headroom and the aggregate provider status but never changes the
+# authentication verdict.
 quota_retry_once() {
   local retry_auth retry_headroom
   if ! run_timed "$TIMEOUT" quota-axi --provider "$PROVIDER" --json >"$TMP/quota-retry.json" 2>/dev/null; then
@@ -436,12 +442,8 @@ if [ "$PROBE_NEEDED" = yes ] && [ "$HARNESS" = grok ]; then
     PROBE_VERSION_VERIFIED=no
   fi
   PREFLIGHT=$(probe_grok)
-  quota_retry_once
-elif [ "$HEADROOM" = unknown ]; then
-  # No probe was warranted, but headroom is unreadable. Re-read once so a
-  # transient billing-endpoint failure is not mistaken for a durable unknown.
-  quota_retry_once
 fi
+quota_retry_once
 
 case "$PREFLIGHT" in
   authenticated) finish yes auth-usable-preflight ;;

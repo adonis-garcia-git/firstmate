@@ -44,7 +44,7 @@ Observed:
 
 - `grok models` exits `0` and its first stdout line is `You are logged in with grok.com.` for an authenticated session.
 - The documented unauthenticated first line is `You are not authenticated.`, also with exit status `0`.
-- Because the status is `0` in both cases, the exit status is not a verdict; only the first stdout line discriminates.
+- Because the status is `0` in both cases, the exit status is not a verdict; only the literal first stdout line is examined, and a blank first line does not authenticate.
 - `~/.grok/auth.json` was byte-identical across the authenticated run (`mtime`, `size`, and mode `0600` unchanged), so the probe is a read in that path.
 
 These discriminator strings are un-owned vendor UI text.
@@ -55,4 +55,5 @@ Re-run the two commands above and update this section when the pinned version ch
 
 `tests/fm-auth-preflight.test.sh` drives the real script against nonsecret fixtures shaped like the output above.
 It asserts the emitted verdict and, separately, which vendor CLIs were launched, so a Pi/xAI candidate reaching the Grok CLI fails the suite.
+It also asserts that mixed known and unknown scopes remain unknown and that every resolved candidate receives exactly one post-preflight quota retry.
 `tests/fm-bootstrap.test.sh` owns the quota-axi version-floor diagnostic.

@@ -35,7 +35,7 @@ Read all windows named by `boundedBy`, `limitingWindowIds`, `aheadWindowIds`, `b
 ## Authentication is scoped to the selected surface
 
 A candidate authenticates through its own tuple's surface; another harness's CLI can never gate it.
-`bin/fm-auth-preflight.sh` owns surface resolution, the captain-approved bounded preflight, the single quota retry, and sanitized output; its `--help` owns flags and mechanics.
+`bin/fm-auth-preflight.sh` owns surface resolution, the captain-approved bounded preflight, exactly one post-preflight quota retry for every resolved candidate, and sanitized output; its `--help` owns flags and mechanics.
 Run it per candidate instead of resolving a surface by hand or launching a vendor CLI yourself.
 Read its verdict as facts, not as a route: `eligible=no` means drop that candidate and state the omission with its reason, and only an array with no eligible candidate left reaches the captain.
 `authStatus=usable` with `headroom=unknown` means authentication is fine and headroom is unmeasured, never a credential or login problem.

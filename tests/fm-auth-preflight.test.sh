@@ -90,6 +90,9 @@ case "${FM_FAKE_GROK_MODE:-authenticated}" in
   garbage)
     printf '%s\n' 'Session status: unknown (0.9.0 rewrote this line)'
     ;;
+  leading-blank)
+    printf '\n%s\n' 'You are logged in with grok.com.'
+    ;;
   empty) : ;;
   hang) sleep 30 ;;
 esac
@@ -176,7 +179,7 @@ quota_reads() {  # number of quota reads, excluding auth and version calls
 # the Pi xAI credential the candidate actually uses is fine. The candidate must
 # stay dispatchable and the Grok CLI must never be consulted.
 test_expired_grok_cli_never_blocks_a_pi_xai_candidate() {
-  local line
+  local line reads
   run_preflight expired-grok-pi-ok pi xai/grok-4.5 \
     "FM_FAKE_AUTH_DOC=$FIXTURES/auth-grok-cli-expired-pi-available.json" \
     "FM_FAKE_QUOTA_DOC=$FIXTURES/quota-grok-fresh.json"
@@ -189,6 +192,9 @@ test_expired_grok_cli_never_blocks_a_pi_xai_candidate() {
   assert_field "$line" eligible yes "an authenticated Pi/xAI candidate stays dispatchable"
   assert_field "$line" preflight not-applicable "a Pi tuple has no vendor probe"
   assert_grok_never_ran "expired Grok CLI case"
+  assert_field "$line" quotaRetry known "known headroom still receives the single retry"
+  reads=$(quota_reads)
+  [ "$reads" -eq 2 ] || fail "expected one initial quota read plus one retry, got $reads reads"
   pass "an expired standalone Grok CLI credential never blocks or probes a Pi/xAI candidate"
 }
 
@@ -253,6 +259,20 @@ test_stale_quota_is_never_headroom_and_never_credential_wording() {
   assert_field "$line" headroom unknown "stale raw windows must not become headroom"
   assert_field "$line" eligible yes "stale quota keeps an authenticated candidate dispatchable"
   pass "stale quota stays diagnostic, never headroom and never credential wording"
+}
+
+test_mixed_known_and_unknown_scopes_stay_unknown() {
+  local line reads
+  run_preflight mixed-scopes pi xai/grok-4.5 \
+    "FM_FAKE_AUTH_DOC=$FIXTURES/auth-grok-cli-and-pi-available.json" \
+    "FM_FAKE_QUOTA_DOC=$FIXTURES/quota-grok-mixed-known-unknown.json"
+  line=$RUN_LINE
+  expect_code 0 "$RUN_RC" "mixed quota scopes must not disqualify usable authentication"
+  assert_field "$line" headroom unknown "one unknown applicable scope makes aggregate headroom unknown"
+  assert_field "$line" quotaRetry unknown "the retry must preserve mixed-scope uncertainty"
+  reads=$(quota_reads)
+  [ "$reads" -eq 2 ] || fail "expected one initial quota read plus one retry, got $reads reads"
+  pass "mixed known and unknown quota scopes stay conservatively unknown"
 }
 
 # Transport-class failure: both the first read and the single retry fail.
@@ -342,6 +362,22 @@ test_unrecognized_probe_output_is_never_read_as_authenticated() {
   assert_field "$line" eligible no "indeterminate output must never be read as authenticated"
   assert_field "$line" reason preflight-indeterminate "the verdict must name the indeterminate probe"
   pass "unrecognized probe output is indeterminate and never reads as authenticated"
+}
+
+test_blank_first_probe_line_is_indeterminate() {
+  local line reads
+  run_preflight grok-leading-blank grok grok-4.5 \
+    "FM_FAKE_AUTH_DOC=$FIXTURES/auth-both-expired.json" \
+    "FM_FAKE_QUOTA_DOC=$FIXTURES/quota-grok-fresh.json" \
+    "FM_FAKE_GROK_MODE=leading-blank"
+  line=$RUN_LINE
+  expect_code 3 "$RUN_RC" "a blank first stdout line must not authenticate"
+  assert_field "$line" preflight indeterminate "only literal stdout line one may authenticate"
+  assert_field "$line" eligible no "a later authenticated-looking line must be ignored"
+  assert_field "$line" reason preflight-indeterminate "the blank first line must fail closed"
+  reads=$(quota_reads)
+  [ "$reads" -eq 2 ] || fail "expected one initial quota read plus one retry, got $reads reads"
+  pass "a blank first probe line is not skipped or treated as authenticated"
 }
 
 test_empty_probe_output_is_indeterminate() {
@@ -597,11 +633,13 @@ test_missing_grok_config_never_blocks_a_pi_xai_candidate
 test_pi_expiry_is_scoped_to_pi_and_never_probes_grok
 test_usable_auth_with_unknown_quota_stays_eligible
 test_stale_quota_is_never_headroom_and_never_credential_wording
+test_mixed_known_and_unknown_scopes_stay_unknown
 test_quota_endpoint_failure_retries_once_and_stays_eligible
 test_quota_retry_recovers_known_headroom
 test_standalone_grok_expired_probe_authenticates_and_stays_eligible
 test_standalone_grok_unauthenticated_probe_reports_the_candidate
 test_unrecognized_probe_output_is_never_read_as_authenticated
+test_blank_first_probe_line_is_indeterminate
 test_empty_probe_output_is_indeterminate
 test_hanging_probe_is_bounded_and_reported
 test_missing_vendor_cli_is_reported_not_assumed
