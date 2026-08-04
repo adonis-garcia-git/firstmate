@@ -474,12 +474,13 @@ test_watch_restart_attaches_to_healthy_peer() {
 }
 
 test_watcher_self_evicts_on_lock_takeover() {
-  local dir state fakebin out pid i lock_pid
+  local dir state fakebin out err pid i lock_pid
   dir=$(make_case self-evict)
   state="$dir/state"
   fakebin="$dir/fakebin"
   out="$dir/watch.out"
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  err="$dir/watch.err"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2> "$err" &
   pid=$!
   i=0
   while [ "$i" -lt 80 ]; do
@@ -500,7 +501,15 @@ test_watcher_self_evicts_on_lock_takeover() {
   wait_for_exit "$pid" 60 || fail "watcher did not self-evict after lock takeover"
   lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
   [ "$lock_pid" = "$$" ] || fail "self-evicting watcher clobbered the new holder's lock (got '$lock_pid')"
-  pass "watcher self-evicts when the lock pid no longer names it"
+  # The stand-down must not be a silent exit: it prints a typed reason (which the
+  # arm and Stop auto-arm capture) so a benign hand-off is never reported by the
+  # arm as an unexplained "cycle ended without an actionable reason" with no
+  # context anywhere.
+  grep -qF 'watcher: stood down' "$err" \
+    || fail "self-evicting watcher exited silently instead of printing a stand-down reason: $(cat "$err")"
+  grep -qF "singleton lock now held by pid $$" "$err" \
+    || fail "stand-down reason did not name the new lock holder"
+  pass "watcher self-evicts loudly with a stand-down reason when the lock pid no longer names it"
 }
 
 test_arm_self_eviction_is_loud_without_successor() {
@@ -1134,7 +1143,55 @@ test_attached_arm_reports_live_holder_hang() {
   pass "attached arm reports a live hung holder with an actionable reason"
 }
 
+test_guard_alarms_on_false_beacon_dead_watcher() {
+  # The watcher touches its liveness beacon at the top of every cycle, then can
+  # die later in the same cycle - leaving a FRESH beacon over a DEAD process even
+  # on a machine that never slept (so awake-time age alone still reads it fresh).
+  # The guard (fm-send's WATCHER DOWN heuristic) must not read that stale-liveness
+  # beacon as a live watcher: with in-flight work and the singleton lock naming a
+  # dead pid it must still raise WATCHER DOWN, while a lock naming a LIVE pid or a
+  # released lock (the benign re-arm gap) must stay silent so no false alarm
+  # fires mid-turn.
+  local dir state err deadp
+  # (1) fresh beacon + lock holds a DEAD pid -> alarm despite the fresh beacon.
+  dir=$(make_case guard-false-beacon)
+  state="$dir/state"
+  err="$dir/guard.err"
+  printf 'project=x\n' > "$state/task.meta"
+  touch "$state/.last-watcher-beat"
+  deadp=$(dead_pid)
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$deadp" > "$state/.watch.lock/pid"
+  CLAUDECODE=1 PI_CODING_AGENT='' GROK_AGENT='' FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
+  grep -F 'WATCHER DOWN - SUPERVISION IS OFF' "$err" >/dev/null \
+    || fail "guard trusted a fresh beacon over a dead watcher (false beacon not caught): $(cat "$err")"
+
+  # (2) fresh beacon + lock holds a LIVE pid -> silence (no false alarm).
+  dir=$(make_case guard-live-beacon)
+  state="$dir/state"
+  err="$dir/guard.err"
+  printf 'project=x\n' > "$state/task.meta"
+  touch "$state/.last-watcher-beat"
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$$" > "$state/.watch.lock/pid"
+  FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
+  ! grep -F 'WATCHER DOWN' "$err" >/dev/null \
+    || fail "guard false-alarmed with a live watcher behind a fresh beacon: $(cat "$err")"
+
+  # (3) fresh beacon + released lock (no pid file) -> silence (benign re-arm gap).
+  dir=$(make_case guard-released-lock)
+  state="$dir/state"
+  err="$dir/guard.err"
+  printf 'project=x\n' > "$state/task.meta"
+  touch "$state/.last-watcher-beat"
+  FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
+  ! grep -F 'WATCHER DOWN' "$err" >/dev/null \
+    || fail "guard false-alarmed during a benign re-arm gap (released lock): $(cat "$err")"
+  pass "guard alarms on a fresh beacon over a dead watcher, silent for live or released locks"
+}
+
 test_singleton_start
+test_guard_alarms_on_false_beacon_dead_watcher
 test_pid_identity_is_locale_invariant
 test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse
 test_msys_pid_identity_uses_proc

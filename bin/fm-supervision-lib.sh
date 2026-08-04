@@ -20,6 +20,33 @@ fm_sup_stat_mtime() {
   fi
 }
 
+# True (0) only when the watcher singleton lock names a pid that is present but
+# no longer alive: a watcher that died while still holding the lock. A released
+# or absent lock - the legitimate re-arm/wake-handling gap, where the watcher
+# cleanly exited (releasing its lock) and a fresh cycle has not re-armed yet - is
+# NOT this state, so the grace-based beacon tolerance still absorbs it and no
+# spurious alarm fires mid-turn.
+#
+# The beacon mtime can outlive its writer: the watcher touches the beacon at the
+# top of every cycle (bin/fm-watch.sh) and can die later in the same cycle, so a
+# fresh mtime - even a fresh AWAKE-time mtime on a machine that never slept - is
+# not proof a watcher is alive. Awake-time age (above) stops a LIVE watcher from
+# looking falsely dead across a sleep window; this stops a DEAD watcher from
+# looking falsely alive behind a recent beacon. The two are orthogonal, and this
+# aligns the shared freshness flag with the lock-pid liveness the turn-end guard
+# already enforces through fm_watcher_healthy. A reused pid landing on the exact
+# dead-watcher pid would mask the death, but that only reverts to the prior
+# beacon-only behavior - never a false alarm.
+fm_sup_watcher_lock_pid_dead() {  # <state-dir>
+  local state=$1 pid
+  pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  kill -0 "$pid" 2>/dev/null && return 1
+  return 0
+}
+
 # fm_supervision_status <state-dir> [grace-seconds]
 # Populates, for the state dir at $1:
 #   FM_SUP_IN_FLIGHT      count of state/*.meta (in-flight tasks)
@@ -62,7 +89,13 @@ fm_supervision_status() {
         age=$(( $(date +%s) - m ))
       fi
       FM_SUP_BEACON_DESC="${age}s ago"
-      [ "$age" -lt "$grace" ] && FM_SUP_WATCHER_FRESH=true
+      # A fresh beacon is honest liveness only while a watcher process is still
+      # behind it. If the singleton lock names a now-dead watcher, the beacon
+      # outlived its writer, so report not-fresh and let the WATCHER DOWN alarm
+      # fire instead of masking a dead watcher for the rest of the grace window.
+      if [ "$age" -lt "$grace" ] && ! fm_sup_watcher_lock_pid_dead "$state"; then
+        FM_SUP_WATCHER_FRESH=true
+      fi
     else
       # shellcheck disable=SC2034 # Read by callers (fm-guard.sh) after sourcing.
       FM_SUP_BEACON_DESC=unknown

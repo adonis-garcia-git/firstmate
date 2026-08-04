@@ -723,7 +723,18 @@ while :; do
   # no-ops because the lock pid is not ours, so the survivor's lock is untouched.
   # This makes any duplicate self-resolve within one poll instead of persisting
   # and doubling every wake.
-  if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" != "$WATCHER_PID" ]; then
+  current_lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
+  if [ "$current_lock_pid" != "$WATCHER_PID" ]; then
+    # A stand-down is a benign hand-off, not a crash, but exiting 0 in silence
+    # leaves the arm layer only able to report "cycle ended without an actionable
+    # reason" with no way to tell a duplicate yielding the singleton from a
+    # watcher that died for no reason. Record why this cycle ends - on the
+    # triage log and on stderr (which the arm and Stop auto-arm capture) - so the
+    # exit always carries a printed reason. The arm still attaches to the healthy
+    # successor, or fails loudly when there is none; only the observability of
+    # this exit changes.
+    triage_log "watcher stood down: singleton lock now held by pid ${current_lock_pid:-none} (was $WATCHER_PID)"
+    echo "watcher: stood down - singleton lock now held by pid ${current_lock_pid:-none} (was $WATCHER_PID)" >&2
     exit 0
   fi
 
