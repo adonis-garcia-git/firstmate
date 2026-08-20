@@ -23,8 +23,9 @@
 #   <wait-id>\t<first-observed-epoch>\tobserved
 # line per wait, reconciled on every command: new waits are added at the
 # current time and waits whose source has cleared are dropped. When tasks-axi
-# is unavailable, recorded hold entries are preserved untouched (a tooling
-# outage must not reset ages) and hold scanning is skipped with a stderr note.
+# is unavailable, or a held listing or per-item read fails at runtime, recorded
+# hold entries are preserved untouched (a tooling outage must not reset ages)
+# and hold scanning is skipped with a stderr note.
 # Rewrites are atomic (tmp + mv); a concurrent reconcile is benign because the
 # next run converges and a lost first-observation can only make an age younger,
 # never older. A home whose data directory does not exist is skipped silently
@@ -70,6 +71,11 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 RECORD="$DATA/decision-waits.tsv"
 TAB=$(printf '\t')
 
+TMP_RECORD=''
+trap '[ -z "$TMP_RECORD" ] || rm -f "$TMP_RECORD"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 usage() {
   awk '
     NR == 1 { next }
@@ -106,19 +112,24 @@ list_has_id() {  # <comma-list> <id>
 }
 
 # Backlog item ids for one tasks-axi list state, one per line. Rows are the
-# only lines shaped "  <slug>,..."; count/help lines never match.
+# only lines shaped "  <slug>,..."; count/help lines never match. Fails when
+# the listing itself fails, so a runtime tasks-axi error is distinguishable
+# from a genuinely empty state.
 list_ids() {  # <state>
-  tasks_axi list --state "$1" 2>/dev/null \
-    | sed -n 's/^  \([A-Za-z0-9._-]\{1,\}\),.*/\1/p'
+  local out
+  out=$(tasks_axi list --state "$1" 2>/dev/null) || return 1
+  printf '%s\n' "$out" | sed -n 's/^  \([A-Za-z0-9._-]\{1,\}\),.*/\1/p'
 }
 
 # One "hold:<id>\t<summary>\t<state>\t<origin>" line per active captain-kind
-# hold. origin is the fm-decision-hold "Origin:" slug when present, else "-".
-current_hold_waits() {
+# hold among the given held ids. origin is the fm-decision-hold "Origin:" slug
+# when present, else "-". Fails when any per-item read fails, so the caller
+# preserves recorded entries instead of dropping the unreadable hold.
+current_hold_waits() {  # <held-ids, one per line>
   local id show held hold_kind state title origin
   while IFS= read -r id; do
     [ -n "$id" ] || continue
-    show=$(task_show "$id") || continue
+    show=$(task_show "$id") || return 1
     held=$(show_field "$show" held)
     hold_kind=$(show_field "$show" hold_kind)
     state=$(show_field "$show" state)
@@ -134,13 +145,14 @@ current_hold_waits() {
     [ -n "$origin" ] || origin='-'
     printf 'hold:%s\t%s\t%s\t%s\n' "$id" "$title" "$state" "$origin"
   done <<EOF
-$(list_ids held)
+$1
 EOF
 }
 
 # One "status:<task>:<key>\t<summary>\t-\t<task>" line per open needs-decision
 # in the keyed status fold. Ended non-secondmate tasks (last verb done/failed)
-# are skipped, mirroring fm-decision-hold.sh's origin_open_decisions.
+# are skipped, mirroring fm-decision-hold.sh's origin_open_decisions exactly:
+# a task with no .meta file skips the ended check and stays open.
 current_status_waits() {
   local f id kind last verb open key v note
   for f in "$STATE"/*.status; do
@@ -148,12 +160,14 @@ current_status_waits() {
     id=$(basename "$f" .status)
     open=$(status_open_decisions "$f")
     [ -n "$open" ] || continue
-    kind=$(meta_value "$STATE/$id.meta" kind)
-    [ -n "$kind" ] || kind=ship
-    if [ "$kind" != secondmate ]; then
-      last=$(last_status_line "$f")
-      verb=$(status_line_verb "$last")
-      case "$verb" in done|failed) continue ;; esac
+    if [ -f "$STATE/$id.meta" ]; then
+      kind=$(meta_value "$STATE/$id.meta" kind)
+      [ -n "$kind" ] || kind=ship
+      if [ "$kind" != secondmate ]; then
+        last=$(last_status_line "$f")
+        verb=$(status_line_verb "$last")
+        case "$verb" in done|failed) continue ;; esac
+      fi
     fi
     while IFS=$TAB read -r key v note; do
       [ -n "$key" ] || continue
@@ -174,18 +188,21 @@ record_epoch() {  # <wait-id> -> recorded epoch, or nothing
 # Sets CURRENT_WAITS ("<wait-id>\t<summary>\t<state>\t<origin>" lines),
 # HOLDS_SCANNED (1/0), and rewrites RECORD atomically.
 reconcile() {
-  local now holds='' line wid epoch tmp
+  local now holds='' held_ids='' line wid epoch
   now=$(date +%s)
   mkdir -p "$DATA"
   HOLDS_SCANNED=1
-  if holds_available; then
-    holds=$(current_hold_waits)
-  else
+  if ! holds_available; then
     HOLDS_SCANNED=0
     printf 'fm-decision-wait: tasks-axi unavailable; backlog captain holds not scanned\n' >&2
+  elif ! { held_ids=$(list_ids held) && holds=$(current_hold_waits "$held_ids"); }; then
+    HOLDS_SCANNED=0
+    holds=''
+    printf 'fm-decision-wait: tasks-axi held read failed; backlog captain holds not scanned\n' >&2
   fi
   CURRENT_WAITS=$(printf '%s\n%s\n' "$holds" "$(current_status_waits)" | sed '/^$/d')
-  tmp=$(mktemp "$DATA/.decision-waits.XXXXXX")
+  find "$DATA" -maxdepth 1 -name '.decision-waits.*' -type f -mmin +60 -delete 2>/dev/null || true
+  TMP_RECORD=$(mktemp "$DATA/.decision-waits.XXXXXX")
   {
     while IFS= read -r line; do
       [ -n "$line" ] || continue
@@ -201,8 +218,9 @@ EOF
     if [ "$HOLDS_SCANNED" = 0 ] && [ -f "$RECORD" ]; then
       grep '^hold:' "$RECORD" || true
     fi
-  } | LC_ALL=C sort -u > "$tmp"
-  mv "$tmp" "$RECORD"
+  } | LC_ALL=C sort -u > "$TMP_RECORD"
+  mv "$TMP_RECORD" "$RECORD"
+  TMP_RECORD=''
 }
 
 # All queued/in_flight backlog items with their dependency edges, one

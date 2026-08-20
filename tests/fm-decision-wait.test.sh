@@ -3,9 +3,12 @@
 # decisions (bin/fm-decision-wait.sh) and the watcher's once-daily
 # decision-digest wake (bin/fm-watch.sh). Covers: first-observed wait-start
 # recorded when a captain hold or needs-decision appears, ages preserved across
-# restarts (fresh processes over the durable record), resolved/unheld waits
-# dropping out, ranking by unblocking power then age, and the digest wake
-# firing at most once per interval and never when nothing is waiting.
+# restarts (fresh processes over the durable record) and across runtime
+# tasks-axi failures (a failed held read must not reset recorded ages),
+# resolved/unheld waits dropping out, the meta-missing open-decision rule
+# mirroring origin_open_decisions, stale reconcile temp files being swept,
+# ranking by unblocking power then age, and the digest wake firing at most
+# once per interval and never when nothing is waiting.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -174,6 +177,53 @@ test_resolved_and_unheld_waits_drop_out() {
   pass "unheld holds and resolved status decisions drop out; empty digest stays silent"
 }
 
+# --- outage preservation -----------------------------------------------------
+
+# A tasks-axi that passes the compatibility probe but fails at list time (e.g.
+# an unreadable backlog) must preserve recorded hold entries and their ages.
+test_runtime_list_failure_preserves_hold_ages() {
+  local home shim real rec epoch epoch2
+  home=$(make_home holds-outage)
+  add_captain_hold "$home" dec-a "Pick the API shape"
+  run_dw "$home" scan >/dev/null || fail "scan failed on a fresh captain hold"
+  epoch=$(record_of "$home" | awk -F '\t' '$1 == "hold:dec-a" { print $2 }')
+  [ -n "$epoch" ] || fail "fixture hold must be recorded"
+  shim="$TMP_ROOT/axi-shim"
+  mkdir -p "$shim"
+  real=$(command -v tasks-axi)
+  # shellcheck disable=SC2016  # $1 and $@ are the shim's own parameters, expanded when it runs.
+  printf '#!/bin/sh\ncase "$1" in list) echo "backlog unreadable" >&2; exit 1 ;; esac\nexec %s "$@"\n' \
+    "$real" > "$shim/tasks-axi"
+  chmod +x "$shim/tasks-axi"
+  PATH="$shim:$PATH" run_dw "$home" scan >/dev/null 2>&1 \
+    || fail "scan must still exit 0 when the held listing fails"
+  rec=$(record_of "$home")
+  assert_contains "$rec" "hold:dec-a" "a failed held listing must preserve recorded holds"
+  epoch2=$(printf '%s\n' "$rec" | awk -F '\t' '$1 == "hold:dec-a" { print $2 }')
+  [ "$epoch2" = "$epoch" ] \
+    || fail "a failed held listing must not reset the wait-start (got $epoch2, want $epoch)"
+  run_dw "$home" scan >/dev/null || fail "re-scan failed after the outage cleared"
+  epoch2=$(record_of "$home" | awk -F '\t' '$1 == "hold:dec-a" { print $2 }')
+  [ "$epoch2" = "$epoch" ] \
+    || fail "recovery must keep the original wait-start (got $epoch2, want $epoch)"
+  pass "a runtime tasks-axi list failure preserves recorded hold ages across the outage"
+}
+
+# --- meta-missing open decisions ---------------------------------------------
+
+# origin_open_decisions skips the ended-verb check when no .meta exists; the
+# wait tracker must apply the same rule so both consumers agree.
+test_status_wait_without_meta_skips_ended_check() {
+  local home rec
+  home=$(make_home no-meta)
+  printf 'needs-decision [key=api]: choose REST or RPC\ndone: wrapped up\n' > "$home/state/t1.status"
+  run_dw "$home" scan >/dev/null || fail "scan failed"
+  rec=$(record_of "$home")
+  assert_contains "$rec" "status:t1:api" \
+    "a task with no .meta must stay open despite a last done verb"
+  pass "meta-missing status waits mirror origin_open_decisions and stay open"
+}
+
 # --- ranking -----------------------------------------------------------------
 
 test_ranking_prefers_blocking_then_age() {
@@ -218,6 +268,22 @@ test_home_without_data_dir_is_inert() {
     "$DW" scan >/dev/null 2>&1 || fail "scan must exit 0 in a home with no data directory"
   [ ! -d "$home/data" ] || fail "a no-data home must not have data/ materialized as a side effect"
   pass "a home without a data directory is skipped silently and never written"
+}
+
+# --- reconcile temp hygiene --------------------------------------------------
+
+test_reconcile_sweeps_stale_tmpfiles() {
+  local home stale fresh
+  home=$(make_home tmp-sweep)
+  stale="$home/data/.decision-waits.stale0"
+  fresh="$home/data/.decision-waits.fresh0"
+  : > "$stale"
+  set_mtime $(( $(date +%s) - 7200 )) "$stale"
+  : > "$fresh"
+  run_dw "$home" scan >/dev/null || fail "scan failed"
+  [ ! -e "$stale" ] || fail "reconcile must sweep stale .decision-waits.* leftovers"
+  [ -e "$fresh" ] || fail "reconcile must leave recent temp files (a live concurrent reconcile) alone"
+  pass "stale reconcile temp files are swept; recent ones are preserved"
 }
 
 # --- watcher digest wake -----------------------------------------------------
@@ -299,6 +365,9 @@ test_hold_wait_start_recorded_first_observed
 test_status_wait_recorded_and_filters
 test_age_computed_from_durable_record_across_restarts
 test_resolved_and_unheld_waits_drop_out
+test_runtime_list_failure_preserves_hold_ages
+test_status_wait_without_meta_skips_ended_check
 test_ranking_prefers_blocking_then_age
 test_home_without_data_dir_is_inert
+test_reconcile_sweeps_stale_tmpfiles
 test_watch_digest_fires_once_per_interval_and_stays_quiet
