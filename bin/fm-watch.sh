@@ -41,6 +41,10 @@
 #                          inspection only - never an automatic interrupt,
 #                          signal, or restart of the worker or its tool process.
 #   check: <script>: <out> authenticated check output, always actionable
+#   check: pr-reconcile: <finding>
+#                          recorded-PR reconcile sweep result: a recorded PR was
+#                          merged or closed externally, or one bounded offline
+#                          diagnostic (bin/fm-pr-reconcile.sh owns the contract)
 #   check: rejected unauthenticated state checks: <paths>
 #                          unsafe state checks were refused without execution
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
@@ -830,6 +834,19 @@ while :; do
       fi
     else
       FM_HOME="$FM_HOME" run_check "$SCRIPT_DIR/fm-decision-wait.sh" scan >/dev/null
+    fi
+    # Fleet-wide recorded-PR reconcile sweep: one bounded, batched GitHub read
+    # detecting PRs merged or closed externally while still recorded by task
+    # metadata or open backlog items. The script self-throttles (default
+    # hourly), self-bounds its network time, and queues its own durable check
+    # wakes, printing one line per queued payload - so any output here means
+    # durable records are already queued and this cycle only needs to surface
+    # them. bin/fm-pr-reconcile.sh owns the complete contract.
+    recon_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-pr-reconcile.sh" 2>/dev/null) || recon_out=""
+    if [ -n "$recon_out" ]; then
+      touch "$STATE/.last-check"
+      wake "$(printf '%s\n' "$recon_out" | head -1)"
     fi
     touch "$STATE/.last-check"
   fi
