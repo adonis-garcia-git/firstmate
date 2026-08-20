@@ -19,6 +19,9 @@
 #   (k) bootstrap mutating path runs the sweep; detect-only path does not
 #   (l) a record set above the per-sweep cap rotates: successive sweeps cover
 #       every recorded PR instead of starving the tail
+#   (m) a GraphQL response with errors (gh bypasses --jq and prints the raw
+#       JSON body, exit 1) still surfaces the merged alias, silently retries
+#       the null one, and queues no offline diagnostic
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -371,6 +374,40 @@ test_cap_rotation() {
   pass "per-sweep cap rotates instead of starving the tail"
 }
 
+# --- (m) partial GraphQL errors: raw body recovered, no false offline -------
+
+test_partial_error_raw_body() {
+  local case_dir out
+  case_dir=$(make_case partial)
+  fm_write_meta "$case_dir/state/t14.meta" \
+    "window=fm-t14" \
+    "pr=https://github.com/acme/gone/pull/91"
+  fm_write_meta "$case_dir/state/t15.meta" \
+    "window=fm-t15" \
+    "pr=https://github.com/acme/widget/pull/92"
+  cat > "$case_dir/reply" <<'EOF'
+{"data":{"pr0":null,"pr1":{"pullRequest":{"state":"MERGED"}}},"errors":[{"type":"NOT_FOUND","path":["pr0"],"locations":[{"line":1,"column":9}],"message":"Could not resolve to a Repository with the name 'acme/gone'."}]}
+EOF
+  out=$(run_sweep "$case_dir" FM_TEST_GH_REPLY="$case_dir/reply" FM_TEST_GH_RC=1 --force)
+  expect_code 0 $? "partial-error sweep exits 0"
+  assert_contains "$out" "https://github.com/acme/widget/pull/92 was merged on GitHub" \
+    "merged alias in a raw error body still surfaces"
+  assert_grep "$(printf 'check\tpr-reconcile:acme/widget#92')" "$case_dir/state/.wake-queue" \
+    "merged alias in a raw error body queues its check wake"
+  assert_no_grep "could not read recorded PR state" "$case_dir/state/.wake-queue" \
+    "a reached-but-erroring batch queues no offline diagnostic"
+  assert_absent "$case_dir/state/.pr-reconcile-error" \
+    "a reached-but-erroring batch does not latch the error marker"
+  assert_no_grep "pull/91" "$case_dir/state/.pr-reconcile-seen" \
+    "the null alias is not cached as terminal"
+  printf 'pr0 OPEN\n' > "$case_dir/reply"
+  out=$(run_sweep "$case_dir" FM_TEST_GH_REPLY="$case_dir/reply" --force)
+  [ -z "$out" ] || fail "retried null alias must stay silent when open (got: $out)"
+  expect_code 2 "$(grep -c 'api graphql' "$case_dir/gh.log")" \
+    "the null alias is silently re-queried on the next sweep"
+  pass "partial GraphQL errors recover the batch instead of faking an outage"
+}
+
 test_merged_pr_queues_wake
 test_closed_pr_queues_wake
 test_open_pr_stays_silent
@@ -383,5 +420,6 @@ test_seen_cache_pruned
 test_watcher_wiring
 test_bootstrap_wiring
 test_cap_rotation
+test_partial_error_raw_body
 
 echo "all fm-pr-reconcile tests passed"
