@@ -47,9 +47,11 @@
 #     reaches GitHub again; a failed sweep still advances the throttle so an
 #     offline laptop is not hammered with retries. A GraphQL response that
 #     carries errors (one recorded repo deleted or access lost) makes gh
-#     bypass --jq and print the raw JSON body; that is NOT a failure episode:
-#     per-alias states are recovered from the body and unresolvable aliases
-#     become UNKNOWN, skipped and retried on a later sweep.
+#     bypass --jq and print the raw JSON body; when at least one pr<i> alias
+#     is recoverable from that body it is NOT a failure episode: per-alias
+#     states are recovered and unresolvable aliases become UNKNOWN, skipped
+#     and retried on a later sweep. A raw body with no recoverable alias
+#     (errors-only rate-limit response, HTTP error body) IS a failure episode.
 #   - Concurrency: a state/.pr-reconcile.lock singleton makes overlapping
 #     invocations (watcher and bootstrap racing) exit 0 silently instead of
 #     double-querying.
@@ -251,7 +253,10 @@ wait "$gh_pid" 2>/dev/null || true
 # body instead of "pr<i> <STATE>" lines. The body still answers for the whole
 # batch, so rewrite it into the same line format by extracting each alias from
 # its fixed self-chosen shape ("pr<i>":{"pullRequest":{"state":"..."}}); an
-# alias that is null or unparseable becomes UNKNOWN.
+# alias that is null or unparseable becomes UNKNOWN. A body with ZERO matching
+# aliases (an errors-only rate-limit response with data:null, or an HTTP-level
+# error body) never answered for the batch: the recovery fails, the raw body
+# is kept, and the reached=0 offline/rate-limited diagnostic path fires.
 recover_raw_body() {
   tr -d ' \t\r\n' < "$GH_OUT" 2>/dev/null | awk -v n="${#to_query[@]}" '
     { body = body $0 }
@@ -266,7 +271,9 @@ recover_raw_body() {
         if (match(entry, /"state":"[A-Z_]+"/))
           state = substr(entry, RSTART + 9, RLENGTH - 10)
         states[alias] = state
+        matched++
       }
+      if (!matched) exit 1
       for (i = 0; i < n; i++) {
         alias = "pr" i
         print alias " " ((alias in states) ? states[alias] : "UNKNOWN")

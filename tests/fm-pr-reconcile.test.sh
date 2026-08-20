@@ -22,6 +22,8 @@
 #   (m) a GraphQL response with errors (gh bypasses --jq and prints the raw
 #       JSON body, exit 1) still surfaces the merged alias, silently retries
 #       the null one, and queues no offline diagnostic
+#   (n) an alias-free error body (rate-limit or HTTP error JSON, exit 1)
+#       behaves exactly like offline: one deduped diagnostic, no PR wake
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -408,6 +410,35 @@ EOF
   pass "partial GraphQL errors recover the batch instead of faking an outage"
 }
 
+# --- (n) alias-free error body routes to the offline failure path -----------
+
+test_alias_free_error_body_offline() {
+  local case_dir out
+  case_dir=$(make_case aliasfree)
+  fm_write_meta "$case_dir/state/t16.meta" \
+    "window=fm-t16" \
+    "pr=https://github.com/acme/widget/pull/95"
+  cat > "$case_dir/reply" <<'EOF'
+{"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded"}]}
+EOF
+  out=$(run_sweep "$case_dir" FM_TEST_GH_REPLY="$case_dir/reply" FM_TEST_GH_RC=1 --force)
+  expect_code 0 $? "alias-free error sweep exits 0"
+  assert_contains "$out" "could not read recorded PR state from GitHub" \
+    "alias-free error body surfaces the offline diagnostic"
+  expect_code 1 "$(queue_lines "$case_dir")" \
+    "alias-free error body queues exactly one diagnostic wake"
+  assert_no_grep "pull/95" "$case_dir/state/.wake-queue" \
+    "no PR wake is fabricated from an alias-free body"
+  out=$(run_sweep "$case_dir" FM_TEST_GH_REPLY="$case_dir/reply" FM_TEST_GH_RC=1 --force)
+  expect_code 0 $? "repeat alias-free failure exits 0"
+  [ -z "$out" ] || fail "repeat alias-free failure must stay silent (got: $out)"
+  expect_code 1 "$(queue_lines "$case_dir")" \
+    "repeat alias-free failure queues no further wake"
+  assert_grep "could not read recorded PR state" "$case_dir/state/.pr-reconcile-error" \
+    "alias-free failure keeps the error-episode marker"
+  pass "alias-free error bodies behave exactly like offline"
+}
+
 test_merged_pr_queues_wake
 test_closed_pr_queues_wake
 test_open_pr_stays_silent
@@ -421,5 +452,6 @@ test_watcher_wiring
 test_bootstrap_wiring
 test_cap_rotation
 test_partial_error_raw_body
+test_alias_free_error_body_offline
 
 echo "all fm-pr-reconcile tests passed"
