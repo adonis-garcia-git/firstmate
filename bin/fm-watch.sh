@@ -41,11 +41,24 @@
 #                          inspection only - never an automatic interrupt,
 #                          signal, or restart of the worker or its tool process.
 #   check: <script>: <out> authenticated check output, always actionable
+#   check: pr-reconcile: <finding>
+#                          recorded-PR reconcile sweep result: a recorded PR was
+#                          merged or closed externally, or one bounded offline
+#                          diagnostic (bin/fm-pr-reconcile.sh owns the contract)
 #   check: rejected unauthenticated state checks: <paths>
 #                          unsafe state checks were refused without execution
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
 #                          invalid pending retirements were preserved without
 #                          running a check or removing poll artifacts
+#   check: decision-digest: <line>
+#                          once-daily ranked digest of waiting captain
+#                          decisions from bin/fm-decision-wait.sh; never fires
+#                          when nothing is waiting
+#   check: steer-ack: <task> order [ack=<token>] unacknowledged ...
+#                          a token-marked order (fm-send --ack) passed its
+#                          acknowledgment window with no ack line in the task's
+#                          status file; fired exactly once per order
+#                          (bin/fm-steer-ack-lib.sh owns the contract)
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
 # For normal supervision, resume the session-start primary-harness protocol
@@ -75,6 +88,10 @@ mkdir -p "$STATE"
 # cheap when no records exist and never scrapes secondmate conversation.
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+# Durable steer-acknowledgment records armed by fm-send --ack. The tick clears
+# acked orders and surfaces unacknowledged ones; cheap when no records exist.
+# shellcheck source=bin/fm-steer-ack-lib.sh
+. "$SCRIPT_DIR/fm-steer-ack-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -106,6 +123,7 @@ HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
+DECISION_DIGEST_INTERVAL=${FM_DECISION_DIGEST_INTERVAL:-86400}  # seconds between decision-wait digest wakes
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
@@ -748,6 +766,17 @@ while :; do
   # No conversation scraping; unresolved records are never silently expired.
   fm_pending_reply_tick "$STATE" || true
 
+  # Steer-ack reconciliation: an acknowledged or orphaned token-marked order
+  # clears its durable record; an unacknowledged one past its window has its
+  # actionable check wake durably enqueued INSIDE the tick (enqueue before the
+  # record is marked escalated, so a crash here can duplicate but never lose
+  # it) and its reason printed; surface the first one. Exactly one wake per
+  # order; bin/fm-steer-ack-lib.sh owns the record contract.
+  ack_reasons=$(fm_steer_ack_tick "$STATE") || exit 1
+  if [ -n "$ack_reasons" ]; then
+    wake "$(printf '%s\n' "$ack_reasons" | head -1)"
+  fi
+
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
   # Evaluated BEFORE the signal scan: wake() exits the cycle, so a check placed
@@ -812,6 +841,45 @@ while :; do
       fm_wake_append check unauthenticated-state-checks "$reason" || exit 1
       touch "$STATE/.last-check"
       wake "$reason"
+    fi
+    # Once-daily captain-decision digest. bin/fm-decision-wait.sh owns the
+    # durable first-observed wait record and the ranking; this block only
+    # paces it on the same restart-surviving mtime pattern as the check and
+    # heartbeat cadences. Reconciling the record runs every check sweep so a
+    # new wait's first-observed time lands promptly, while the digest wake
+    # fires at most once per DECISION_DIGEST_INTERVAL. A missing marker
+    # anchors the cadence without firing, so a fresh home (or a fresh state
+    # dir, e.g. in tests) can never emit a digest on its first cycle; the
+    # first digest becomes due one interval after that anchor. An empty
+    # digest (no waiting decisions) produces no wake and leaves the marker
+    # untouched, so the next sweep re-checks instead of waiting another day.
+    if [ ! -e "$STATE/.last-decision-digest" ]; then
+      touch "$STATE/.last-decision-digest"
+      FM_HOME="$FM_HOME" run_check "$SCRIPT_DIR/fm-decision-wait.sh" scan >/dev/null
+    elif [ "$(age_of "$STATE/.last-decision-digest")" -ge "$DECISION_DIGEST_INTERVAL" ]; then
+      out=$(FM_HOME="$FM_HOME" run_check "$SCRIPT_DIR/fm-decision-wait.sh" digest)
+      if [ -n "$out" ]; then
+        reason="check: decision-digest: $out"
+        fm_wake_append check decision-digest "$reason" || exit 1
+        touch "$STATE/.last-decision-digest"
+        touch "$STATE/.last-check"
+        wake "$reason"
+      fi
+    else
+      FM_HOME="$FM_HOME" run_check "$SCRIPT_DIR/fm-decision-wait.sh" scan >/dev/null
+    fi
+    # Fleet-wide recorded-PR reconcile sweep: one bounded, batched GitHub read
+    # detecting PRs merged or closed externally while still recorded by task
+    # metadata or open backlog items. The script self-throttles (default
+    # hourly), self-bounds its network time, and queues its own durable check
+    # wakes, printing one line per queued payload - so any output here means
+    # durable records are already queued and this cycle only needs to surface
+    # them. bin/fm-pr-reconcile.sh owns the complete contract.
+    recon_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-pr-reconcile.sh" 2>/dev/null) || recon_out=""
+    if [ -n "$recon_out" ]; then
+      touch "$STATE/.last-check"
+      wake "$(printf '%s\n' "$recon_out" | head -1)"
     fi
     touch "$STATE/.last-check"
   fi

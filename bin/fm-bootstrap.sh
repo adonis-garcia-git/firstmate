@@ -73,9 +73,9 @@
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the five MUTATING sweeps
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
 #          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
-#          x_mode_setup, fleet_sync) while still printing every read-only detect line
+#          x_mode_setup, fleet_sync, pr_reconcile_sweep) while still printing every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
 #          checkout command. Used by
 #          fm-session-start.sh's read-only path when another live session holds
@@ -487,6 +487,17 @@ secondmate_liveness_sweep() {
     esac
   done
   return 0
+}
+
+pr_reconcile_sweep() {
+  # Recorded-PR reconcile sweep: detect PRs merged or closed externally while
+  # still recorded by task metadata or open backlog items. The script
+  # self-throttles, self-bounds its network time, and queues durable check
+  # wakes that the session-start wake-queue drain (which follows bootstrap)
+  # surfaces with full context, so stdout is deliberately not relayed as a
+  # bootstrap diagnostic. bin/fm-pr-reconcile.sh owns the complete contract.
+  [ -x "$SCRIPT_DIR/fm-pr-reconcile.sh" ] || return 0
+  "$SCRIPT_DIR/fm-pr-reconcile.sh" >/dev/null 2>&1 || true
 }
 
 install_cmd() {
@@ -901,5 +912,6 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   secondmate_sync
   x_mode_setup
   fleet_sync
+  pr_reconcile_sweep
 fi
 exit 0

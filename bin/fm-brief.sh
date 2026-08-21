@@ -39,6 +39,9 @@
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
 # blocked when firstmate must act.
+# Ship and scout scaffolds also teach the acknowledgment reply for a
+# token-marked [ack=<token>] order sent via fm-send --ack
+# (bin/fm-steer-ack-lib.sh owns that record and escalation contract).
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
@@ -276,6 +279,10 @@ The report is the only thing that survives, so anything worth keeping must be in
    known external wait you expect to clear on its own (an upstream release, a rate-limit reset):
    firstmate then leaves your idle pane alone and rechecks it on a long cadence instead of
    treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
+   If a message from firstmate starts with \`[ack={token}]\`, it is a token-marked order:
+   FIRST append \`resolved [key=ack-{token}]: starting {one-line restatement of the order}\`
+   to the status file, then carry out the order. Never skip or defer that acknowledgment -
+   it is how firstmate knows the order reached you.
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
@@ -390,6 +397,10 @@ $RULE1
    known external wait you expect to clear on its own (an upstream release, a rate-limit reset,
    a scheduled window): firstmate then leaves your idle pane alone and rechecks it on a long
    cadence instead of treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
+   If a message from firstmate starts with \`[ack={token}]\`, it is a token-marked order:
+   FIRST append \`resolved [key=ack-{token}]: starting {one-line restatement of the order}\`
+   to the status file, then carry out the order. Never skip or defer that acknowledgment -
+   it is how firstmate knows the order reached you.
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs above the implementation worker (product choices, destructive actions, ask-user findings),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will apply the configured authority and reply with the decision.

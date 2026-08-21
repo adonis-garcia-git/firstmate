@@ -6,8 +6,10 @@
 #   . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 #
 # It provides the boilerplate every test file used to re-roll: ok/not-ok
-# reporters, a self-cleaning temp root, fakebin/PATH-shim helpers, deterministic
-# git identity and fixture builders, state/<id>.meta writers, and the common
+# reporters, a self-cleaning temp root, fakebin/PATH-shim helpers, bounded
+# per-user tool-dir PATH extension with the canonical optional-tool skip gate
+# (fm_test_extend_tool_path / fm_test_need_tool), deterministic git identity
+# and fixture builders, state/<id>.meta writers, and the common
 # string/exit-code/file assertions. It deliberately does NOT bundle the
 # behavior-specific fake tmux/treehouse/no-mistakes mocks: those encode terminal
 # and lifecycle assumptions that differ per suite and belong with the tests that
@@ -60,6 +62,39 @@ fi
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# --- optional per-user tool resolution ---------------------------------------
+#
+# Daemon-spawned validation shells (e.g. the no-mistakes pipeline) carry a
+# minimal PATH without the captain's per-user npm prefix, so optional-tool
+# gates like `command -v tasks-axi` would report the tool absent even though it
+# is installed - and the resulting skip invites an ad-hoc machine-wide binary
+# hunt, which trips macOS privacy (TCC) checks on protected home folders
+# (Documents, Desktop, Photos, media, calendars, contacts). Append the fixed,
+# well-known per-user npm install dirs when they exist: a bounded existence
+# check on named paths, never a scan.
+fm_test_extend_tool_path() {
+  local dir
+  for dir in ${NPM_CONFIG_PREFIX:+"$NPM_CONFIG_PREFIX/bin"} ${HOME:+"$HOME/.npm-global/bin"}; do
+    case ":$PATH:" in *":$dir:"*) continue ;; esac
+    [ -d "$dir" ] && PATH="$PATH:$dir"
+  done
+  export PATH
+  return 0
+}
+fm_test_extend_tool_path
+
+# fm_test_need_tool <tool> [<npm package>]: gate a suite on an optional
+# npm-installed tool. Returns 0 when the tool resolves. Otherwise prints the
+# canonical `skip:` line naming the exact install command - so a reader (human
+# or gate agent) installs it or accepts the skip instead of searching the
+# filesystem for the binary - and returns 1.
+fm_test_need_tool() {
+  local tool=$1 pkg=${2:-$1}
+  command -v "$tool" >/dev/null 2>&1 && return 0
+  printf 'skip: %s not found on PATH or in the known per-user tool dirs (install with: npm install -g %s; never search the filesystem for it)\n' "$tool" "$pkg"
+  return 1
+}
 
 # --- reporters --------------------------------------------------------------
 

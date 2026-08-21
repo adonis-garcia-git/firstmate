@@ -7,6 +7,24 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-pi-watch-extension)
 EXT="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
+
+# Every subtest dynamically imports the tracked .ts extension with plain node,
+# which requires type stripping (default from Node 22.18 / 23.6); probe once
+# and skip the file on an older node instead of failing on the import itself.
+if ! command -v node >/dev/null 2>&1; then
+  echo "skip: node not found for the Pi watch extension tests"
+  exit 0
+fi
+_ts_probe="$TMP_ROOT/ts-import-probe"
+mkdir -p "$_ts_probe"
+printf 'export const ok: number = 1;\n' > "$_ts_probe/probe.ts"
+if ! ( cd "$_ts_probe" && node --input-type=module >/dev/null 2>&1 <<'JS'
+await import("./probe.ts");
+JS
+); then
+  echo "skip: installed node cannot import TypeScript modules (no type stripping) for the Pi watch extension tests"
+  exit 0
+fi
 # Both watch extensions spawn arm children through "bash -lc", so every spawn
 # sources $HOME's login profile. Point HOME at an empty hermetic dir: a
 # developer profile that takes longer than an arm-readiness budget (e.g.
