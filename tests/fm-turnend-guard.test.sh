@@ -19,6 +19,19 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-turnend-guard)
 fm_git_identity fmtest fmtest@example.invalid
 
+# The two Pi subtests dynamically import the tracked .ts extension with plain
+# node, which requires type stripping (default from Node 22.18 / 23.6); probe
+# once so they skip on an older node instead of failing on the import itself.
+node_can_import_typescript() {
+  local probe="$TMP_ROOT/ts-import-probe"
+  mkdir -p "$probe"
+  printf 'export const ok: number = 1;\n' > "$probe/probe.ts"
+  ( cd "$probe" && node --input-type=module >/dev/null 2>&1 <<'JS'
+await import("./probe.ts");
+JS
+  )
+}
+
 REQUIRED_REASON='repair missing watcher supervision with bin/fm-watch-arm.sh as its own Claude Code background task'
 
 # --- PREDICATE: bin/fm-supervision-lib.sh -----------------------------------
@@ -830,6 +843,10 @@ EOF
 
 test_pi_extension_injects_once_per_logical_agent_run() {
   local repo home ext log out status
+  if ! command -v node >/dev/null 2>&1 || ! node_can_import_typescript; then
+    echo "skip: node with TypeScript type stripping not available for the Pi guard logical-run test"
+    return 0
+  fi
   repo="$TMP_ROOT/pi-logical-run-root"
   home="$TMP_ROOT/pi-logical-run-home"
   ext="$repo/.pi/extensions/fm-primary-turnend-guard.ts"
@@ -897,6 +914,10 @@ EOF
 
 test_pi_extension_retries_after_followup_delivery_failure() {
   local repo home ext out status
+  if ! command -v node >/dev/null 2>&1 || ! node_can_import_typescript; then
+    echo "skip: node with TypeScript type stripping not available for the Pi guard delivery-failure test"
+    return 0
+  fi
   repo="$TMP_ROOT/pi-delivery-failure-root"
   home="$TMP_ROOT/pi-delivery-failure-home"
   ext="$repo/.pi/extensions/fm-primary-turnend-guard.ts"
