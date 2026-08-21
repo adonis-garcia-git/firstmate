@@ -297,10 +297,28 @@ JS
   pass "a missing collapsed-thinking presentation API degrades only that Calm adapter with a clear skip reason, while the rest of Calm still registers"
 }
 
+# 0 when the installed node can import a .ts module directly (type stripping,
+# default from Node 22.18 / 23.6). The missing-adapter-export subtest fabricates
+# its own fake Pi package, so it cannot ride the sibling package-presence gates,
+# but it still imports real .ts adapter sources and needs this capability.
+node_can_import_typescript() {
+  local probe="$TMP_ROOT/ts-import-probe"
+  mkdir -p "$probe"
+  printf 'export const ok: number = 1;\n' > "$probe/probe.ts"
+  ( cd "$probe" && node --input-type=module >/dev/null 2>&1 <<'JS'
+await import("./probe.ts");
+JS
+  )
+}
+
 test_pi_compat_missing_adapter_exports() {
   local fixture out status
   if ! command -v node >/dev/null 2>&1; then
     echo "skip: node not found for Pi calm missing-adapter-export test"
+    return 0
+  fi
+  if ! node_can_import_typescript; then
+    echo "skip: installed node cannot import TypeScript modules (no type stripping) for Pi calm missing-adapter-export test"
     return 0
   fi
 

@@ -54,6 +54,11 @@
 #                          once-daily ranked digest of waiting captain
 #                          decisions from bin/fm-decision-wait.sh; never fires
 #                          when nothing is waiting
+#   check: steer-ack: <task> order [ack=<token>] unacknowledged ...
+#                          a token-marked order (fm-send --ack) passed its
+#                          acknowledgment window with no ack line in the task's
+#                          status file; fired exactly once per order
+#                          (bin/fm-steer-ack-lib.sh owns the contract)
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
 # For normal supervision, resume the session-start primary-harness protocol
@@ -83,6 +88,10 @@ mkdir -p "$STATE"
 # cheap when no records exist and never scrapes secondmate conversation.
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+# Durable steer-acknowledgment records armed by fm-send --ack. The tick clears
+# acked orders and surfaces unacknowledged ones; cheap when no records exist.
+# shellcheck source=bin/fm-steer-ack-lib.sh
+. "$SCRIPT_DIR/fm-steer-ack-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -743,6 +752,17 @@ while :; do
   # repost after grace, and escalate once if the recovery turn is also missed.
   # No conversation scraping; unresolved records are never silently expired.
   fm_pending_reply_tick "$STATE" || true
+
+  # Steer-ack reconciliation: an acknowledged or orphaned token-marked order
+  # clears its durable record; an unacknowledged one past its window has its
+  # actionable check wake durably enqueued INSIDE the tick (enqueue before the
+  # record is marked escalated, so a crash here can duplicate but never lose
+  # it) and its reason printed; surface the first one. Exactly one wake per
+  # order; bin/fm-steer-ack-lib.sh owns the record contract.
+  ack_reasons=$(fm_steer_ack_tick "$STATE") || exit 1
+  if [ -n "$ack_reasons" ]; then
+    wake "$(printf '%s\n' "$ack_reasons" | head -1)"
+  fi
 
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.

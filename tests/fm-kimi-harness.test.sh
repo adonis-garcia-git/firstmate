@@ -11,6 +11,13 @@ KIMI_HOOK="$ROOT/bin/fm-kimi-turnend-hook.sh"
 TMP_ROOT=$(fm_test_tmproot fm-kimi-harness)
 KIMI_RUNTIME_TASK_TMP=
 PYTHON_BIN=$(command -v python3) || fail "test needs python3"
+# The Kimi hook fails closed without python3+tomllib (Python >= 3.11), so an
+# older interpreter turns every config-validation path into the same tomllib
+# refusal and the accept/refuse matrix below cannot be exercised at all.
+if ! "$PYTHON_BIN" -c 'import tomllib' >/dev/null 2>&1; then
+  echo "skip: python3 without tomllib (the Kimi hook requires Python >= 3.11) cannot exercise the Kimi config validation matrix"
+  exit 0
+fi
 PYTHON_BIN_DIR=$(dirname "$PYTHON_BIN")
 JQ_BIN=$(command -v jq) || fail "test needs jq"
 BASE_PATH=${FM_TEST_BASE_PATH:-$PYTHON_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
