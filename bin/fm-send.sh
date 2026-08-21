@@ -9,6 +9,18 @@
 # Special keys instead of text: fm-send.sh <target> --key Enter
 # Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
 # Orca currently supports Enter and C-c only, and rejects Escape.
+# Acknowledged orders: fm-send.sh <target> --ack <text...>
+#   Opt-in for a steer whose silent loss would matter: the text is prefixed with
+#   a visible [ack=<token>] mark and a durable pending-ack record is armed so
+#   the watcher surfaces the order if the worker never acknowledges it within
+#   the window (bin/fm-steer-ack-lib.sh owns the record and escalation
+#   contract; generated briefs teach workers the ack reply). Requires a task
+#   recorded in this home (the ack is read from its status file); refused for
+#   secondmate targets (their marked requests already carry the pending-reply
+#   expectation), for the --key path, and for harness command invocations
+#   (leading "/", or "$..." to codex) whose parsing the prefix would break.
+#   A failed or unconfirmed submit discards the record, so only a confirmed
+#   delivery ever arms detection. Plain sends without --ack are unchanged.
 #
 # Text submission is verified: the line is typed ONCE, then Enter is sent and
 # retried (Enter only, never retyped) until the target backend confirms a
@@ -75,6 +87,8 @@ fi
 . "$SCRIPT_DIR/fm-marker-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+# shellcheck source=bin/fm-steer-ack-lib.sh
+. "$SCRIPT_DIR/fm-steer-ack-lib.sh"
 
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' "$SCRIPT_DIR/fm-guard.sh" || true
 
@@ -219,13 +233,63 @@ fi
 # send implementation. A failed backend send is still surfaced below as a hard
 # error with the attempted resolution attached.
 
+# Opt-in acknowledged order: parsed here so plain sends stay byte-identical.
+WANT_ACK=0
+if [ "${1:-}" = "--ack" ]; then
+  WANT_ACK=1
+  shift
+fi
+
 if [ "${1:-}" = "--key" ]; then
+  if [ "$WANT_ACK" = 1 ]; then
+    echo "error: --ack applies only to text sends, not the --key path" >&2
+    exit 1
+  fi
   if ! fm_backend_send_key "$TARGET_BACKEND" "$T" "$2" "$EXPECTED_LABEL"; then
     echo "error: key '$2' not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
     exit 1
   fi
 else
   MESSAGE=$*
+  # Token-marked order: validate eligibility, prefix the visible mark, and arm
+  # the durable pending-ack record before delivery. A record armed here is
+  # discarded on every failed or unconfirmed submit below, so only a confirmed
+  # delivery leaves detection armed (bin/fm-steer-ack-lib.sh).
+  ACK_TOKEN=
+  ACK_TASK_ID=
+  if [ "$WANT_ACK" = 1 ]; then
+    if [ -z "$TARGET_SELECTOR" ] || [ -z "$TARGET_META" ]; then
+      echo "error: --ack requires a task recorded in this home; the acknowledgment is read from that task's status file" >&2
+      exit 1
+    fi
+    if [ "$MARK_FROM_FIRSTMATE" = 1 ]; then
+      echo "error: --ack does not apply to a secondmate target; marked secondmate requests already carry the parent pending-reply expectation" >&2
+      exit 1
+    fi
+    case "$MESSAGE" in
+      /*)
+        echo "error: --ack cannot mark a harness command invocation (leading '/'); the [ack=...] prefix would break its parsing - phrase the order as plain text" >&2
+        exit 1
+        ;;
+      \$*)
+        if [ "$TARGET_HARNESS" = codex ]; then
+          echo "error: --ack cannot mark a codex \$-skill invocation; the [ack=...] prefix would break its parsing - phrase the order as plain text" >&2
+          exit 1
+        fi
+        ;;
+    esac
+    ACK_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
+    ACK_TOKEN=${FM_STEER_ACK_TOKEN:-$(fm_steer_ack_new_token)}
+    if ! fm_steer_ack_token_valid "$ACK_TOKEN"; then
+      echo "error: invalid steer-ack token '${ACK_TOKEN:-<empty>}' (need 8 lowercase hex chars)" >&2
+      exit 1
+    fi
+    MESSAGE="$(fm_steer_ack_mark "$ACK_TOKEN") $MESSAGE"
+    if ! fm_steer_ack_arm "$STATE" "$ACK_TASK_ID" "$ACK_TOKEN" "$MESSAGE"; then
+      echo "error: failed to arm the durable steer-ack record for $ACK_TASK_ID; refusing to send the order unmonitored" >&2
+      exit 1
+    fi
+  fi
   if [ "$MARK_FROM_FIRSTMATE" = 1 ]; then
     # Reuse an existing correlation id for recovery resends; otherwise create a
     # durable parent expectation before delivery. Transport success never
@@ -274,6 +338,9 @@ else
     if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
       fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
     fi
+    if [ -n "$ACK_TOKEN" ]; then
+      fm_steer_ack_discard "$STATE" "$ACK_TASK_ID" "$ACK_TOKEN" || true
+    fi
     echo "error: text not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
     exit 1
   fi
@@ -284,12 +351,18 @@ else
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
       fi
+      if [ -n "$ACK_TOKEN" ]; then
+        fm_steer_ack_discard "$STATE" "$ACK_TASK_ID" "$ACK_TOKEN" || true
+      fi
       echo "error: text not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
       exit 1
       ;;
     *)
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+      fi
+      if [ -n "$ACK_TOKEN" ]; then
+        fm_steer_ack_discard "$STATE" "$ACK_TASK_ID" "$ACK_TOKEN" || true
       fi
       echo "error: text not submitted to $T (delivery unconfirmed; verdict=${verdict:-unknown}; tried $RESOLUTION_TRIED)" >&2
       exit 1
