@@ -509,6 +509,11 @@ test_watcher_self_evicts_on_lock_takeover() {
     || fail "self-evicting watcher exited silently instead of printing a stand-down reason: $(cat "$err")"
   grep -qF "singleton lock now held by pid $$" "$err" \
     || fail "stand-down reason did not name the new lock holder"
+  # The stand-down is a lifecycle event: it belongs on stderr (captured by the
+  # arm, whose cycle-exit ledger owns lifecycle records), never in the triage
+  # log, which stays exclusively the absorbed-wake debug log.
+  ! grep -qF 'stood down' "$state/.watch-triage.log" 2>/dev/null \
+    || fail "stand-down leaked a lifecycle line into the absorbed-wake triage log"
   pass "watcher self-evicts loudly with a stand-down reason when the lock pid no longer names it"
 }
 
@@ -1165,6 +1170,10 @@ test_guard_alarms_on_false_beacon_dead_watcher() {
   CLAUDECODE=1 PI_CODING_AGENT='' GROK_AGENT='' FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
   grep -F 'WATCHER DOWN - SUPERVISION IS OFF' "$err" >/dev/null \
     || fail "guard trusted a fresh beacon over a dead watcher (false beacon not caught): $(cat "$err")"
+  # The banner's evidence must name the dead lock holder: an alarm whose only
+  # evidence is a fresh-looking beacon age reads as a self-contradiction.
+  grep -F "but its watcher (lock pid $deadp) died" "$err" >/dev/null \
+    || fail "false-beacon alarm did not name the dead lock holder: $(cat "$err")"
 
   # (2) fresh beacon + lock holds a LIVE pid -> silence (no false alarm).
   dir=$(make_case guard-live-beacon)

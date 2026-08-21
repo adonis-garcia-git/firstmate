@@ -51,12 +51,15 @@ The file is size-capped through `FM_WATCH_CYCLE_LOG_MAX_BYTES` and `FM_WATCH_CYC
 
 The default 300-second grace is unchanged.
 Only the watcher process touches `state/.last-watcher-beat`; no helper process can make a wedged watcher appear healthy.
+A fresh beacon is trusted only while the watcher singleton lock names a live pid: the watcher touches the beacon at the top of a cycle and can die later in the same cycle, so `fm_supervision_status` in `bin/fm-supervision-lib.sh` reports the watcher not-fresh when the recorded lock holder is dead.
+The WATCHER DOWN alarm then fires instead of letting a beacon that outlived its writer mask the death for the rest of the grace window, and its printed evidence names the dead lock holder rather than a bare fresh-looking age.
+A released or absent lock stays grace-tolerant, so the benign re-arm gap between a clean watcher exit and the next cycle still cannot false-alarm mid-turn.
 
 ## Regression coverage
 
 `tests/fm-pi-watch-extension.test.sh` checks Pi's first-cycle-or-explicit-repair tool metadata and ownership-based redundant-call no-ops, then simulates actionable and empty child closes against the actual Pi and OpenCode close handlers, blocks prompt delivery to prove the successor launches first, verifies single-flight behavior, changes the session lock before close to prove ownership is rechecked, and hangs each successor arm to prove bounded fallback delivery includes the typed restoration failure.
 The same suite covers ordinary same-process session replacement for `/new`, `/resume`, and `/fork`, same-instance shutdown-plus-start, stale prior-generation callbacks, repeated transitions with exactly one live cycle, disappearance of the shutting-down refusal after a valid replacement activates, and terminal quit still refusing late rearm.
-`tests/fm-watcher-lock.test.sh` covers verified-successor attach, the typed self-eviction failure, bounded and successor-linked lifecycle rows, a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination, awake-time beacon judgment across a simulated system sleep window, and the typed live-holder hang failure.
+`tests/fm-watcher-lock.test.sh` covers verified-successor attach, the typed self-eviction failure, bounded and successor-linked lifecycle rows, a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination, awake-time beacon judgment across a simulated system sleep window, the typed live-holder hang failure, and the dead-holder false-beacon alarm (a fresh beacon over a dead lock pid raises WATCHER DOWN naming that pid, while a live holder or a released lock stays silent).
 `tests/fm-subagent-pretool-check.test.sh` proves Claude retains only the non-status Bash seatbelts.
 `tests/fm-claude-stop-autoarm.test.sh` covers the auto-arm's scope, stale and live session owners, unchanged AFK and need boundaries, single-flight, exit-2 translation, and silent identity-walk classification of a dash-leading login-shell comm.
 `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` starts with the reproduced stale-lock state, runs session start first, completes two tokenless cycles, and checks the competing-live-owner negative control.

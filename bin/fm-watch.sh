@@ -746,12 +746,12 @@ while :; do
     # A stand-down is a benign hand-off, not a crash, but exiting 0 in silence
     # leaves the arm layer only able to report "cycle ended without an actionable
     # reason" with no way to tell a duplicate yielding the singleton from a
-    # watcher that died for no reason. Record why this cycle ends - on the
-    # triage log and on stderr (which the arm and Stop auto-arm capture) - so the
-    # exit always carries a printed reason. The arm still attaches to the healthy
-    # successor, or fails loudly when there is none; only the observability of
-    # this exit changes.
-    triage_log "watcher stood down: singleton lock now held by pid ${current_lock_pid:-none} (was $WATCHER_PID)"
+    # watcher that died for no reason. Print why this cycle ends on stderr (which
+    # the arm and Stop auto-arm capture) so the exit always carries a printed
+    # reason; the arm layer's cycle-exit ledger owns the durable lifecycle
+    # record, and the triage log stays absorbed-wake-only. The arm still attaches
+    # to the healthy successor, or fails loudly when there is none; only the
+    # observability of this exit changes.
     echo "watcher: stood down - singleton lock now held by pid ${current_lock_pid:-none} (was $WATCHER_PID)" >&2
     exit 0
   fi
