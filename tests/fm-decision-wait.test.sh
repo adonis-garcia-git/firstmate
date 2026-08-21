@@ -19,7 +19,7 @@ DW="$ROOT/bin/fm-decision-wait.sh"
 WATCH="$ROOT/bin/fm-watch.sh"
 TMP_ROOT=$(fm_test_tmproot fm-decision-wait)
 
-command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found"; exit 0; }
+fm_test_need_tool tasks-axi || exit 0
 
 make_home() {  # <name>
   local home="$TMP_ROOT/$1"
