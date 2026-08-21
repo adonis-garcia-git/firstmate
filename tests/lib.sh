@@ -36,6 +36,28 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+# Pin watcher-liveness math to "the system never slept" (bin/fm-wake-lib.sh
+# fm_system_wake_epoch). Beacon-staleness tests backdate mtimes to simulate a
+# hung-while-awake watcher; on a host that recently woke from a real sleep
+# (e.g. a clamshell laptop dark-waking every ~15 minutes), the live
+# kern.waketime read would clamp those backdated ages to seconds and flip the
+# expected verdicts. Sleep-aware tests override this per invocation with an
+# explicit epoch.
+export FM_SYSTEM_WAKE_EPOCH_OVERRIDE=0
+
+# The Pi/opencode extension suites import .ts modules with bare node. Node
+# 22.6-23.5 supports TypeScript type stripping only behind
+# --experimental-strip-types (default from 23.6), so on those versions every
+# .ts import fails with ERR_UNKNOWN_FILE_EXTENSION. Enable the flag whenever
+# this node accepts it; newer nodes accept it as a no-op alias, and nodes too
+# old to know it are left untouched (their .ts imports cannot work either
+# way).
+if node --experimental-strip-types --disable-warning=ExperimentalWarning -e '' >/dev/null 2>&1; then
+  # Silence only the stripping ExperimentalWarning: suites assert on empty
+  # stderr, and the warning would land in every captured output.
+  export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--experimental-strip-types --disable-warning=ExperimentalWarning"
+fi
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034

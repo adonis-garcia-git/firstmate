@@ -689,12 +689,14 @@ if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   BEAT="$STATE/.last-watcher-beat"
   if [ -n "${FM_LOCK_HELD_PID:-}" ]; then
     if [ -e "$BEAT" ]; then
-      beat_age=$(fm_path_age "$BEAT")
+      # Awake-time age (fm_path_age_since_system_wake): a holder whose beacon
+      # merely predates a system sleep window is healthy, not wedged.
+      beat_age=$(fm_path_age_since_system_wake "$BEAT")
       if [ "$beat_age" -ge "$WATCHER_STALE_GRACE" ]; then
-        echo "watcher: lock held by live pid $FM_LOCK_HELD_PID but heartbeat is stale for ${beat_age}s (>${WATCHER_STALE_GRACE}s); inspect or stop that watcher before re-arming." >&2
+        echo "watcher: lock held by live pid $FM_LOCK_HELD_PID but heartbeat is stale for ${beat_age}s of awake time (>${WATCHER_STALE_GRACE}s); inspect or stop that watcher before re-arming." >&2
         exit 1
       fi
-    elif [ "$(fm_path_age "$WATCH_LOCK")" -ge "$WATCHER_STALE_GRACE" ]; then
+    elif [ "$(fm_path_age_since_system_wake "$WATCH_LOCK")" -ge "$WATCHER_STALE_GRACE" ]; then
       echo "watcher: lock held by live pid $FM_LOCK_HELD_PID but no heartbeat exists; inspect or stop that watcher before re-arming." >&2
       exit 1
     fi
@@ -739,7 +741,18 @@ while :; do
   # no-ops because the lock pid is not ours, so the survivor's lock is untouched.
   # This makes any duplicate self-resolve within one poll instead of persisting
   # and doubling every wake.
-  if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" != "$WATCHER_PID" ]; then
+  current_lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
+  if [ "$current_lock_pid" != "$WATCHER_PID" ]; then
+    # A stand-down is a benign hand-off, not a crash, but exiting 0 in silence
+    # leaves the arm layer only able to report "cycle ended without an actionable
+    # reason" with no way to tell a duplicate yielding the singleton from a
+    # watcher that died for no reason. Print why this cycle ends on stderr (which
+    # the arm and Stop auto-arm capture) so the exit always carries a printed
+    # reason; the arm layer's cycle-exit ledger owns the durable lifecycle
+    # record, and the triage log stays absorbed-wake-only. The arm still attaches
+    # to the healthy successor, or fails loudly when there is none; only the
+    # observability of this exit changes.
+    echo "watcher: stood down - singleton lock now held by pid ${current_lock_pid:-none} (was $WATCHER_PID)" >&2
     exit 0
   fi
 

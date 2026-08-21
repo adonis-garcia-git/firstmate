@@ -5,9 +5,12 @@
 # First, always warn if the firstmate primary checkout (FM_ROOT) is on a named
 # non-default branch, because that means firstmate-on-itself work landed in the
 # primary instead of an isolated worktree.
-# Then, if any task is in flight (a state/<id>.meta exists) and the watcher's
-# liveness beacon (state/.last-watcher-beat, touched every poll cycle) is
-# missing or older than FM_GUARD_GRACE seconds, prints a loud, clearly delimited
+# Then, if any task is in flight (a state/<id>.meta exists) and no live watcher
+# stands behind the liveness beacon (state/.last-watcher-beat, touched every
+# poll cycle, missing or older than FM_GUARD_GRACE seconds - or fresh but the
+# watcher singleton lock names a dead pid, the beacon having outlived its
+# writer; bin/fm-supervision-lib.sh owns both predicates and the banner then
+# names that dead holder), prints a loud, clearly delimited
 # banner so the agent cannot skim past it in the tool output of whatever it was
 # doing - the one channel every harness has. The full banner is emitted once per
 # distinct staleness episode in this FM_HOME (keyed to beacon mtime or absence);
@@ -187,7 +190,7 @@ if [ "$watcher_fresh" = false ]; then
     {
       printf '●%s\n' "$rule"
       printf '●  WATCHER DOWN - SUPERVISION IS OFF\n'
-      printf '●  %s task(s) in flight, but no watcher has a fresh beacon (last beat: %s, grace %ss).\n' "$in_flight" "$beacon_desc" "$GRACE"
+      printf '●  %s task(s) in flight, but no live watcher is behind the beacon (last beat: %s, grace %ss).\n' "$in_flight" "$beacon_desc" "$GRACE"
       if [ "$READ_ONLY" -eq 1 ]; then
         printf '●  This read-only session should report the lapse, not repair it.\n'
       else

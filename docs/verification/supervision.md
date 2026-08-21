@@ -164,6 +164,17 @@ tests/fm-claude-stop-autoarm.test.sh
 tests/fm-turnend-guard.test.sh
 ```
 
+Sleep-aware beacon liveness (`fm_path_age_since_system_wake` in `bin/fm-wake-lib.sh`) rests on two facts verified on 2026-07-30 against Darwin 25.3.0 during a live clamshell maintenance-sleep cycle:
+
+```sh
+sysctl -n kern.waketime
+pmset -g log | grep -E 'DarkWake|Entering Sleep' | tail -3
+```
+
+Observed result: `kern.waketime` printed `{ sec = 1785441943, usec = 556543 } Thu Jul 30 16:05:43 2026` while `pmset -g log` showed a `DarkWake from Deep Idle` entry at 16:05:43 the same second, so the sysctl updates on dark wakes, not only full wakes.
+Observed result: during that night's `Entering Sleep ... 902 secs` maintenance cycle, a healthy suspended watcher's beacon read 900s+ stale in wall-clock terms at each wake and returned to age 1-10s seconds later, while its 15-second-budget event reader showed 13+ minutes of elapsed wall time; suspended processes make no progress against wall-clock graces.
+Deterministic entry points: the sleep-aware cases in `tests/fm-watcher-lock.test.sh` and `tests/fm-turnend-guard.test.sh` via `FM_SYSTEM_WAKE_EPOCH_OVERRIDE`.
+
 ## Wedge-alarm channels
 
 The two real notification channels were bounded manually on 2026-07-10 on macOS 26.5.2 with Herdr 0.7.3.

@@ -78,6 +78,58 @@ fm_path_age() {
   echo $(( $(date +%s) - m ))
 }
 
+# Epoch seconds of the system's most recent wake from sleep (full or dark
+# wake), or failure when unknown. macOS reads kern.waketime, which updates on
+# DarkWake maintenance windows too (verified 2026-07-30 against pmset -g log on
+# Darwin 25.3.0), so a judgment made seconds into any wake window sees that
+# wake. Other platforms have no equivalent read here and report unknown, which
+# keeps their liveness math on plain wall-clock age, byte-for-byte the prior
+# behavior. FM_SYSTEM_WAKE_EPOCH_OVERRIDE pins the answer for tests and
+# diagnostics: a positive epoch is used verbatim, and 0 means "treat the
+# system as never having slept".
+fm_system_wake_epoch() {
+  local raw sec
+  case "${FM_SYSTEM_WAKE_EPOCH_OVERRIDE-}" in
+    '') ;;
+    0|*[!0-9]*) return 1 ;;
+    *) printf '%s\n' "$FM_SYSTEM_WAKE_EPOCH_OVERRIDE"; return 0 ;;
+  esac
+  [ "$_FM_UNAME" = Darwin ] || return 1
+  # Absolute-path fallback: hook environments can run with a PATH that omits
+  # /usr/sbin, and a missing sysctl must degrade to plain wall-clock age, not
+  # silently vary by caller.
+  raw=$(sysctl -n kern.waketime 2>/dev/null) \
+    || raw=$(/usr/sbin/sysctl -n kern.waketime 2>/dev/null) \
+    || return 1
+  # Format: "{ sec = 1785441943, usec = 556543 } Thu Jul 30 16:05:43 2026".
+  # Anchored so "usec" can never match as "sec".
+  sec=$(printf '%s\n' "$raw" | sed -n 's/^{ sec = \([0-9]\{1,\}\),.*/\1/p')
+  case "$sec" in ''|*[!0-9]*|0) return 1 ;; esac
+  printf '%s\n' "$sec"
+}
+
+# Age of a process-progress beacon file, not counting time the SYSTEM spent
+# asleep before its last wake. File mtimes are wall-clock, but a beacon writer
+# gets no CPU while the machine sleeps, so wall-clock staleness across a sleep
+# window is not evidence the writer hung: on a clamshell Mac cycling ~900s
+# maintenance sleeps, a healthy watcher's beacon reads 900s+ stale the instant
+# each DarkWake starts, and every wall-clock judge then declares a live watcher
+# dead (the 2026-07-30 false watcher-death incident). Clamping the age to the
+# last system wake makes the judgment "no progress for Ns of AWAKE time".
+# Only the latest wake is observable, which suffices: judges themselves run
+# only while awake, and a genuinely hung writer still exceeds any grace within
+# one sustained awake window. Use for liveness beacons; keep plain
+# fm_path_age for wall-clock questions (schedules, cadences).
+fm_path_age_since_system_wake() {
+  local path=$1 m now wake
+  m=$(fm_path_mtime "$path") || { echo 999999; return; }
+  now=$(date +%s)
+  if wake=$(fm_system_wake_epoch) && [ "$wake" -gt "$m" ] && [ "$wake" -le "$now" ]; then
+    m=$wake
+  fi
+  echo $(( now - m ))
+}
+
 fm_watcher_lock_matches_pid() {
   local state=$1 watch_path=$2 pid=$3 home=${4:-$FM_HOME} lockdir lock_home lock_path lock_identity current_identity
   lockdir="$state/.watch.lock"
@@ -100,7 +152,10 @@ fm_watcher_healthy() {
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   fm_pid_alive "$pid" || return 1
   fm_watcher_lock_matches_pid "$state" "$watch_path" "$pid" "$home" || return 1
-  age=$(fm_path_age "$beat")
+  # Awake-time age: a live identity-matched watcher whose beacon merely
+  # predates a system sleep window is healthy, not dead (see
+  # fm_path_age_since_system_wake).
+  age=$(fm_path_age_since_system_wake "$beat")
   [ "$age" -lt "$grace" ] || return 1
   # shellcheck disable=SC2034 # Read by callers after fm_watcher_healthy returns.
   FM_WATCHER_HEALTHY_PID=$pid
