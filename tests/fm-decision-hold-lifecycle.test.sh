@@ -13,7 +13,7 @@ TMP_ROOT=$(fm_test_tmproot fm-decision-hold)
 TASKS_AXI_BIN=$(command -v tasks-axi || true)
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
-command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found"; exit 0; }
+fm_test_need_tool tasks-axi || exit 0
 
 make_home() {  # <name>
   local home="$TMP_ROOT/$1" fakebin
