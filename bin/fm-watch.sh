@@ -46,6 +46,10 @@
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
 #                          invalid pending retirements were preserved without
 #                          running a check or removing poll artifacts
+#   check: decision-digest: <line>
+#                          once-daily ranked digest of waiting captain
+#                          decisions from bin/fm-decision-wait.sh; never fires
+#                          when nothing is waiting
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
 # For normal supervision, resume the session-start primary-harness protocol
@@ -106,6 +110,7 @@ HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
+DECISION_DIGEST_INTERVAL=${FM_DECISION_DIGEST_INTERVAL:-86400}  # seconds between decision-wait digest wakes
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
@@ -799,6 +804,32 @@ while :; do
       fm_wake_append check unauthenticated-state-checks "$reason" || exit 1
       touch "$STATE/.last-check"
       wake "$reason"
+    fi
+    # Once-daily captain-decision digest. bin/fm-decision-wait.sh owns the
+    # durable first-observed wait record and the ranking; this block only
+    # paces it on the same restart-surviving mtime pattern as the check and
+    # heartbeat cadences. Reconciling the record runs every check sweep so a
+    # new wait's first-observed time lands promptly, while the digest wake
+    # fires at most once per DECISION_DIGEST_INTERVAL. A missing marker
+    # anchors the cadence without firing, so a fresh home (or a fresh state
+    # dir, e.g. in tests) can never emit a digest on its first cycle; the
+    # first digest becomes due one interval after that anchor. An empty
+    # digest (no waiting decisions) produces no wake and leaves the marker
+    # untouched, so the next sweep re-checks instead of waiting another day.
+    if [ ! -e "$STATE/.last-decision-digest" ]; then
+      touch "$STATE/.last-decision-digest"
+      FM_HOME="$FM_HOME" run_check "$SCRIPT_DIR/fm-decision-wait.sh" scan >/dev/null
+    elif [ "$(age_of "$STATE/.last-decision-digest")" -ge "$DECISION_DIGEST_INTERVAL" ]; then
+      out=$(FM_HOME="$FM_HOME" run_check "$SCRIPT_DIR/fm-decision-wait.sh" digest)
+      if [ -n "$out" ]; then
+        reason="check: decision-digest: $out"
+        fm_wake_append check decision-digest "$reason" || exit 1
+        touch "$STATE/.last-decision-digest"
+        touch "$STATE/.last-check"
+        wake "$reason"
+      fi
+    else
+      FM_HOME="$FM_HOME" run_check "$SCRIPT_DIR/fm-decision-wait.sh" scan >/dev/null
     fi
     touch "$STATE/.last-check"
   fi
