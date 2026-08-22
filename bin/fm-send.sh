@@ -19,8 +19,9 @@
 #   secondmate targets (their marked requests already carry the pending-reply
 #   expectation), for the --key path, and for harness command invocations
 #   (leading "/", or "$..." to codex) whose parsing the prefix would break.
-#   A failed or unconfirmed submit discards the record, so only a confirmed
-#   delivery ever arms detection. Plain sends without --ack are unchanged.
+#   A proven send failure discards the record, while a delivered-but-unconfirmed
+#   submit (exit 3) keeps it armed: the order very likely landed, so detection
+#   must keep tracking it. Plain sends without --ack are unchanged.
 #
 # Text submission is verified: the line is typed ONCE, then Enter is sent and
 # retried (Enter only, never retyped) until the target backend confirms a
@@ -557,8 +558,9 @@ else
   RESOLVE_ANSWER_TEXT=$MESSAGE
   # Token-marked order: validate eligibility, prefix the visible mark, and arm
   # the durable pending-ack record before delivery. A record armed here is
-  # discarded on every failed or unconfirmed submit below, so only a confirmed
-  # delivery leaves detection armed (bin/fm-steer-ack-lib.sh).
+  # discarded below only on a proven send failure; a delivered-but-unconfirmed
+  # submit (the pending verdict, exit 3) keeps it armed, because the order very
+  # likely landed and detection must keep tracking it (bin/fm-steer-ack-lib.sh).
   ACK_TOKEN=
   ACK_TASK_ID=
   if [ "$WANT_ACK" = 1 ]; then
