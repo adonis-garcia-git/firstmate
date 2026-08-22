@@ -181,7 +181,11 @@ queue_note() {
 
   id="$(date +%s)-$(basename "$tmp" | sed 's/^\.staging-//')"
   # Rewrite the id line now that we know it, then publish atomically.
-  sed -i "s/^id=PENDING$/id=$id/" "$tmp"
+  # Through a staging sibling rather than sed -i: BSD sed treats -i's next
+  # argument as the backup suffix, so the GNU-only form dies on macOS hosts.
+  sed "s/^id=PENDING$/id=$id/" "$tmp" > "$tmp.id"
+  chmod 600 "$tmp.id"
+  mv "$tmp.id" "$tmp"
   mv "$tmp" "$INBOX/$id.note"
 
   # One-line summary for the wake payload; the full body stays in the file.

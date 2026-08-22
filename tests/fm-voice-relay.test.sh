@@ -819,9 +819,17 @@ class Stub:
         self.raises = raises
         self.replies = 0
         self.failed = False
-        self.ended = asyncio.Event()
+        # Lazy, like the real Session: this stub is built outside any event
+        # loop, and Python 3.9 cannot construct asyncio primitives there.
+        self._ended = None
         self.turn = {}
         self.calls = []
+
+    @property
+    def ended(self):
+        if self._ended is None:
+            self._ended = asyncio.Event()
+        return self._ended
 
     async def _step(self, name):
         self.calls.append(name)
@@ -2274,7 +2282,7 @@ pass "the configured read scope is honoured"
 # voice agent. It reuses bin/fm-inbox.sh rather than carrying a second queue.
 
 before=$(find "$HOME_FIXTURE/state" -maxdepth 2 -name '*.note' | wc -l)
-[ "$before" = 0 ] || fail "fixture should start with an empty inbox"
+[ "$before" -eq 0 ] || fail "fixture should start with an empty inbox"
 
 handed=$(FM_HOME="$HOME_FIXTURE" python3 "$ROOT/bin/fm_voice_records.py" queue \
   "Refactor the login module and open a pull request for it" \
@@ -2284,7 +2292,7 @@ assert_contains "$handed" 'did not do the work yourself' \
   "handover should tell the model it handed over rather than acted"
 
 notes=$(find "$HOME_FIXTURE/state/inbox" -maxdepth 1 -name '*.note' | wc -l)
-[ "$notes" = 1 ] || fail "handover should leave exactly one note, found $notes"
+[ "$notes" -eq 1 ] || fail "handover should leave exactly one note, found $notes"
 note_file=$(find "$HOME_FIXTURE/state/inbox" -maxdepth 1 -name '*.note' | head -1)
 assert_grep 'Refactor the login module' "$note_file" \
   "the note should carry the captain's words"
@@ -2315,7 +2323,7 @@ FM_STATE_OVERRIDE="$alt_state" python3 "$ROOT/bin/fm_voice_records.py" queue \
   || fail "handover with an overridden state directory failed"
 
 moved=$(find "$alt_state/inbox" -maxdepth 1 -name '*.note' | wc -l)
-[ "$moved" = 1 ] || \
+[ "$moved" -eq 1 ] || \
   fail "the queue should write into the overridden state directory, found $moved"
 [ ! -e "$alt_home/state/inbox" ] || \
   fail "the queue should not have written under the home when the state is moved"

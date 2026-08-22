@@ -396,7 +396,10 @@ class Credentials:
         self._source = None
         self._resolved = None
         self._ambient_spent = False
-        self._lock = asyncio.Lock()
+        # Created on first use inside the running loop: constructing an
+        # asyncio.Lock here needs a current event loop on Python 3.9 (macOS
+        # ships 3.9 as its stock python3), where a bare construction raises.
+        self._lock = None
 
     def _usable(self):
         if self._creds is None:
@@ -408,6 +411,8 @@ class Credentials:
         return time.time() + self.REFRESH_MARGIN < self._expires
 
     async def get(self):
+        if self._lock is None:
+            self._lock = asyncio.Lock()
         async with self._lock:
             if not self._usable():
                 spend = self._source == FROM_ENVIRONMENT and bool(self.profile)
@@ -511,11 +516,27 @@ class Session:
         # for firstmate" has to be evidence in the run record, not an inference
         # from a count.
         self.tool_names = []
-        self.ended = asyncio.Event()
-        self.turn_done = asyncio.Event()
+        # Created on first use inside the running loop: constructing an
+        # asyncio.Event here needs a current event loop on Python 3.9 (macOS
+        # ships 3.9 as its stock python3), and sessions are also built outside
+        # any loop.
+        self._ended = None
+        self._turn_done = None
         self.home = options.home or records.default_home()
         self.scope = options.scope or records.read_scope(self.home)
         self.root = os.path.dirname(os.path.abspath(__file__))
+
+    @property
+    def ended(self):
+        if self._ended is None:
+            self._ended = asyncio.Event()
+        return self._ended
+
+    @property
+    def turn_done(self):
+        if self._turn_done is None:
+            self._turn_done = asyncio.Event()
+        return self._turn_done
 
     # ---------------------------------------------------------------- protocol
 
