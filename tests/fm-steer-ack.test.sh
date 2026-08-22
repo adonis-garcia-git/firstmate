@@ -24,6 +24,7 @@ fm_git_identity fmtest fmtest@example.invalid
 
 SEND="$ROOT/bin/fm-send.sh"
 WATCH="$ROOT/bin/fm-watch.sh"
+DRAIN="$ROOT/bin/fm-wake-drain.sh"
 BRIEF="$ROOT/bin/fm-brief.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 ACK_LIB="$ROOT/bin/fm-steer-ack-lib.sh"
@@ -234,17 +235,50 @@ test_ack_send_refusals() {
   pass "fm-send --ack refuses secondmate, --key, harness-command, and non-selector targets"
 }
 
-test_ack_send_discards_record_on_unconfirmed_submit() {
+test_ack_send_preserves_record_on_pending_submit() {
+  # A composer still rendering the text after Enter is the delivered-unconfirmed
+  # outcome (exit 3): the order very likely landed, so detection must stay armed.
+  # An acknowledged order clears the record through the tick, and a lost one
+  # still escalates - discarding here would leave a delivered order unmonitored.
   local dir fb log home rc
   dir="$TMP_ROOT/send-stuck"; mkdir -p "$dir"
   fb=$(make_stuck_send_stubs "$dir"); log="$dir/send.log"
   home=$(setup_send_home send-stuck-home)
   write_ship_meta "$home/state" helm
   FM_STEER_ACK_TOKEN=feedc0de run_send "$fb" "$home" "$log" fm-helm --ack "rebase now"; rc=$?
-  [ "$rc" -ne 0 ] || fail "an unconfirmed submit should fail loudly"
+  expect_code 3 "$rc" "a delivered-unconfirmed submit should report the documented exit 3"
+  assert_grep "submission is unconfirmed" "$log.err" \
+    "the delivered-unconfirmed outcome should tell the caller to verify, not resend"
+  assert_present "$(record_path "$home/state" helm feedc0de)" \
+    "a delivered-unconfirmed submit must keep the pending-ack record armed"
+  pass "fm-send --ack keeps detection armed on a delivered-unconfirmed submit"
+}
+
+test_ack_send_discards_record_on_failed_submit() {
+  local dir fb log home rc
+  dir="$TMP_ROOT/send-fail"; mkdir -p "$dir"
+  fb=$(make_send_stubs "$dir"); log="$dir/send.log"
+  cat > "$fb/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  send-keys) exit 1 ;;
+  display-message)
+    for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
+    printf 'fakepane\n'; exit 0 ;;
+  capture-pane) printf '╭──────────────╮\n│ >            │\n╰──────────────╯\n'; exit 0 ;;
+  list-windows) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/tmux"
+  home=$(setup_send_home send-fail-home)
+  write_ship_meta "$home/state" helm
+  FM_STEER_ACK_TOKEN=feedc0de run_send "$fb" "$home" "$log" fm-helm --ack "rebase now"; rc=$?
+  [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ] || fail "a failed submit should fail loudly (not exit 0 or 3), got $rc"
   assert_absent "$(record_path "$home/state" helm feedc0de)" \
-    "an unconfirmed submit must discard the pending-ack record"
-  pass "fm-send --ack discards the record when the submit is not confirmed"
+    "a failed submit must discard the pending-ack record"
+  pass "fm-send --ack discards the record when the submit fails outright"
 }
 
 # --- lib tick behavior ------------------------------------------------------
@@ -366,14 +400,38 @@ test_watcher_surfaces_unacknowledged_order() {
   [ "$(queue_steer_ack_count "$state" helm abcd9876)" = 1 ] \
     || fail "watcher should have queued exactly one durable steer-ack wake"
 
-  # A relaunched watcher must not re-fire the same order: it stays blocking.
+  # A relaunched watcher re-surfaces the still-unhandled durable wake through
+  # the recovery reason - never as a duplicate steer-ack record.
   watch_bg "$state" "$dir/fakebin" "$dir/out2"
-  local pid=$!
-  wait_live "$pid" 25 || { out=$(cat "$dir/out2"); fail "relaunched watcher exited again on the already-surfaced order: $out"; }
-  reap "$pid"
+  rc=0
+  wait_for_exit $! 100 || rc=$?
+  [ "$rc" != 124 ] || fail "relaunched watcher did not re-surface the unhandled durable order"
+  assert_contains "$(cat "$dir/out2")" "check: rearm-resurface" \
+    "relaunched watcher should report recovery for the unacknowledged order"
   [ "$(queue_steer_ack_count "$state" helm abcd9876)" = 1 ] \
     || fail "relaunched watcher queued a duplicate steer-ack wake"
-  pass "watcher surfaces an unacknowledged order exactly once and then keeps blocking"
+
+  # Handling: drain the durable wake and run the printed generation-bound
+  # acknowledgement; only then does a relaunched watcher keep blocking.
+  local drain_out="$dir/drain.out" drain_err="$dir/drain.err" sequence generation
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2> "$drain_err" \
+    || fail "drain failed on the durable steer-ack wake"
+  grep -F 'check: steer-ack: helm order [ack=abcd9876] unacknowledged' "$drain_out" >/dev/null \
+    || fail "drain did not re-print the durable steer-ack row"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$drain_err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$drain_err")
+  [ -n "$sequence" ] && [ -n "$generation" ] \
+    || fail "drain omitted its post-handling acknowledgement boundary"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+    || fail "handled steer-ack wake could not be acknowledged"
+
+  watch_bg "$state" "$dir/fakebin" "$dir/out3"
+  local pid=$!
+  wait_live "$pid" 25 || { out=$(cat "$dir/out3"); fail "watcher exited again after the order was handled and acknowledged: $out"; }
+  reap "$pid"
+  [ "$(queue_steer_ack_count "$state" helm abcd9876)" = 0 ] \
+    || fail "post-acknowledgement watcher re-queued the already-handled steer-ack wake"
+  pass "watcher surfaces an unacknowledged order once, recovers it until acknowledged, then keeps blocking"
 }
 
 test_watcher_absorbs_acknowledged_order() {
@@ -412,7 +470,7 @@ test_briefs_teach_the_ack_reply() {
   local home brief
   home="$TMP_ROOT/brief-home"
   mkdir -p "$home/data"
-  FM_HOME="$home" "$BRIEF" ship-task some-proj >/dev/null 2>&1 \
+  FM_HOME="$home" "$BRIEF" ship-task some-proj --mode no-mistakes >/dev/null 2>&1 \
     || fail "ship brief scaffold failed"
   brief="$home/data/ship-task/brief.md"
   assert_grep '[ack={token}]' "$brief" "ship brief should name the token-marked order form"
@@ -464,7 +522,8 @@ test_teardown_clears_task_records() {
 test_ack_send_arms_record_and_prefixes_mark
 test_plain_send_arms_nothing
 test_ack_send_refusals
-test_ack_send_discards_record_on_unconfirmed_submit
+test_ack_send_preserves_record_on_pending_submit
+test_ack_send_discards_record_on_failed_submit
 test_tick_is_silent_inside_window
 test_tick_escalates_exactly_once_past_window
 test_tick_clears_on_ack_including_late_and_duplicate

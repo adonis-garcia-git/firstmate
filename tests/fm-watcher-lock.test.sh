@@ -1239,13 +1239,17 @@ test_guard_alarms_on_false_beacon_dead_watcher() {
   # The watcher touches its liveness beacon at the top of every cycle, then can
   # die later in the same cycle - leaving a FRESH beacon over a DEAD process even
   # on a machine that never slept (so awake-time age alone still reads it fresh).
-  # The guard (fm-send's WATCHER DOWN heuristic) must not read that stale-liveness
-  # beacon as a live watcher: with in-flight work and the singleton lock naming a
-  # dead pid it must still raise WATCHER DOWN, while a lock naming a LIVE pid or a
-  # released lock (the benign re-arm gap) must stay silent so no false alarm
-  # fires mid-turn.
-  local dir state err deadp
-  # (1) fresh beacon + lock holds a DEAD pid -> alarm despite the fresh beacon.
+  # Under the persistent-watcher model (a live pid is the real liveness signal)
+  # the guard must not read that stale-liveness beacon as a live watcher: with
+  # in-flight work and the singleton lock naming a dead pid it must raise
+  # WATCHER DOWN naming that dead holder, while a live identity-matched watcher
+  # stays silent. Under the Claude Stop auto-arm model the watcher legitimately
+  # runs only BETWEEN turns, so a fresh beacon keeps the mid-turn guard quiet
+  # even over a dead lock holder - the Stop-owned claim-abandonment re-arm owns
+  # that recovery (tests/fm-claude-stop-autoarm.test.sh covers it), and the
+  # between-turns released lock is the same model's healthy state.
+  local dir state err deadp pid identity
+  # (1) persistent: fresh beacon + lock holds a DEAD pid -> alarm naming it.
   dir=$(make_case guard-false-beacon)
   state="$dir/state"
   err="$dir/guard.err"
@@ -1254,7 +1258,7 @@ test_guard_alarms_on_false_beacon_dead_watcher() {
   deadp=$(dead_pid)
   mkdir -p "$state/.watch.lock"
   printf '%s\n' "$deadp" > "$state/.watch.lock/pid"
-  CLAUDECODE=1 PI_CODING_AGENT='' GROK_AGENT='' FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
+  FM_SUPERVISION_MODEL=persistent FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
   grep -F 'WATCHER DOWN - SUPERVISION IS OFF' "$err" >/dev/null \
     || fail "guard trusted a fresh beacon over a dead watcher (false beacon not caught): $(cat "$err")"
   # The banner's evidence must name the dead lock holder: an alarm whose only
@@ -1262,28 +1266,50 @@ test_guard_alarms_on_false_beacon_dead_watcher() {
   grep -F "but its watcher (lock pid $deadp) died" "$err" >/dev/null \
     || fail "false-beacon alarm did not name the dead lock holder: $(cat "$err")"
 
-  # (2) fresh beacon + lock holds a LIVE pid -> silence (no false alarm).
+  # (2) persistent: fresh beacon + live identity-matched watcher -> silence.
   dir=$(make_case guard-live-beacon)
   state="$dir/state"
   err="$dir/guard.err"
   printf 'project=x\n' > "$state/task.meta"
-  touch "$state/.last-watcher-beat"
+  sleep 60 &
+  pid=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid") || fail "could not identify live guard watcher"
   mkdir -p "$state/.watch.lock"
-  printf '%s\n' "$$" > "$state/.watch.lock/pid"
-  FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
+  printf '%s\n' "$pid" > "$state/.watch.lock/pid"
+  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  touch "$state/.last-watcher-beat"
+  FM_SUPERVISION_MODEL=persistent FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
   ! grep -F 'WATCHER DOWN' "$err" >/dev/null \
     || fail "guard false-alarmed with a live watcher behind a fresh beacon: $(cat "$err")"
 
-  # (3) fresh beacon + released lock (no pid file) -> silence (benign re-arm gap).
+  # (3) autoarm: fresh beacon + released lock (the between-turns gap) -> silence.
   dir=$(make_case guard-released-lock)
   state="$dir/state"
   err="$dir/guard.err"
   printf 'project=x\n' > "$state/task.meta"
   touch "$state/.last-watcher-beat"
-  FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
+  FM_SUPERVISION_MODEL=autoarm FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
   ! grep -F 'WATCHER DOWN' "$err" >/dev/null \
-    || fail "guard false-alarmed during a benign re-arm gap (released lock): $(cat "$err")"
-  pass "guard alarms on a fresh beacon over a dead watcher, silent for live or released locks"
+    || fail "guard false-alarmed during the autoarm between-turns gap (released lock): $(cat "$err")"
+
+  # (4) autoarm: fresh beacon + dead lock holder -> still quiet mid-turn; the
+  # Stop-owned claim-abandonment re-arm owns this recovery, not the pull guard.
+  dir=$(make_case guard-autoarm-deadholder)
+  state="$dir/state"
+  err="$dir/guard.err"
+  printf 'project=x\n' > "$state/task.meta"
+  touch "$state/.last-watcher-beat"
+  deadp=$(dead_pid)
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$deadp" > "$state/.watch.lock/pid"
+  FM_SUPERVISION_MODEL=autoarm FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
+  ! grep -F 'WATCHER DOWN' "$err" >/dev/null \
+    || fail "autoarm mid-turn guard alarmed on a dead holder the Stop re-arm owns: $(cat "$err")"
+  pass "guard alarms on a dead holder under persistent, silent for live watchers and autoarm gaps"
 }
 
 test_singleton_start
