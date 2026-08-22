@@ -62,8 +62,15 @@ make_home() {  # <name>
   printf '%s\n' "$home"
 }
 
+record_claude_idle() {  # <state-dir> <id>
+  local state=$1 id=$2 gen
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$id")
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" idle --gen "$gen" \
+    --source claude-hook --event stop
+}
+
 write_fixture() {  # <home>
-  local home=$1
+  local home=$1 fixture_gen
   mkdir -p "$home/projects/alpha-worktree" "$home/projects/scout-worktree" "$home/secondmate-home"
   cat > "$home/data/backlog.md" <<EOF
 ## In flight
@@ -84,12 +91,18 @@ EOF
     "window=firstmate:fm-ship-task" \
     "worktree=$home/projects/alpha-worktree" \
     "project=alpha" \
-    "harness=codex" \
+    "harness=claude" \
     "kind=ship" \
     "mode=ship" \
     "yolo=off" \
     "pr=https://github.com/kunchenguid/firstmate/pull/9"
   printf 'needs-decision: choose an API shape\n' > "$home/state/ship-task.status"
+  # A working ship task proves it through its own semantic busy-state record
+  # (bin/fm-busy-lib.sh), which is what the snapshot's current-state read
+  # consults; rendered pane text is no longer a state source.
+  fixture_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" ship-task)
+  "$ROOT/bin/fm-busy-event.sh" apply "$home/state" ship-task busy --gen "$fixture_gen" \
+    --source claude-hook --event user-prompt-submit
   fm_write_meta "$home/state/scout-task.meta" \
     "window=firstmate:fm-scout-task" \
     "worktree=$home/projects/scout-worktree" \
@@ -343,7 +356,7 @@ EOF
 }
 
 test_event_hints_follow_reconciled_current_state() {
-  local home fakebin out
+  local home fakebin out hint_gen
   home=$(make_home event-hints)
   mkdir -p \
     "$home/projects/active-decision" \
@@ -354,33 +367,41 @@ test_event_hints_follow_reconciled_current_state() {
     "window=firstmate:fm-active-decision" \
     "worktree=$home/projects/active-decision" \
     "project=alpha" \
-    "harness=codex" \
+    "harness=claude" \
     "kind=ship" \
     "mode=ship"
+  record_claude_idle "$home/state" active-decision
   printf 'needs-decision: choose an API shape\n' > "$home/state/active-decision.status"
   fm_write_meta "$home/state/active-blocked.meta" \
     "window=firstmate:fm-active-blocked" \
     "worktree=$home/projects/active-blocked" \
     "project=alpha" \
-    "harness=codex" \
+    "harness=claude" \
     "kind=ship" \
     "mode=ship"
+  record_claude_idle "$home/state" active-blocked
   printf 'blocked: waiting on access\n' > "$home/state/active-blocked.status"
   fm_write_meta "$home/state/stale-decision.meta" \
     "window=firstmate:fm-stale-decision-ship-task" \
     "worktree=$home/projects/stale-decision" \
     "project=alpha" \
-    "harness=codex" \
+    "harness=claude" \
     "kind=ship" \
     "mode=ship"
+  hint_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" stale-decision)
+  "$ROOT/bin/fm-busy-event.sh" apply "$home/state" stale-decision busy --gen "$hint_gen" \
+    --source claude-hook --event user-prompt-submit
   printf 'needs-decision: already answered\n' > "$home/state/stale-decision.status"
   fm_write_meta "$home/state/stale-blocked.meta" \
     "window=firstmate:fm-stale-blocked-ship-task" \
     "worktree=$home/projects/stale-blocked" \
     "project=alpha" \
-    "harness=codex" \
+    "harness=claude" \
     "kind=ship" \
     "mode=ship"
+  hint_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" stale-blocked)
+  "$ROOT/bin/fm-busy-event.sh" apply "$home/state" stale-blocked busy --gen "$hint_gen" \
+    --source claude-hook --event user-prompt-submit
   printf 'blocked: old failure\n' > "$home/state/stale-blocked.status"
   fakebin=$(make_fakebin "$home")
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
@@ -435,6 +456,9 @@ test_backlog_tasks_axi_forms_and_overrides() {
 - [ ] parenthetical-title - Refresh sidebar (mobile) (repo: beta) (kind: ship)
 - [ ] blocked-reason - Blocked Reason (repo: beta) (kind: ship) blocked-by: queued-comma - waits on queued-comma
 - [ ] sample-decision-route - Choose sample route (repo: sample) (kind: captain) (since 2026-07-14) (hold: captain route choice pending) (hold-kind: captain)
+- [ ] dated-route - Deferred sample route (repo: sample) (kind: ship) (hold: captain sent this to later) (hold-kind: captain) (hold-until: 2026-09-01)
+- [ ] captain-gated-work - Captain-gated ship work (repo: sample) (kind: ship) (hold: captain go pending) (hold-kind: captain)
+- [ ] parked-prose - Parked captain call (repo: sample) (kind: ship) (hold: DEFERRED by captain) (hold-kind: captain)
 
 ## Done
 - [x] done-comma - Done Comma Task https://github.com/kunchenguid/firstmate/pull/42 (repo: gamma, merged 2026-07-09) (kind: ship)
@@ -447,12 +471,14 @@ EOF
     "window=firstmate:fm-bold-task" \
     "worktree=$projects/bold-worktree" \
     "project=alpha" \
-    "harness=codex" \
+    "harness=claude" \
     "kind=scout" \
     "mode=scout"
+  record_claude_idle "$home/state" bold-task
   printf 'done: report ready\n' > "$home/state/bold-task.status"
   fakebin=$(make_fakebin "$home")
-  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_DATA_OVERRIDE="$data" FM_PROJECTS_OVERRIDE="$projects" "$SNAPSHOT" --json)
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_DATA_OVERRIDE="$data" FM_PROJECTS_OVERRIDE="$projects" \
+    FM_SNAPSHOT_NOW=2026-07-14T00:00:00Z "$SNAPSHOT" --json)
   printf '%s' "$out" | jq -e --arg data "$data" --arg projects "$projects" '
     .roots.data == $data
       and .roots.projects == $projects
@@ -492,7 +518,23 @@ EOF
       and .kind == "captain"
       and .hold_reason == "captain route choice pending"
       and .hold_kind == "captain"
+      and .captain_actionable == true
   ' >/dev/null || fail "tasks-axi captain-hold metadata did not parse"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "dated-route")
+    | .title == "Deferred sample route"
+      and .hold_until == "2026-09-01"
+      and .captain_actionable == false
+      and .deferred_marker == false
+  ' >/dev/null || fail "a dated captain hold did not defer or strip its hold-until from the title"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "captain-gated-work")
+    | .kind == "ship" and .captain_actionable == true and .deferred_marker == false
+  ' >/dev/null || fail "captain actionability must not depend on the row kind"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "parked-prose")
+    | .captain_actionable == true and .deferred_marker == true
+  ' >/dev/null || fail "a prose-deferred captain hold did not carry the presentation marker"
   printf '%s' "$out" | jq -e '
     .backlog.records[] | select(.id == "done-comma")
     | .repo == "gamma"
@@ -709,9 +751,10 @@ test_completed_scout_report_is_pointer_not_pending() {
     "window=firstmate:fm-lavish-103" \
     "worktree=$home/projects/scout-wt" \
     "project=firstmate" \
-    "harness=codex" \
+    "harness=claude" \
     "kind=scout" \
     "mode=scout"
+  record_claude_idle "$home/state" lavish-103
   # Stale needs-decision, then the scout finished (done). No keyed resolution.
   printf 'needs-decision: adopt approach A or B for Lavish issue 103\n' > "$home/state/lavish-103.status"
   printf 'done: report ready at data/lavish-103/report.md\n' >> "$home/state/lavish-103.status"
@@ -740,9 +783,10 @@ test_parked_scout_decision_stays_pending() {
     "window=firstmate:fm-parked-scout" \
     "worktree=$home/projects/scout-wt2" \
     "project=firstmate" \
-    "harness=codex" \
+    "harness=claude" \
     "kind=scout" \
     "mode=scout"
+  record_claude_idle "$home/state" parked-scout
   printf 'needs-decision [key=q1]: adopt approach A or B\n' > "$home/state/parked-scout.status"
   fakebin=$(make_fakebin "$home")
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)

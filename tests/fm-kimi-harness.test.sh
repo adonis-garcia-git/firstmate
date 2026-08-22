@@ -5,6 +5,12 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# bin/fm-harness.sh checks verified ENV markers before ancestry. A suite run
+# from inside Cursor, Claude, Pi, or Grok inherits those markers, which outrank
+# the fake ancestry the detection cases set up. Drop the ambient markers so the
+# asserted verdict does not depend on which harness launched the suite.
+unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS
+
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 KIMI_HOOK="$ROOT/bin/fm-kimi-turnend-hook.sh"
@@ -174,7 +180,7 @@ run_spawn() {
     FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/brief.md" \
     FM_KIMI_READY_POLLS=2 FM_KIMI_DELIVERY_POLLS=2 FM_KIMI_POLL_INTERVAL=0 \
     PATH="$fakebin:$BASE_PATH" \
-    "$SPAWN" "$id" "$proj" --harness kimi "$@" 2>&1
+    "$SPAWN" "$id" "$proj" --harness kimi --mode no-mistakes --yolo off "$@" 2>&1
 }
 
 read_spawn_record() {
@@ -199,7 +205,7 @@ test_kimi_launch_then_send_is_verified() {
   assert_contains "$out" "spawned $id harness=kimi" "kimi spawn did not report success"
 
   launch=$(cat "$CASE_DIR/launch.log")
-  [ "$launch" = "'$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" ] \
+  [ "$launch" = "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS '$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" ] \
     || fail "kimi launch did not use the absolute binary, model, and --auto only: $launch"
   assert_not_contains "$launch" "--effort" "kimi launch emitted a nonexistent effort flag"
   assert_not_contains "$launch" "turn-ended" "kimi launch embedded a turn-end path"
@@ -456,7 +462,7 @@ test_kimi_falls_back_to_expanded_home_binary() {
   rc=$?
   expect_code 0 "$rc" "Kimi HOME fallback spawn should succeed"
   launch=$(cat "$CASE_DIR/launch.log")
-  [ "$launch" = "'$fallback' --auto" ] \
+  [ "$launch" = "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS '$fallback' --auto" ] \
     || fail "Kimi fallback did not expand HOME into an absolute executable: $launch"
   pass "fm-spawn: Kimi fallback expands the active HOME"
 }
@@ -537,10 +543,12 @@ esac
 SH
   chmod +x "$fakebin/ps"
 
-  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
     PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
   [ "$out" = kimi ] || fail "kimi ancestry detection returned '$out'"
-  out=$(CLAUDECODE=1 PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
+  out=$(env -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    CLAUDECODE=1 PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
   [ "$out" = claude ] || fail "verified env-marker precedence changed, got '$out'"
   pass "fm-harness: markerless kimi is detected by ancestry after env-marker precedence"
 }
@@ -619,7 +627,7 @@ test_kimi_busy_signature_is_scoped_to_spinner_lines() {
   pass "busy detection: real Kimi moon-plus-middot captures require its harness while idle labels stay idle"
 }
 
-test_watcher_scopes_moon_spinner_to_recorded_kimi_task() (
+test_watcher_never_classifies_kimi_from_its_spinner() (
   local state="$TMP_ROOT/watch-state" busy_capture='  🌑 · Tip: ask Kimi to schedule tasks, e.g. "remind me at 5pm"'
   mkdir -p "$state"
   printf 'window=fake\nharness=kimi\n' > "$state/kimi-watch.meta"
@@ -631,26 +639,26 @@ test_watcher_scopes_moon_spinner_to_recorded_kimi_task() (
   . "$ROOT/bin/fm-watch.sh"
   # shellcheck disable=SC2329 # Runtime override called by the sourced watcher.
   fm_backend_busy_state() { printf 'unknown'; }
-  window_is_busy fake "$busy_capture" \
-    || fail "fm-watch did not recognize the real Kimi spinner-line shape"
+  # Standalone Kimi has no verified semantic busy source, so it classifies
+  # unknown - and unknown is never working. Its moon-phase spinner is
+  # deliberately not a state source: the approved redesign forbids inventing a
+  # Kimi UI signature, and that glyph set is locale- and emoji-font-sensitive.
+  if window_is_busy fake "$busy_capture"; then
+    fail "fm-watch classified a Kimi task busy from its spinner instead of unknown"
+  fi
+  [ "$(fm_busy_classify tmux fake kimi kimi-watch "$state" "$busy_capture")" = "unknown kimi-unverified" ] \
+    || fail "a Kimi task must classify unknown kimi-unverified"
   printf 'window=fake\nharness=codex\n' > "$state/kimi-watch.meta"
   if window_is_busy fake "$busy_capture"; then
-    fail "fm-watch applied Kimi's real spinner signature to a recorded Codex task"
+    fail "fm-watch applied Kimi's spinner to a recorded Codex task"
   fi
-  printf 'window=fake\nharness=kimi\n' > "$state/kimi-watch.meta"
-  if window_is_busy fake 'ordinary response ending with 🌕'; then
-    fail "fm-watch treated an ordinary Kimi moon as a spinner line"
+  printf 'window=fake\nharness=grok\n' > "$state/kimi-watch.meta"
+  if window_is_busy fake "$busy_capture"; then
+    fail "Kimi's spinner classified a recorded Grok task through its isolated fallback"
   fi
-  if window_is_busy fake '🌕 Full moon details'; then
-    fail "fm-watch treated moon-led Kimi output without the middot separator as busy"
-  fi
-  if window_is_busy fake 'auto  K2.7 Coding thinking  /some/path'; then
-    fail "fm-watch treated Kimi's idle thinking-effort status label as busy"
-  fi
-  if window_is_busy fake 'Ctrl+c:cancel'; then
-    fail "fm-watch let Grok's exact busy token classify a recorded Kimi task busy"
-  fi
-  pass "fm-watch: Kimi spinner matching is metadata-scoped and ignores Grok's busy token"
+  window_is_busy fake 'Ctrl+c:cancel' \
+    || fail "Grok's own verified token must still classify a recorded Grok task busy"
+  pass "fm-watch classifies Kimi as unknown rather than from its spinner, and Grok's fallback stays isolated"
 )
 
 test_kimi_bordered_prompt_needs_no_override() {
@@ -679,5 +687,5 @@ test_kimi_readiness_gate_precedes_pointer
 test_kimi_detection_uses_ancestry_after_markers
 test_kimi_session_lock_identity
 test_kimi_busy_signature_is_scoped_to_spinner_lines
-test_watcher_scopes_moon_spinner_to_recorded_kimi_task
+test_watcher_never_classifies_kimi_from_its_spinner
 test_kimi_bordered_prompt_needs_no_override

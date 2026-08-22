@@ -317,6 +317,10 @@ test_watch_digest_fires_once_per_interval_and_stays_quiet() {
   pid=$!
   wait_live "$pid" 25 || { reap "$pid"; fail "watcher exited on a fresh home's first sweep: $(cat "$out")"; }
   reap "$pid"
+  # The reap kill leaves watcher downtime-recovery state armed; clear it so the
+  # next phase tests the digest cadence, not the (separately covered) recovery
+  # re-surface contract.
+  rm -f "$home/state/.watcher-down"
   [ -e "$marker" ] || fail "first sweep must anchor the digest cadence marker"
   [ ! -e "$queue" ] || ! grep -q "decision-digest" "$queue" \
     || fail "a fresh home must not fire a digest on its first cycle"
@@ -334,6 +338,18 @@ test_watch_digest_fires_once_per_interval_and_stays_quiet() {
   [ "$(grep -c 'decision-digest' "$queue")" -eq 1 ] || fail "exactly one digest wake expected"
   grep -q "hold:dec-a" "$queue" || fail "the digest wake must carry the ranked wait data"
 
+  # Simulate the handling turn so the queued digest wake does not re-surface
+  # through downtime recovery in the next phases: drain it, then run the
+  # printed generation-bound acknowledgement.
+  local drain_err="$home/drain.err" sequence generation
+  FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-wake-drain.sh" > "$home/drain.out" 2> "$drain_err" \
+    || fail "drain failed on the queued digest wake"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$drain_err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$drain_err")
+  [ -n "$sequence" ] && [ -n "$generation" ] || fail "drain omitted its acknowledgement boundary"
+  FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-wake-drain.sh" --ack-through "$sequence" --recovery-generation "$generation" \
+    || fail "digest wake could not be acknowledged"
+
   # Within the interval a re-armed watcher must not fire again, even though the
   # same wait (the current top item) is still there.
   out="$home/watch2.out"
@@ -341,7 +357,8 @@ test_watch_digest_fires_once_per_interval_and_stays_quiet() {
   pid=$!
   wait_live "$pid" 25 || { reap "$pid"; fail "watcher exited again within the digest interval: $(cat "$out")"; }
   reap "$pid"
-  [ "$(grep -c 'decision-digest' "$queue")" -eq 1 ] \
+  rm -f "$home/state/.watcher-down"
+  ! grep -q 'decision-digest' "$queue" 2>/dev/null \
     || fail "at most one digest wake per interval (queue: $(cat "$queue"))"
 
   # With no waiting decision an eligible (aged) sweep must stay quiet: no wake
@@ -354,7 +371,7 @@ test_watch_digest_fires_once_per_interval_and_stays_quiet() {
   pid=$!
   wait_live "$pid" 25 || { reap "$pid"; fail "watcher exited with nothing waiting: $(cat "$out")"; }
   reap "$pid"
-  [ "$(grep -c 'decision-digest' "$queue")" -eq 1 ] || fail "no digest wake when nothing is waiting"
+  ! grep -q 'decision-digest' "$queue" 2>/dev/null || fail "no digest wake when nothing is waiting"
   [ "$(marker_mtime "$marker")" -eq "$anchored" ] \
     || fail "an empty digest must not advance the cadence marker"
   [ -z "$(record_of "$home")" ] || fail "watcher-driven reconcile must drop the cleared wait"
