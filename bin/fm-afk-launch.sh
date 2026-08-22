@@ -164,9 +164,7 @@ fm_afk_launch_record_write() {  # <backend> <target> <extra>
 }
 
 fm_afk_launch_flag_write() {
-  local pending="$FM_AFK_LAUNCH_STATE/.afk.pending.$$"
-  date '+%s' > "$pending" || { rm -f "$pending"; return 1; }
-  mv "$pending" "$FM_AFK_LAUNCH_STATE/.afk" || { rm -f "$pending"; return 1; }
+  fm_afk_flag_write "$FM_AFK_LAUNCH_STATE"
 }
 
 # Read the recorded terminal into FM_AFK_REC_BACKEND/FM_AFK_REC_TARGET. The third
@@ -628,10 +626,15 @@ fm_afk_launch_stop() {
 
 fm_afk_launch_main() {
   local result
-  fm_afk_launch_lock_acquire || return 1
+  # Traps first, lock second. Acquiring before the handlers exist leaves a
+  # window where a signal terminates this process by default action and leaks
+  # the lock directory, which then blocks the next away-mode launch until the
+  # stale-owner reclaim path clears it. fm_afk_launch_lock_release only removes
+  # a lock this process owns, so arming it before acquisition is safe.
   trap fm_afk_launch_lock_release EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
+  fm_afk_launch_lock_acquire || return 1
   case "${1:-start}" in
     start) fm_afk_launch_start ;;
     start-native) fm_afk_launch_start_native ;;

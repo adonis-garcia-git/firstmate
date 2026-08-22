@@ -33,9 +33,90 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -eu
+          # Fork deviation from upstream (kunchenguid/firstmate a0cec26): upstream
+          # hard-requires the structured attestation comment emitted by
+          # no-mistakes >= 1.46.0. This fork's pipeline runs an older no-mistakes
+          # that writes only the signature line, and tool upgrades are handled as
+          # environment work outside PR branches. Attestation is therefore
+          # validated strictly when present, and a signature-only body is
+          # accepted as before; drop this relaxation once the fork's no-mistakes
+          # reaches 1.46.0.
           marker='Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
           if printf '%s' "${PR_BODY:-}" | grep -qF -- "$marker"; then
             echo "Found no-mistakes signature in PR #${PR_NUMBER} body."
+            prefix='<!-- no-mistakes-pipeline-attestation:v1 '
+            suffix=' -->'
+            body="${PR_BODY:-}"
+            case "$body" in
+              *"$prefix"*)
+                if ! command -v jq >/dev/null 2>&1; then
+                  echo "::error::This check requires jq to parse no-mistakes pipeline step attestation, but jq was not found on the runner." >&2
+                  exit 1
+                fi
+                json=''
+                parse_ok=0
+                rest="${body#*"$prefix"}"
+                case "$rest" in
+                  *"$suffix"*)
+                    json="${rest%%"$suffix"*}"
+                    if printf '%s' "$json" | jq -e . >/dev/null 2>&1; then
+                      parse_ok=1
+                    fi
+                    ;;
+                esac
+                if [ "$parse_ok" -ne 1 ]; then
+                  {
+                    echo "::error::A no-mistakes pipeline step attestation comment is present but unparseable."
+                    echo
+                    echo "The PR body contains the attestation prefix, but no valid comment of"
+                    echo "the form:"
+                    echo
+                    echo '    <!-- no-mistakes-pipeline-attestation:v1 {"head_sha":"...","steps":[...]} -->'
+                    echo
+                    echo "That comment is emitted by no-mistakes >= 1.46.0 (the release that started"
+                    echo "emitting structured step attestation; see https://github.com/kunchenguid/no-mistakes/pull/670)."
+                    echo "Do not hand-edit the '## Pipeline' section of the PR body."
+                    echo
+                    echo "Re-run the pipeline with 'git push no-mistakes'."
+                    echo "See CONTRIBUTING.md for setup and the full workflow."
+                    echo
+                    echo "PR author: ${PR_AUTHOR}"
+                  } >&2
+                  exit 1
+                fi
+                incomplete=''
+                for required in review test document; do
+                  status=$(printf '%s' "$json" | jq -r --arg step "$required" \
+                    '([(.steps | arrays | .[]) | select(.step == $step) | .status] | first // empty | select(. != "")) // "missing"')
+                  if [ "$status" != "completed" ]; then
+                    if [ -n "$incomplete" ]; then
+                      incomplete="${incomplete}, "
+                    fi
+                    incomplete="${incomplete}${required}=${status}"
+                  fi
+                done
+                if [ -n "$incomplete" ]; then
+                  {
+                    echo "::error::Required no-mistakes pipeline steps are not completed: ${incomplete}."
+                    echo
+                    echo "This repository requires review, test, and document to each have status"
+                    echo "exactly 'completed'. Quota skips and agent skips are not compliant."
+                    echo
+                    echo "Re-run the pipeline with 'git push no-mistakes' using no-mistakes >= 1.46.0"
+                    echo "so those required steps complete rather than skip."
+                    echo "See CONTRIBUTING.md for setup and the full workflow."
+                    echo
+                    echo "PR author: ${PR_AUTHOR}"
+                  } >&2
+                  exit 1
+                fi
+                echo "Pipeline step attestation is valid: review, test, and document are completed."
+                exit 0
+                ;;
+            esac
+            echo "No pipeline step attestation comment found; accepting signature-only body."
+            echo "This fork's no-mistakes predates 1.46.0 structured step attestation;"
+            echo "attestation is validated whenever the pipeline emits it."
             exit 0
           fi
           {

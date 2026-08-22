@@ -10,8 +10,10 @@
 #
 #   1. fm-send.sh --ack prefixes the outbound order with a visible
 #      "[ack=<token>]" mark and arms one durable record BEFORE submitting;
-#      a failed or unconfirmed submit discards the record so transport failure
-#      (already a loud fm-send error) never masquerades as a missed ack.
+#      a proven send failure discards the record (already a loud fm-send
+#      error), while a delivered-but-unconfirmed submit (the pending verdict,
+#      exit 3) keeps it armed - the order very likely landed, so detection
+#      must keep tracking it.
 #   2. The generated brief scaffold (bin/fm-brief.sh) teaches ship and scout
 #      workers to append `resolved [key=ack-<token>]: starting <restatement>`
 #      to their status file as the FIRST action on receiving a token-marked

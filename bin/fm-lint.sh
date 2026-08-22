@@ -1,12 +1,28 @@
 #!/usr/bin/env bash
-# fm-lint.sh - the single owner of firstmate's shell-lint definition.
+# fm-lint.sh - the single owner of firstmate's lint definition.
 #
-# Runs every canonical shell root with ShellCheck's default severity, extended
-# analysis, ambient configuration disabled, and one exact ShellCheck version.
-# CI and no-mistakes both invoke this script with no arguments, so the file set,
-# rule set, version, bounded execution, and diagnostics ordering cannot drift.
+# Runs its file set with ShellCheck's default severity, extended analysis,
+# ambient configuration disabled, and one exact ShellCheck version. CI and
+# no-mistakes both invoke this script with no arguments, so the rule set,
+# version, bounded execution, and diagnostics ordering cannot drift.
 # Tests stop source analysis at imported production modules because every
 # production shell is already a canonical, source-aware root of this same run.
+# The default (no explicit-path) path also runs bin/fm-lint-workflows.sh so a
+# malformed GitHub workflow, including a self-broken ci.yml, fails locally
+# before merge instead of only failing to run as CI.
+#
+# With no explicit paths, the file set depends on context:
+#   - In CI (GITHUB_ACTIONS=true or CI=true), on the main branch, or when no
+#     merge-base against origin/main (or local main) can be found, it lints
+#     the full canonical set: bin/*.sh bin/backends/*.sh tests/*.sh. This is
+#     what CI always runs, so CI coverage never depends on a local diff.
+#   - Otherwise (an ordinary local branch with a real merge-base) it lints
+#     only the canonical-set files changed since that merge-base, including
+#     uncommitted local edits, via plain local `git diff` (no network, no
+#     `gh`). A branch with zero matching changed files skips ShellCheck and
+#     prints a "no changed lint targets" note, then still validates workflows.
+# Explicit paths always bypass this file-set selection and lint exactly the
+# given paths, matching the same config, without the workflow YAML check.
 #
 # Canonical lint defaults to two bounded workers over two stable logical shards.
 # Each shard writes separate diagnostics, and the parent replays those outputs in
@@ -17,12 +33,12 @@
 # graph identity, wall/CPU/RSS, shard load, and competing ShellCheck processes.
 #
 # Usage:
-#   fm-lint.sh                         lint the canonical file set
+#   fm-lint.sh                         lint the context-selected file set (see above)
 #   fm-lint.sh <path>...               lint explicit roots with the same config
 #   fm-lint.sh --jobs <1|2> [path]...  override bounded worker count
 #   fm-lint.sh --telemetry <path> ...  write a quiet metrics snapshot
 #   fm-lint.sh --required-version      print the ShellCheck pin
-#   fm-lint.sh --list-files            print the canonical file set
+#   fm-lint.sh --list-files            print the file set that would be linted
 #   fm-lint.sh --help                  print this usage
 set -u
 
@@ -84,7 +100,14 @@ if [ "${1:-}" = "--required-version" ]; then
 fi
 
 fm_lint_usage() {
-  sed -n '2,26{s/^# \{0,1\}//;p;}' "$SELF"
+  sed -n '2,42{s/^# \{0,1\}//;p;}' "$SELF"
+}
+
+# Default no-args lint also validates GitHub workflows. Explicit paths stay a
+# ShellCheck-only override so callers can target one shell root.
+fm_lint_run_workflows() {
+  [ "$EXPLICIT_PATHS" -eq 0 ] || return 0
+  "$SELF_DIR/fm-lint-workflows.sh"
 }
 
 JOBS=${FM_LINT_JOBS:-2}
@@ -131,10 +154,69 @@ case "$JOBS" in
   *) printf 'fm-lint.sh: jobs must be 1 or 2, got %s.\n' "$JOBS" >&2; exit 2 ;;
 esac
 
+# fm_lint_changed_base_ref prints the ref to diff the working branch against:
+# the local origin/main tracking ref when present, else local main. Returns
+# nonzero when neither is resolvable, which the caller treats as "no
+# merge-base found" and falls back to a full lint.
+fm_lint_changed_base_ref() {
+  if git rev-parse --verify -q origin/main >/dev/null 2>&1; then
+    printf 'origin/main\n'
+    return 0
+  fi
+  if git rev-parse --verify -q main >/dev/null 2>&1; then
+    printf 'main\n'
+    return 0
+  fi
+  return 1
+}
+
+# fm_lint_is_canonical_root tests membership in the canonical set (a direct
+# *.sh child of bin/, bin/backends/, or tests/) without the shell case
+# statement's non-pathname wildcard matching a path separator by accident.
+fm_lint_is_canonical_root() {
+  local path=$1 dir base
+  case "$path" in
+    */*) dir=${path%/*}; base=${path##*/} ;;
+    *) dir=; base=$path ;;
+  esac
+  case "$base" in
+    *.sh) : ;;
+    *) return 1 ;;
+  esac
+  case "$dir" in
+    bin|bin/backends|tests) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+CHANGED_MODE=0
+EXPLICIT_PATHS=0
 if [ "$#" -gt 0 ]; then
+  EXPLICIT_PATHS=1
   ROOTS=("$@")
 else
-  ROOTS=(bin/*.sh bin/backends/*.sh tests/*.sh)
+  full_lint=1
+  if [ "${GITHUB_ACTIONS:-}" != true ] && [ "${CI:-}" != true ] \
+    && command -v git >/dev/null 2>&1 \
+    && git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+    && [ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" != main ]; then
+    base_ref=$(fm_lint_changed_base_ref) || base_ref=
+    merge_base=
+    [ -z "$base_ref" ] || merge_base=$(git merge-base "$base_ref" HEAD 2>/dev/null) || merge_base=
+    [ -z "$merge_base" ] || full_lint=0
+  fi
+
+  if [ "$full_lint" -eq 1 ]; then
+    ROOTS=(bin/*.sh bin/backends/*.sh tests/*.sh)
+  else
+    CHANGED_MODE=1
+    ROOTS=()
+    while IFS= read -r -d '' changed_path; do
+      fm_lint_is_canonical_root "$changed_path" || continue
+      [ -f "$changed_path" ] || continue
+      ROOTS+=("$changed_path")
+    done < <(git diff --name-only --diff-filter=ACMR -z "$merge_base" -- 2>/dev/null | LC_ALL=C sort -z)
+  fi
 fi
 ROOT_COUNT=${#ROOTS[@]}
 
@@ -143,14 +225,14 @@ if [ "$LIST_FILES" -eq 1 ]; then
     printf 'fm-lint.sh: --list-files does not accept explicit paths.\n' >&2
     exit 2
   }
-  printf '%s\n' "${ROOTS[@]}"
+  [ "$ROOT_COUNT" -eq 0 ] || printf '%s\n' "${ROOTS[@]}"
   exit 0
 fi
 
 if ! command -v shellcheck >/dev/null 2>&1; then
-  printf 'fm-lint.sh: ShellCheck not found; install ShellCheck %s for CI parity.\n' \
+  printf 'fm-lint.sh: ShellCheck not found; install ShellCheck %s with bin/fm-install-shellcheck.sh <destination-directory> and put that directory on PATH.\n' \
     "$REQUIRED_SHELLCHECK" >&2
-  exit 127
+  exit 1
 fi
 unset SHELLCHECK_OPTS
 SHELLCHECK_BIN=$(command -v shellcheck)
@@ -161,9 +243,16 @@ fi
 resolved=$("$SHELLCHECK_BIN" --version | awk '/^version:/ {print $2; exit}')
 printf 'fm-lint.sh: ShellCheck %s (pinned %s)\n' "$resolved" "$REQUIRED_SHELLCHECK" >&2
 if [ "$resolved" != "$REQUIRED_SHELLCHECK" ]; then
-  printf 'fm-lint.sh: ShellCheck %s required for CI parity, found %s. Install %s.\n' \
+  printf 'fm-lint.sh: ShellCheck %s required for CI parity, found %s. Install %s with bin/fm-install-shellcheck.sh <destination-directory>.\n' \
     "$REQUIRED_SHELLCHECK" "$resolved" "$REQUIRED_SHELLCHECK" >&2
   exit 1
+fi
+
+if [ "$CHANGED_MODE" -eq 1 ] && [ "$ROOT_COUNT" -eq 0 ]; then
+  printf 'fm-lint.sh: no changed lint targets\n'
+  overall_rc=0
+  fm_lint_run_workflows || overall_rc=$?
+  exit "$overall_rc"
 fi
 
 if [ -n "$TELEMETRY" ]; then
@@ -461,6 +550,12 @@ EOF
     printf 'fm-lint.sh: could not write telemetry to %s.\n' "$TELEMETRY" >&2
     [ "$overall_rc" -ne 0 ] || overall_rc=2
   fi
+fi
+
+if [ "$overall_rc" -eq 0 ]; then
+  fm_lint_run_workflows || overall_rc=$?
+else
+  fm_lint_run_workflows || true
 fi
 
 exit "$overall_rc"
