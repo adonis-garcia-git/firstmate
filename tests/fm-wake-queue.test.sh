@@ -345,13 +345,18 @@ test_enrichment_preserves_all_unread_lines_and_status_file_failures() {
   raw_count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$out")
   [ "$raw_count" -eq 13 ] || fail "missing, unreadable, malformed, empty, or oversized status input hid a raw row"
 
+  # Exact whole-line matches via awk: macOS BSD grep reports "out of memory" on
+  # multi-kilobyte -F patterns, and these expected lines are deliberately huge.
+  expect_exact_line() {  # <expected-line> <file>
+    printf '%s\n' "$1" | awk 'NR == FNR { want = $0; next } $0 == want { found = 1; exit } END { exit found ? 0 : 1 }' - "$2"
+  }
   expected="wake annotation: latest wake-EVENT observed at drain, not current state: huge.status: $(cat "$state/huge.status")"
-  grep -Fx "$expected" "$out" >/dev/null \
+  expect_exact_line "$expected" "$out" \
     || fail "the oversized unread status line was truncated or omitted"
   i=1
   while [ "$i" -le 8 ]; do
     expected="wake annotation: latest wake-EVENT observed at drain, not current state: many-$i.status: $(cat "$state/many-$i.status")"
-    grep -Fx "$expected" "$out" >/dev/null \
+    expect_exact_line "$expected" "$out" \
       || fail "readable status many-$i was truncated or omitted"
     i=$((i + 1))
   done

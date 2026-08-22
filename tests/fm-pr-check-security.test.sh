@@ -68,6 +68,14 @@ make_case() {
   fakebin="$dir/fakebin"
   fake_root="$dir/root"
   mkdir -p "$dir/home/state" "$dir/home/data" "$dir/home/config" "$dir/wt" "$fakebin" "$fake_root/bin"
+  # Keep the recorded-PR reconcile sweep (bin/fm-pr-reconcile.sh) inside its
+  # hourly self-throttle for every hermetic case: this suite's fake forge CLI
+  # serves only the merge poll's queries, so any sweep that finds recorded pr=
+  # metadata would queue its one bounded offline diagnostic, and a bounded
+  # watcher run would deliver that durable recovery as its single wake instead
+  # of servicing the check the case asserts on. The sweep's own behavior is
+  # covered by tests/fm-pr-reconcile.test.sh.
+  date +%s > "$dir/home/state/.pr-reconcile-last"
   cat > "$fake_root/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'guard\n' >> "$FM_TEST_GUARD_LOG"

@@ -81,6 +81,9 @@ make_fake_root() {
   ln -s "$ROOT/bin/fm-x-lib.sh" "$fake/bin/fm-x-lib.sh"
   ln -s "$ROOT/bin/fm-secondmate-registry-lib.sh" "$fake/bin/fm-secondmate-registry-lib.sh"
   ln -s "$ROOT/bin/fm-secondmate-parent-lib.sh" "$fake/bin/fm-secondmate-parent-lib.sh"
+  # fm-steer-ack-lib.sh: teardown sources it to clear leftover pending-ack
+  # records; a no-op in this fixture, but a real sibling teardown requires.
+  ln -s "$ROOT/bin/fm-steer-ack-lib.sh" "$fake/bin/fm-steer-ack-lib.sh"
   # fm-guard.sh: stub (teardown calls it with `|| true`).
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -162,6 +165,9 @@ test_teardown_skips_gracefully_without_tasktmp() {
   ln -s "$ROOT/bin/fm-x-lib.sh" "$fake/bin/fm-x-lib.sh"
   ln -s "$ROOT/bin/fm-secondmate-registry-lib.sh" "$fake/bin/fm-secondmate-registry-lib.sh"
   ln -s "$ROOT/bin/fm-secondmate-parent-lib.sh" "$fake/bin/fm-secondmate-parent-lib.sh"
+  # fm-steer-ack-lib.sh: teardown sources it to clear leftover pending-ack
+  # records; a no-op in this fixture, but a real sibling teardown requires.
+  ln -s "$ROOT/bin/fm-steer-ack-lib.sh" "$fake/bin/fm-steer-ack-lib.sh"
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0
