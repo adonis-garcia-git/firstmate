@@ -13,8 +13,12 @@
 #   - The same persisting terminal state escalates exactly one actionable
 #     check wake past the window - never a second wake for the same episode.
 #   - A task that resumes clears its record; a NEW terminal state restarts the
-#     episode and may alarm again. Only a SUCCESSFUL read decides that: a
-#     failed or malformed reader leaves the record and its window untouched.
+#     episode and may alarm again. So does a completion on a MOVED branch head
+#     under the same state value, which is what keeps a run's approval gate and
+#     its fix_review gate from merging into one episode without relying on
+#     having observed the working interval between them. Only a SUCCESSFUL read
+#     decides any of it: a failed, malformed, or timed-out reader leaves the
+#     record and its window untouched, and one wedged read cannot stall a sweep.
 #   - A healthy idle secondmate, a declared paused: external wait, a provably
 #     busy endpoint (e.g. a worker composing a gate response), and a done task
 #     with an armed merge poll never alarm. A busy endpoint defers detection
@@ -40,6 +44,7 @@ DRAIN="$ROOT/bin/fm-wake-drain.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 ALARM_LIB="$ROOT/bin/fm-completion-alarm-lib.sh"
 WAKE_LIB="$ROOT/bin/fm-wake-lib.sh"
+TIMEOUT_LIB="$ROOT/bin/fm-timeout-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-completion-alarm-tests)
 
@@ -62,8 +67,34 @@ tick_with() {
     . "$1"
     # shellcheck disable=SC1090
     . "$2"
-    fm_completion_alarm_tick "$3"
-  ' _ "$WAKE_LIB" "$ALARM_LIB" "$state"
+    # shellcheck disable=SC1090
+    . "$3"
+    fm_completion_alarm_tick "$4"
+  ' _ "$WAKE_LIB" "$TIMEOUT_LIB" "$ALARM_LIB" "$state"
+}
+
+# Same tick, against a reader that WEDGES rather than answering, so the test
+# can observe the per-read hard bound instead of the sweep-level budget (which
+# gates how many reads start, never how long one takes).
+tick_with_hung_reader() {  # <state> <read-timeout-secs>
+  local state=$1 read_timeout=$2 bin
+  bin="$TMP_ROOT/hung-crew-state.sh"
+  if [ ! -x "$bin" ]; then
+    # shellcheck disable=SC2016 # The generated reader expands these itself.
+    printf '#!/usr/bin/env bash\nset -u\nsleep "${FM_FAKE_CREW_HANG:-15}"\nprintf "state: done\\n"\n' > "$bin"
+    chmod +x "$bin"
+  fi
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$bin" FM_FAKE_CREW_HANG=15 \
+    FM_COMPLETION_READ_TIMEOUT_SECS="$read_timeout" bash -c '
+    set -u
+    # shellcheck disable=SC1090
+    . "$1"
+    # shellcheck disable=SC1090
+    . "$2"
+    # shellcheck disable=SC1090
+    . "$3"
+    fm_completion_alarm_tick "$4"
+  ' _ "$WAKE_LIB" "$TIMEOUT_LIB" "$ALARM_LIB" "$state"
 }
 
 # Same tick, with a stubbed semantic busy classifier returning <busy-verdict>.
@@ -361,8 +392,67 @@ test_tick_busy_period_ends_episode_and_next_completion_alarms() {
   pass "a busy period that ends an episode never suppresses the next completion"
 }
 
+test_tick_distinct_episodes_never_merge_behind_one_state() {
+  local state wt out rec t
+  state="$TMP_ROOT/tick-episode/state"; mkdir -p "$state"
+  wt="$TMP_ROOT/tick-episode/wt"
+  git init -q "$wt"
+  git -C "$wt" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "gate 1"
+  fm_write_meta "$state/helm.meta" "kind=ship" "worktree=$wt"
+  t=$(date +%s)
+  rec=$(record_path "$state" helm)
+  out=$(tick_with "$state" "$PARKED_LINE" "$t") || fail "arm tick failed"
+  [ -z "$out" ] || fail "the first gate escalated inside its window: $out"
+  out=$(tick_with "$state" "$PARKED_LINE" "$(( t + 400 ))") || fail "escalation tick failed"
+  assert_contains "$out" "check: completion-alarm: helm parked unsurfaced" \
+    "the first gate should escalate"
+  [ "$(queue_alarm_count "$state" helm)" = 1 ] || fail "expected one wake for gate 1"
+  # The supervisor answers the gate, the pipeline's fix step commits, and the
+  # run parks again at the NEXT gate - which reconciles as `parked` all over
+  # again. That whole working interval falls between two sweeps, so no
+  # reconciliation ever observes it: the completion identity has to carry the
+  # difference on its own.
+  git -C "$wt" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "fix round"
+  out=$(tick_with "$state" "$PARKED_LINE" "$(( t + 500 ))") || fail "re-arm tick failed"
+  [ -z "$out" ] || fail "the second episode escalated inside its own window: $out"
+  assert_grep "first_epoch=$(( t + 500 ))" "$rec" \
+    "a completion on a moved head must restart the episode window"
+  [ "$(queue_alarm_count "$state" helm)" = 1 ] || fail "the new episode woke inside its window"
+  out=$(tick_with "$state" "$PARKED_LINE" "$(( t + 900 ))") || fail "gate 2 tick failed"
+  assert_contains "$out" "check: completion-alarm: helm parked unsurfaced" \
+    "the second gate is a distinct episode and must alarm on its own merits"
+  [ "$(queue_alarm_count "$state" helm)" = 2 ] \
+    || fail "two distinct episodes merged behind one state value"
+  # An unmoved head is the SAME episode and must stay suppressed, so the
+  # identity closes the merge without reopening the re-nag direction.
+  out=$(tick_with "$state" "$PARKED_LINE" "$(( t + 1400 ))") || fail "same-episode tick failed"
+  [ -z "$out" ] || fail "an unchanged episode re-nagged: $out"
+  [ "$(queue_alarm_count "$state" helm)" = 2 ] \
+    || fail "an unchanged episode queued a duplicate wake"
+  pass "two distinct episodes sharing one state value never merge, and one never re-nags"
+}
+
+test_tick_bounds_a_single_hung_read() {
+  local state out rec started elapsed
+  state="$TMP_ROOT/tick-hung/state"; mkdir -p "$state"
+  fm_write_meta "$state/helm.meta" "kind=ship"
+  arm_record "$state" helm 'done' "checks green" "$(epoch_ago 400)"
+  rec=$(record_path "$state" helm)
+  started=$(date +%s)
+  out=$(tick_with_hung_reader "$state" 1) || fail "hung-reader tick failed"
+  elapsed=$(( $(date +%s) - started ))
+  [ "$elapsed" -lt 10 ] \
+    || fail "one wedged read held the sweep for ${elapsed}s, stalling the watcher poll loop"
+  [ -z "$out" ] || fail "a timed-out read escalated: $out"
+  assert_present "$rec" "a timed-out read must leave the record untouched"
+  ! grep -qE '^escalated_epoch=[0-9]+$' "$rec" \
+    || fail "a timed-out read must not stamp an escalation"
+  [ ! -e "$state/.wake-queue" ] || fail "a timed-out read queued a wake"
+  pass "one wedged reconciliation read is hard-bounded and cannot stall the sweep"
+}
+
 test_tick_bounds_one_sweeps_work() {
-  local state out
+  local state out cursor mode
   state="$TMP_ROOT/tick-budget/state"; mkdir -p "$state"
   fm_write_meta "$state/aaa.meta" "kind=ship"
   fm_write_meta "$state/bbb.meta" "kind=ship"
@@ -377,6 +467,12 @@ test_tick_bounds_one_sweeps_work() {
     "a sweep past its budget must stop taking on new tasks"
   assert_absent "$(record_path "$state" ccc)" \
     "a sweep past its budget must stop taking on new tasks"
+  # The cursor names a task and lives beside the records, so it owes the same
+  # private mode the record contract states.
+  cursor="$state/pending-completions/.scan-cursor"
+  assert_present "$cursor" "a truncated sweep should record where it stopped"
+  mode=$(stat -c %a "$cursor" 2>/dev/null || stat -f %Lp "$cursor" 2>/dev/null)
+  [ "$mode" = 600 ] || fail "the sweep cursor should be 0600 like the records, got $mode"
   # The reader stays just as slow, so every sweep keeps truncating. The tail
   # must still be reached: a sweep resumes after the task the last one stopped
   # on instead of re-reconciling the same head forever, so the bound defers
@@ -556,6 +652,8 @@ test_tick_defers_while_endpoint_busy
 test_tick_holds_done_with_armed_merge_poll
 test_tick_busy_flap_never_renags_escalated_episode
 test_tick_busy_period_ends_episode_and_next_completion_alarms
+test_tick_distinct_episodes_never_merge_behind_one_state
+test_tick_bounds_a_single_hung_read
 test_tick_bounds_one_sweeps_work
 test_tick_preserves_record_when_reader_fails
 test_tick_clears_orphaned_record

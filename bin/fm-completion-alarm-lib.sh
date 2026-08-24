@@ -37,15 +37,24 @@
 #      watcher was running still alarms: the first healthy cycle observes it,
 #      and a record already past its window escalates on that first cycle.
 #   4. The record IS the completion episode, and escalated_epoch is therefore
-#      scoped to exactly one episode rather than to the worker. An episode
-#      opens when a terminal state is first observed and ends the moment a
-#      reconciliation observes a different state, so a worker that completes,
-#      is handed new work, and completes again opens a SECOND episode with a
-#      fresh record that alarms on its own merits. Both directions follow from
-#      that one rule: no second wake inside an episode, and no episode
-#      suppressed by an earlier one. Its corollary is that no path may skip
-#      reconciliation while a record is alive, or an episode boundary would go
-#      unobserved and two episodes would silently merge.
+#      scoped to exactly one episode rather than to the worker. An episode is
+#      identified by its terminal state AND the branch head commit the worker
+#      completed on (episode=), which is what makes two episodes that share a
+#      state value distinguishable: reaching a run's approval gate and then its
+#      fix_review gate both reconcile as `parked`, but the fix step commits in
+#      between, so the heads differ and the second gate is a new episode that
+#      alarms on its own merits. Crucially that identity is read at completion
+#      time and does NOT depend on having observed the intervening working
+#      window - the observation this alarm exists because it cannot rely on.
+#      A reconciled completion whose identity differs from the record's re-arms
+#      the alarm; an identical one stays suppressed. Both directions follow: no
+#      second wake inside one episode, and no episode suppressed by an earlier
+#      one. When no head can be derived the identity is empty and comparison
+#      falls back to the state value alone, which is the only safe degenerate
+#      behaviour: re-arming on every unidentifiable sighting would reset the
+#      window forever and never alarm at all. In practice a task that
+#      reconciles terminal always has a readable worktree, because one that
+#      does not reconciles as unknown and is not terminal.
 #   5. Clearing is truth-based too: the record is dropped as soon as the task
 #      leaves the terminal state (the worker resumed, the decision was
 #      answered), its meta is gone, or teardown runs
@@ -75,6 +84,8 @@
 #   schema=fm-completion-alarm.v1
 #   task=            task id in this home
 #   state=           terminal state at first observation (done|failed|parked|blocked)
+#   episode=         branch head commit this episode completed on; empty when
+#                    it could not be derived
 #   detail=          short sanitized crew-state detail for the wake reason
 #   first_epoch=     when this state was first observed (window counts from here)
 #   window_secs=     alarm window bound at arm time
@@ -89,10 +100,16 @@
 # and removed by that tick or teardown's task cleanup. Session start and every
 # other read-only path never touch them.
 #
-# fm_completion_alarm_tick requires fm_wake_append from bin/fm-wake-lib.sh in
-# the calling environment; the watcher loads it via fm-push-transition-lib.sh
-# and tests source fm-wake-lib.sh alongside this file. When
-# fm_busy_classify_meta (bin/fm-busy-lib.sh) is defined in the caller, its
+# fm_completion_alarm_tick requires fm_wake_append from bin/fm-wake-lib.sh and
+# fm_run_timed from bin/fm-timeout-lib.sh in the calling environment; the
+# watcher loads both via fm-push-transition-lib.sh and tests source them
+# alongside this file. fm_run_timed hard-bounds each reconciliation read
+# (FM_COMPLETION_READ_TIMEOUT_SECS, default 20), because fm-crew-state.sh
+# bounds only its own no-mistakes calls, not its tmux or git reads, and one
+# wedged read inside the watcher's synchronous poll loop would otherwise stop
+# the heartbeat and read as a lapsed watcher. A read that hits the bound is
+# treated exactly like any other failed read: the record is left untouched.
+# When fm_busy_classify_meta (bin/fm-busy-lib.sh) is defined in the caller, its
 # exact busy verdict defers detection; absent, no verdict is busy and
 # detection proceeds (surface bias, matching the watcher's
 # absorb-only-when-provably-working rule).
@@ -102,8 +119,11 @@
 # wall-clock budget (FM_COMPLETION_SCAN_BUDGET_SECS, default 30, below the
 # watcher's 45s scan pacing): every sweep reconciles at least one task so it
 # always makes progress, then stops taking on new ones once the budget is
-# spent. That bounds how long a slow or hung reader can hold the watcher off its
-# ordinary surfacing cadence. Sweeps RESUME where the last truncated one
+# spent. The budget alone bounds only how many reads a sweep STARTS, so it is
+# paired with the per-read bound above; together they cap one sweep at the
+# budget plus one read, which is what actually keeps a slow or wedged reader
+# from holding the watcher off its ordinary surfacing cadence. Sweeps RESUME
+# where the last truncated one
 # stopped and wrap around, so the bound defers a task rather than starving it:
 # even against a persistently slow reader every task is reconciled within a
 # bounded number of sweeps. Records are durable, so a deferred tail keeps its
@@ -113,6 +133,8 @@
 #   FM_COMPLETION_ALARM_WINDOW_SECS  alarm window in seconds (default 90)
 #   FM_COMPLETION_SCAN_BUDGET_SECS   per-sweep wall-clock budget (default 30,
 #                                    0 disables the bound)
+#   FM_COMPLETION_READ_TIMEOUT_SECS  hard bound on ONE reconciliation read
+#                                    (default 20, 0 disables the bound)
 #   FM_COMPLETION_ALARM_NOW          fixed epoch for deterministic tests
 #   FM_CREW_STATE_BIN                current-state reader override (tests)
 #
@@ -122,6 +144,7 @@
 FM_COMPLETION_ALARM_SCHEMA='fm-completion-alarm.v1'
 FM_COMPLETION_ALARM_WINDOW_DEFAULT=90
 FM_COMPLETION_SCAN_BUDGET_DEFAULT=30
+FM_COMPLETION_READ_TIMEOUT_DEFAULT=20
 
 # The crew current-state reader, resolved exactly as bin/fm-classify-lib.sh
 # resolves it, so a caller that already sourced that library (the watcher)
@@ -155,6 +178,28 @@ fm_completion_alarm_budget_secs() {
   printf '%s' "$b"
 }
 
+# Hard bound on ONE reconciliation read. 0 means unbounded.
+fm_completion_alarm_read_timeout_secs() {
+  local t=${FM_COMPLETION_READ_TIMEOUT_SECS:-$FM_COMPLETION_READ_TIMEOUT_DEFAULT}
+  case "$t" in
+    ''|*[!0-9]*) t=$FM_COMPLETION_READ_TIMEOUT_DEFAULT ;;
+  esac
+  printf '%s' "$t"
+}
+
+# The identity of the completion episode <task> is currently in: the branch
+# head commit it completed on. It advances whenever the worker or a pipeline
+# fix step commits, so two completions separated by real work never share one,
+# and it is readable at completion time without having watched the interval
+# between them. Empty when no head can be derived.
+fm_completion_alarm_episode() {  # <state-dir> <task>
+  local wt
+  wt=$(grep '^worktree=' "$1/$2.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  [ -n "$wt" ] || return 0
+  [ -d "$wt" ] || return 0
+  git -C "$wt" rev-parse HEAD 2>/dev/null || true
+}
+
 # Directory holding durable completion-alarm records for <state-dir>.
 fm_completion_alarm_dir() {  # <state-dir>
   printf '%s/pending-completions' "$1"
@@ -181,9 +226,9 @@ fm_completion_alarm_sanitize() {  # <text>
   printf '%s' "$cleaned"
 }
 
-# Arm (or atomically restart, for a NEW terminal state) one durable record.
-fm_completion_alarm_arm() {  # <state-dir> <task> <terminal-state> <detail>
-  local state=$1 task=$2 tstate=$3 detail=$4 dir rec tmp now
+# Arm (or atomically restart, for a NEW episode) one durable record.
+fm_completion_alarm_arm() {  # <state-dir> <task> <terminal-state> <detail> [episode]
+  local state=$1 task=$2 tstate=$3 detail=$4 episode=${5:-} dir rec tmp now
   [ -n "$state" ] && [ -n "$task" ] && [ -n "$tstate" ] || return 2
   dir=$(fm_completion_alarm_dir "$state")
   mkdir -p "$dir" || return 1
@@ -195,6 +240,7 @@ fm_completion_alarm_arm() {  # <state-dir> <task> <terminal-state> <detail>
 schema=$FM_COMPLETION_ALARM_SCHEMA
 task=$task
 state=$tstate
+episode=$(fm_completion_alarm_sanitize "$episode")
 detail=$(fm_completion_alarm_sanitize "$detail")
 first_epoch=$now
 window_secs=$(fm_completion_alarm_window_secs)
@@ -250,7 +296,8 @@ _fm_completion_alarm_busy() {  # <meta-file> <task> <state-dir>
 # persisted past the window (enqueued before the record is marked escalated,
 # and its reason printed for the caller to surface); any other state, a busy
 # endpoint, or an armed done-state merge poll clears or holds the record
-# without waking. A failed reconciliation read leaves the task's record
+# without waking. Each read is hard-bounded, and a failed or timed-out
+# reconciliation read leaves the task's record
 # untouched; a busy endpoint never drops an already-escalated record and never
 # skips reconciling one, so an episode boundary is never missed. Records whose
 # task metadata is gone are removed. Tasks still unreconciled once the sweep's
@@ -259,7 +306,7 @@ _fm_completion_alarm_busy() {  # <meta-file> <task> <state-dir>
 # durably enqueued.
 fm_completion_alarm_tick() {  # <state-dir>
   local state=$1 dir rec meta task kind line st detail sep rec_state first window escalated now age reason budget started
-  local metas total cursor_file cursor start truncated last i n
+  local metas total cursor_file cursor start truncated last i n read_timeout episode rec_episode
   sep=' · '
   # Orphan sweep first, so a record left behind by a missed teardown cannot
   # sit forever (its task no longer exists to reconcile).
@@ -279,6 +326,7 @@ fm_completion_alarm_tick() {  # <state-dir>
     done
   fi
   budget=$(fm_completion_alarm_budget_secs)
+  read_timeout=$(fm_completion_alarm_read_timeout_secs)
   started=$(date +%s)
   metas=()
   for meta in "$state"/*.meta; do
@@ -350,7 +398,11 @@ fm_completion_alarm_tick() {  # <state-dir>
     # record exactly as it stands: treating a failed read as non-terminal would
     # restart the episode window on every sweep, so intermittent reader failure
     # could defer the alarm for a genuinely persisting terminal state forever.
-    line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || continue
+    if [ "$read_timeout" -gt 0 ] && declare -F fm_run_timed >/dev/null 2>&1; then
+      line=$(fm_run_timed "$read_timeout" "$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || continue
+    else
+      line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || continue
+    fi
     case "$line" in
       state:*) ;;
       *) continue ;;
@@ -365,16 +417,28 @@ fm_completion_alarm_tick() {  # <state-dir>
       *"$sep"*"$sep"*) detail=${line#*"$sep"}; detail=${detail#*"$sep"} ;;
       *) detail='' ;;
     esac
+    episode=$(fm_completion_alarm_episode "$state" "$task")
     rec=$(fm_completion_alarm_path "$state" "$task")
     if [ ! -f "$rec" ]; then
-      fm_completion_alarm_arm "$state" "$task" "$st" "$detail" || true
+      fm_completion_alarm_arm "$state" "$task" "$st" "$detail" "$episode" || true
       continue
     fi
     rec_state=$(fm_completion_alarm_get "$rec" state)
     if [ "$rec_state" != "$st" ]; then
       # A different terminal state is a NEW completion episode (e.g. parked
       # gate answered, run finished as done): restart the window.
-      fm_completion_alarm_arm "$state" "$task" "$st" "$detail" || true
+      fm_completion_alarm_arm "$state" "$task" "$st" "$detail" "$episode" || true
+      continue
+    fi
+    # Same state value, but a head that has moved since the record was armed
+    # means the worker completed, did more work, and completed again: two
+    # episodes that would otherwise merge behind one state value (a run's
+    # approval gate and its fix_review gate both reconcile as parked). Only a
+    # head derived on BOTH sides can prove a difference, so an underivable one
+    # falls back to the state value rather than restarting the window forever.
+    rec_episode=$(fm_completion_alarm_get "$rec" episode)
+    if [ -n "$episode" ] && [ -n "$rec_episode" ] && [ "$episode" != "$rec_episode" ]; then
+      fm_completion_alarm_arm "$state" "$task" "$st" "$detail" "$episode" || true
       continue
     fi
     escalated=$(fm_completion_alarm_get "$rec" escalated_epoch)
@@ -399,7 +463,9 @@ fm_completion_alarm_tick() {  # <state-dir>
   done
   if [ -n "$truncated" ] && [ -n "$last" ]; then
     mkdir -p "$dir" 2>/dev/null || true
+    chmod 700 "$dir" 2>/dev/null || true
     printf '%s\n' "$last" > "$cursor_file" 2>/dev/null || true
+    chmod 600 "$cursor_file" 2>/dev/null || true
   else
     rm -f "$cursor_file"
   fi
