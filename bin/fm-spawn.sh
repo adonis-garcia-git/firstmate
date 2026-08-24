@@ -139,10 +139,11 @@
 #   A pooled worktree with NO origin remote (a local-only project) instead
 #   fetches the primary local copy by path and resets to that copy's
 #   default-branch ref, never its HEAD, so a primary parked on a feature branch
-#   refuses rather than seeding the wrong base.
-#   An unreachable origin, unresolved default branch, unreadable primary copy,
-#   unverifiable fetched tip, or non-clean worktree refuses the spawn rather
-#   than risking a PR based on stale history.
+#   still seeds the true default-branch tip rather than that stray branch.
+#   An unreachable origin, a default branch unresolvable on the remote or on
+#   the primary local copy, an unreadable primary copy, an unverifiable fetched
+#   tip, or a non-clean worktree refuses the spawn rather than risking a PR
+#   based on stale history.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -1734,13 +1735,14 @@ validate_spawn_worktree() {  # <source> <inspect-target>
 
 # Freshen a pooled ship/scout worktree onto the current default-branch tip.
 # A pool clone that HAS an `origin` remote resolves that base over the network
-# exactly as before. A local-only project has no remote at all in its pool
-# clone, so the primary local copy is the only authority for current history:
-# it is fetched by path, and its default-branch REF is read rather than its
-# HEAD, so a primary stranded on a feature branch cannot seed the wrong base
-# (the same rationale as fm-ff-lib.sh's primary_head_commit). An unreadable
-# primary, an unresolvable default branch, or a fetched tip that disagrees with
-# the primary's own ref refuses instead of launching from an unverifiable base.
+# exactly as before. A local-only project has no `origin` in its pool clone
+# (usually no remote at all), so the primary local copy is the only authority
+# for current history: it is fetched by path, and its default-branch REF is
+# read rather than its HEAD, so a primary stranded on a feature branch cannot
+# seed the wrong base (the same rationale as fm-ff-lib.sh's
+# primary_head_commit). An unreadable primary, an unresolvable default branch,
+# or a fetched tip that disagrees with the primary's own ref refuses instead of
+# launching from an unverifiable base.
 # Both paths converge on one cleanliness refusal, hard reset, and post-reset
 # HEAD verification, so no path can discard uncommitted work or launch from an
 # unverified base.
