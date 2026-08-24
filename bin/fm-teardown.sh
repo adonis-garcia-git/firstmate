@@ -161,6 +161,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-steer-ack-lib.sh
 . "$SCRIPT_DIR/fm-steer-ack-lib.sh"
+# shellcheck source=bin/fm-completion-alarm-lib.sh
+. "$SCRIPT_DIR/fm-completion-alarm-lib.sh"
 # shellcheck source=bin/fm-public-followup-lib.sh
 . "$SCRIPT_DIR/fm-public-followup-lib.sh"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
@@ -2558,6 +2560,9 @@ remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 # Leftover steer-ack records for this task can no longer be acknowledged;
 # clear them so a finished task's order never fires a no-ack wake later.
 fm_steer_ack_clear_task "$STATE" "$ID" || true
+# A torn-down task's completion is handled by definition; clear its
+# completion-alarm record so it can never fire after cleanup.
+fm_completion_alarm_clear_task "$STATE" "$ID" || true
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 status_retire_presentation_task "$STATE" "$ID" || exit 1
 rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
