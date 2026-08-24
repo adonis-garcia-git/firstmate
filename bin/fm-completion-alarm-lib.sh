@@ -36,13 +36,25 @@
 #      scan are durable and truth-based, a completion that happened while no
 #      watcher was running still alarms: the first healthy cycle observes it,
 #      and a record already past its window escalates on that first cycle.
-#   4. Clearing is truth-based too: the record is dropped as soon as the task
+#   4. The record IS the completion episode, and escalated_epoch is therefore
+#      scoped to exactly one episode rather than to the worker. An episode
+#      opens when a terminal state is first observed and ends the moment a
+#      reconciliation observes a different state, so a worker that completes,
+#      is handed new work, and completes again opens a SECOND episode with a
+#      fresh record that alarms on its own merits. Both directions follow from
+#      that one rule: no second wake inside an episode, and no episode
+#      suppressed by an earlier one. Its corollary is that no path may skip
+#      reconciliation while a record is alive, or an episode boundary would go
+#      unobserved and two episodes would silently merge.
+#   5. Clearing is truth-based too: the record is dropped as soon as the task
 #      leaves the terminal state (the worker resumed, the decision was
 #      answered), its meta is gone, or teardown runs
 #      (fm_completion_alarm_clear_task). A busy endpoint drops a record that
-#      has not escalated yet - detection is merely deferred - but HOLDS one
-#      that has, so the one-shot stamp survives a busy interval and a single
-#      episode can never alarm twice however often the endpoint flaps. A NEW
+#      has not escalated yet - detection is merely deferred and no wake is at
+#      stake - but a record that HAS escalated is neither dropped (its one-shot
+#      stamp would go with it, so a busy flap could re-nag one episode) nor
+#      held blind (the episode's end would go unobserved, so a later genuine
+#      completion could never alarm): it reconciles like any other. A NEW
 #      terminal state (parked -> done) restarts the episode and may alarm
 #      again; the same state never re-nags. A done task whose merge poll is
 #      armed (state/<id>.pr-poll,
@@ -53,7 +65,7 @@
 #      attribute a state, so a non-zero exit or a non-`state:` line is a
 #      READER failure and leaves any record untouched (no arm, no discard, no
 #      escalation) rather than silently restarting the episode window.
-#   5. Never armed for kind=secondmate (an idle secondmate is healthy and its
+#   6. Never armed for kind=secondmate (an idle secondmate is healthy and its
 #      routed status stream has its own delivery contract), and never for a
 #      declared paused: external wait (fm-crew-state.sh reports paused, which
 #      is not in the terminal set).
@@ -66,7 +78,12 @@
 #   detail=          short sanitized crew-state detail for the wake reason
 #   first_epoch=     when this state was first observed (window counts from here)
 #   window_secs=     alarm window bound at arm time
-#   escalated_epoch= empty until the one alarm wake has been queued
+#   escalated_epoch= empty until THIS episode's one alarm wake has been queued
+#
+# Beside the records, `.scan-cursor` holds the id of the last task a truncated
+# sweep reconciled, so the next sweep resumes after it instead of restarting at
+# the same head. It is dot-prefixed, so the orphan sweep ignores it, and a
+# sweep that completes a full pass removes it.
 #
 # Mutation boundary: records are written only by the watcher singleton's tick
 # and removed by that tick or teardown's task cleanup. Session start and every
@@ -83,10 +100,14 @@
 # One sweep runs synchronously inside the watcher's poll loop and spends a
 # bounded but non-trivial reconciliation read per task, so it also carries a
 # wall-clock budget (FM_COMPLETION_SCAN_BUDGET_SECS, default 30, below the
-# watcher's 45s scan pacing): once spent, the sweep stops taking on new tasks
-# and the untouched tail is simply reconciled by the next sweep. That bounds
-# how long a slow or hung reader can hold the watcher off its ordinary
-# surfacing cadence. Records are durable, so a deferred tail loses no state.
+# watcher's 45s scan pacing): every sweep reconciles at least one task so it
+# always makes progress, then stops taking on new ones once the budget is
+# spent. That bounds how long a slow or hung reader can hold the watcher off its
+# ordinary surfacing cadence. Sweeps RESUME where the last truncated one
+# stopped and wrap around, so the bound defers a task rather than starving it:
+# even against a persistently slow reader every task is reconciled within a
+# bounded number of sweeps. Records are durable, so a deferred tail keeps its
+# window and its stamp.
 #
 # Tunables (env):
 #   FM_COMPLETION_ALARM_WINDOW_SECS  alarm window in seconds (default 90)
@@ -191,17 +212,13 @@ fm_completion_alarm_discard() {  # <state-dir> <task>
   rm -f "$rec"
 }
 
-# Defer detection for a task whose endpoint is busy. An episode that has not
-# escalated yet is dropped outright (a busy worker is mid-turn on this very
-# state, so there is nothing to surface); one that HAS escalated is held, so
-# its one-shot escalated_epoch stamp outlives the busy interval and the same
-# completion can never alarm a second time.
-fm_completion_alarm_defer() {  # <state-dir> <task>
+# 0 iff <task> holds a record whose episode has already escalated, so dropping
+# it would lose the one-shot stamp that keeps that episode from alarming twice.
+_fm_completion_alarm_escalated() {  # <state-dir> <task>
   local rec
   rec=$(fm_completion_alarm_path "$1" "$2")
-  [ -f "$rec" ] || return 0
-  [ -z "$(fm_completion_alarm_get "$rec" escalated_epoch)" ] || return 0
-  fm_completion_alarm_discard "$1" "$2"
+  [ -f "$rec" ] || return 1
+  [ -n "$(fm_completion_alarm_get "$rec" escalated_epoch)" ]
 }
 
 # Remove the record belonging to <task> (teardown cleanup).
@@ -234,12 +251,15 @@ _fm_completion_alarm_busy() {  # <meta-file> <task> <state-dir>
 # and its reason printed for the caller to surface); any other state, a busy
 # endpoint, or an armed done-state merge poll clears or holds the record
 # without waking. A failed reconciliation read leaves the task's record
-# untouched, and a busy endpoint never drops an already-escalated one.
-# Records whose task metadata is gone are removed. Tasks still unreconciled
-# once the sweep's wall-clock budget is spent are left for the next sweep.
-# Returns non-zero only when a due wake could not be durably enqueued.
+# untouched; a busy endpoint never drops an already-escalated record and never
+# skips reconciling one, so an episode boundary is never missed. Records whose
+# task metadata is gone are removed. Tasks still unreconciled once the sweep's
+# wall-clock budget is spent lead the next sweep, which resumes after the last
+# task this one reconciled. Returns non-zero only when a due wake could not be
+# durably enqueued.
 fm_completion_alarm_tick() {  # <state-dir>
   local state=$1 dir rec meta task kind line st detail sep rec_state first window escalated now age reason budget started
+  local metas total cursor_file cursor start truncated last i n
   sep=' · '
   # Orphan sweep first, so a record left behind by a missed teardown cannot
   # sit forever (its task no longer exists to reconcile).
@@ -260,17 +280,48 @@ fm_completion_alarm_tick() {  # <state-dir>
   fi
   budget=$(fm_completion_alarm_budget_secs)
   started=$(date +%s)
+  metas=()
   for meta in "$state"/*.meta; do
     [ -f "$meta" ] || continue
+    metas+=("$meta")
+  done
+  total=${#metas[@]}
+  [ "$total" -gt 0 ] || return 0
+  # Resume after the task the last truncated sweep stopped on, wrapping. A
+  # fixed-order sweep that always restarts at the head would let a slow reader
+  # starve the tail forever rather than merely defer it. A cursor naming a task
+  # that no longer exists just falls back to the head.
+  cursor_file="$dir/.scan-cursor"
+  cursor=''
+  if [ -f "$cursor_file" ]; then
+    cursor=$(head -1 "$cursor_file" 2>/dev/null) || cursor=''
+  fi
+  start=0
+  if [ -n "$cursor" ]; then
+    for ((i = 0; i < total; i++)); do
+      task=$(basename "${metas[$i]}")
+      if [ "${task%.meta}" = "$cursor" ]; then
+        start=$(( (i + 1) % total ))
+        break
+      fi
+    done
+  fi
+  truncated=''
+  last=''
+  for ((n = 0; n < total; n++)); do
+    meta=${metas[$(( (start + n) % total ))]}
     # This sweep runs synchronously in the watcher's poll loop, so it stops
     # taking on new tasks once its wall-clock budget is spent rather than
     # letting a slow reader hold the watcher off its surfacing cadence. The
-    # untouched tail keeps its durable records and is reconciled next sweep.
-    if [ "$budget" -gt 0 ] && [ "$(( $(date +%s) - started ))" -ge "$budget" ]; then
+    # untouched tail keeps its durable records and leads the next sweep.
+    if [ "$n" -gt 0 ] && [ "$budget" -gt 0 ] \
+      && [ "$(( $(date +%s) - started ))" -ge "$budget" ]; then
+      truncated=yes
       break
     fi
     task=$(basename "$meta")
     task=${task%.meta}
+    last=$task
     kind=$(grep '^kind=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
     # An idle secondmate is healthy by design; its routed status stream has
     # its own delivery contract, so it never arms a completion alarm and any
@@ -281,11 +332,15 @@ fm_completion_alarm_tick() {  # <state-dir>
     fi
     # A provably busy endpoint means the worker is mid-turn on this very
     # state (e.g. composing a gate response): actively worked, not
-    # unsurfaced. Checked before the costlier reconciliation read. An episode
-    # that already escalated keeps its record here, so busy flapping on a
-    # completion the supervisor is deliberately holding cannot re-nag it.
-    if _fm_completion_alarm_busy "$meta" "$task" "$state"; then
-      fm_completion_alarm_defer "$state" "$task"
+    # unsurfaced. With no escalation at stake that is settled without paying
+    # for the reconciliation read, which is the common case. An episode that
+    # HAS escalated keeps its record - dropping it would let a busy flap
+    # re-nag the same completion - but still reconciles below, because a
+    # record held blind would hide the end of its episode and silently
+    # swallow the worker's next completion.
+    if _fm_completion_alarm_busy "$meta" "$task" "$state" \
+      && ! _fm_completion_alarm_escalated "$state" "$task"; then
+      fm_completion_alarm_discard "$state" "$task"
       continue
     fi
     # Only a SUCCESSFUL read may change a record. fm-crew-state.sh exits 0 and
@@ -342,5 +397,11 @@ fm_completion_alarm_tick() {  # <state-dir>
     printf 'escalated_epoch=%s\n' "$now" >> "$rec"
     printf '%s\n' "$reason"
   done
+  if [ -n "$truncated" ] && [ -n "$last" ]; then
+    mkdir -p "$dir" 2>/dev/null || true
+    printf '%s\n' "$last" > "$cursor_file" 2>/dev/null || true
+  else
+    rm -f "$cursor_file"
+  fi
   return 0
 }

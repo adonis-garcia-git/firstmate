@@ -19,9 +19,12 @@
 #     busy endpoint (e.g. a worker composing a gate response), and a done task
 #     with an armed merge poll never alarm. A busy endpoint defers detection
 #     but never drops an already-escalated record, so busy flapping on a
-#     completion the supervisor is holding cannot re-nag it.
-#   - One sweep is bounded by its own wall-clock budget and defers the tail to
-#     the next sweep rather than starving the watcher's poll loop.
+#     completion the supervisor is holding cannot re-nag it - and never holds
+#     one blind either, so a busy period that ends an episode still lets the
+#     worker's NEXT completion alarm on its own merits.
+#   - One sweep is bounded by its own wall-clock budget rather than starving
+#     the watcher's poll loop, and resumes at the deferred tail, so even a
+#     persistently slow reader reconciles every task within a few sweeps.
 #   - The durable records and truth-based scan make a completion that
 #     happened while no watcher ran alarm after a restart, without
 #     duplicating an already-escalated episode.
@@ -325,6 +328,39 @@ test_tick_busy_flap_never_renags_escalated_episode() {
   pass "a busy flap after escalation never re-nags the same completion episode"
 }
 
+test_tick_busy_period_ends_episode_and_next_completion_alarms() {
+  local state out rec t
+  state="$TMP_ROOT/tick-second-episode/state"; mkdir -p "$state"
+  fm_write_meta "$state/helm.meta" "kind=ship"
+  t=$(date +%s)
+  arm_record "$state" helm 'done' "checks green" "$(( t - 400 ))"
+  rec=$(record_path "$state" helm)
+  out=$(tick_with "$state" "$DONE_LINE" "$t") || fail "first escalation failed"
+  assert_contains "$out" "check: completion-alarm: helm done unsurfaced" \
+    "the first completion episode should escalate"
+  [ "$(queue_alarm_count "$state" helm)" = 1 ] || fail "expected one wake for episode 1"
+  # The supervisor hands helm new work, so its endpoint is busy AND its
+  # reconciled state has left the terminal set. That ends episode 1: a record
+  # held blind through the busy period would swallow the next completion.
+  out=$(tick_with_busy "$state" "$WORKING_LINE" "busy claude-hook" "$(( t + 10 ))") \
+    || fail "busy working tick failed"
+  [ -z "$out" ] || fail "a working task escalated: $out"
+  assert_absent "$rec" \
+    "a busy endpoint that has left the terminal state must end the episode"
+  # helm finishes the new work and that done wake is lost too: a second,
+  # genuinely distinct episode that has to alarm on its own merits.
+  out=$(tick_with "$state" "$DONE_LINE" "$(( t + 100 ))") || fail "re-arm tick failed"
+  [ -z "$out" ] || fail "episode 2 escalated before its own window: $out"
+  assert_present "$rec" "the second completion should arm a fresh record"
+  [ "$(queue_alarm_count "$state" helm)" = 1 ] || fail "episode 2 woke inside its window"
+  out=$(tick_with "$state" "$DONE_LINE" "$(( t + 300 ))") || fail "episode 2 tick failed"
+  assert_contains "$out" "check: completion-alarm: helm done unsurfaced" \
+    "a genuinely new completion episode must alarm on its own merits"
+  [ "$(queue_alarm_count "$state" helm)" = 2 ] \
+    || fail "the second completion episode never raised its own wake"
+  pass "a busy period that ends an episode never suppresses the next completion"
+}
+
 test_tick_bounds_one_sweeps_work() {
   local state out
   state="$TMP_ROOT/tick-budget/state"; mkdir -p "$state"
@@ -334,21 +370,24 @@ test_tick_bounds_one_sweeps_work() {
   # A reader slower than the whole sweep's budget: the first task consumes it,
   # so the sweep must stop taking on new tasks instead of running N x slow
   # reads inside the watcher's poll loop.
-  out=$(tick_with_slow_reader "$state" 2 1) || fail "budgeted tick failed"
+  out=$(tick_with_slow_reader "$state" 1 1) || fail "budgeted tick failed"
   [ -z "$out" ] || fail "a budgeted sweep escalated: $out"
   assert_present "$(record_path "$state" aaa)" "the sweep should reconcile its first task"
   assert_absent "$(record_path "$state" bbb)" \
     "a sweep past its budget must stop taking on new tasks"
   assert_absent "$(record_path "$state" ccc)" \
     "a sweep past its budget must stop taking on new tasks"
-  # The tail is deferred, never dropped: the next sweep reconciles it, so the
-  # bound costs latency and never detection.
-  out=$(tick_with "$state" "$DONE_LINE") || fail "follow-up tick failed"
+  # The reader stays just as slow, so every sweep keeps truncating. The tail
+  # must still be reached: a sweep resumes after the task the last one stopped
+  # on instead of re-reconciling the same head forever, so the bound defers
+  # work and never starves it.
+  out=$(tick_with_slow_reader "$state" 1 1) || fail "second budgeted tick failed"
   assert_present "$(record_path "$state" bbb)" \
-    "the next sweep should reconcile the deferred tail"
+    "an equally slow next sweep must resume at the deferred tail"
+  out=$(tick_with_slow_reader "$state" 1 1) || fail "third budgeted tick failed"
   assert_present "$(record_path "$state" ccc)" \
-    "the next sweep should reconcile the deferred tail"
-  pass "one sweep is bounded by its wall-clock budget and defers its tail"
+    "every task must be reconciled within a bounded number of slow sweeps"
+  pass "a bounded sweep defers its tail to the next sweep and never starves it"
 }
 
 test_tick_preserves_record_when_reader_fails() {
@@ -516,6 +555,7 @@ test_tick_never_alarms_declared_pause
 test_tick_defers_while_endpoint_busy
 test_tick_holds_done_with_armed_merge_poll
 test_tick_busy_flap_never_renags_escalated_episode
+test_tick_busy_period_ends_episode_and_next_completion_alarms
 test_tick_bounds_one_sweeps_work
 test_tick_preserves_record_when_reader_fails
 test_tick_clears_orphaned_record
