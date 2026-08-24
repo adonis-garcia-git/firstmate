@@ -13,7 +13,8 @@
 #   - The same persisting terminal state escalates exactly one actionable
 #     check wake past the window - never a second wake for the same episode.
 #   - A task that resumes clears its record; a NEW terminal state restarts the
-#     episode and may alarm again.
+#     episode and may alarm again. Only a SUCCESSFUL read decides that: a
+#     failed or malformed reader leaves the record and its window untouched.
 #   - A healthy idle secondmate, a declared paused: external wait, a provably
 #     busy endpoint (e.g. a worker composing a gate response), and a done task
 #     with an armed merge poll never alarm.
@@ -70,6 +71,35 @@ tick_with_busy() {  # <state> <crew-state-line> <busy-verdict> [now]
     # shellcheck disable=SC1090
     . "$2"
     fm_busy_classify_meta() { printf "%s" "$FM_FAKE_BUSY_VERDICT"; }
+    fm_completion_alarm_tick "$3"
+  ' _ "$WAKE_LIB" "$ALARM_LIB" "$state"
+}
+
+# Same tick, against a deliberately BROKEN current-state reader, so the test
+# can distinguish a reader failure from a real verdict. <mode> is `missing`
+# (no such binary - the persistently broken FM_CREW_STATE_BIN case, exit 127
+# with no output) or `garbage` (exits 0 but emits something that is not the
+# canonical `state:` line).
+tick_with_broken_reader() {  # <state> <mode> [now]
+  local state=$1 mode=$2 now=${3:-} bin
+  case "$mode" in
+    missing) bin="$TMP_ROOT/no-such-crew-state.sh" ;;
+    garbage)
+      bin="$TMP_ROOT/garbage-crew-state.sh"
+      if [ ! -x "$bin" ]; then
+        printf '#!/usr/bin/env bash\nprintf "fm-crew-state.sh: unbound variable\\n"\nexit 0\n' > "$bin"
+        chmod +x "$bin"
+      fi
+      ;;
+    *) fail "unknown broken-reader mode: $mode" ;;
+  esac
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$bin" \
+    FM_COMPLETION_ALARM_NOW="$now" bash -c '
+    set -u
+    # shellcheck disable=SC1090
+    . "$1"
+    # shellcheck disable=SC1090
+    . "$2"
     fm_completion_alarm_tick "$3"
   ' _ "$WAKE_LIB" "$ALARM_LIB" "$state"
 }
@@ -179,7 +209,7 @@ test_tick_never_alarms_secondmate() {
   local state out
   state="$TMP_ROOT/tick-mate/state"; mkdir -p "$state"
   fm_write_meta "$state/domain.meta" "kind=secondmate"
-  arm_record "$state" domain done "stray record" "$(epoch_ago 4000)"
+  arm_record "$state" domain 'done' "stray record" "$(epoch_ago 4000)"
   out=$(tick_with "$state" "$DONE_LINE") || fail "tick failed"
   [ -z "$out" ] || fail "a healthy idle secondmate was escalated: $out"
   assert_absent "$(record_path "$state" domain)" "a secondmate's stray record must be dropped"
@@ -191,7 +221,7 @@ test_tick_never_alarms_declared_pause() {
   local state out
   state="$TMP_ROOT/tick-pause/state"; mkdir -p "$state"
   fm_write_meta "$state/helm.meta" "kind=ship"
-  arm_record "$state" helm done "stale record" "$(epoch_ago 4000)"
+  arm_record "$state" helm 'done' "stale record" "$(epoch_ago 4000)"
   out=$(tick_with "$state" "$PAUSED_LINE") || fail "tick failed"
   [ -z "$out" ] || fail "a declared external-wait pause was escalated: $out"
   assert_absent "$(record_path "$state" helm)" "a declared pause must drop the record"
@@ -219,7 +249,7 @@ test_tick_holds_done_with_armed_merge_poll() {
   local state out rec
   state="$TMP_ROOT/tick-poll/state"; mkdir -p "$state"
   fm_write_meta "$state/helm.meta" "kind=ship"
-  arm_record "$state" helm done "checks green" "$(epoch_ago 4000)"
+  arm_record "$state" helm 'done' "checks green" "$(epoch_ago 4000)"
   : > "$state/helm.pr-poll"
   out=$(tick_with "$state" "$DONE_LINE") || fail "tick failed"
   [ -z "$out" ] || fail "a done task being actively landed (armed merge poll) was escalated: $out"
@@ -233,14 +263,51 @@ test_tick_holds_done_with_armed_merge_poll() {
   pass "a done task with an armed merge poll is held without alarming"
 }
 
+test_tick_preserves_record_when_reader_fails() {
+  local state out rec first
+  state="$TMP_ROOT/tick-reader-fail/state"; mkdir -p "$state"
+  fm_write_meta "$state/helm.meta" "kind=ship"
+  fm_write_meta "$state/spare.meta" "kind=ship"
+  first=$(epoch_ago 400)
+  arm_record "$state" helm 'done' "checks green" "$first"
+  rec=$(record_path "$state" helm)
+  # A reader that cannot run at all (a persistently broken FM_CREW_STATE_BIN)
+  # proves nothing about the task, so it must not restart the episode.
+  out=$(tick_with_broken_reader "$state" missing) || fail "tick failed on a missing reader"
+  [ -z "$out" ] || fail "a failed reconciliation read escalated: $out"
+  assert_present "$rec" "a failed reconciliation read must not discard the armed record"
+  assert_grep "first_epoch=$first" "$rec" "a failed read must not restart the episode window"
+  assert_absent "$(record_path "$state" spare)" "a failed read must not arm a record either"
+  [ ! -e "$state/.wake-queue" ] || fail "a failed reconciliation read queued a wake"
+  # A reader that exits 0 but emits something other than the canonical
+  # `state:` verdict is equally a reader failure, not a non-terminal verdict.
+  out=$(tick_with_broken_reader "$state" garbage) || fail "tick failed on a garbage reader"
+  [ -z "$out" ] || fail "a malformed reader line escalated: $out"
+  assert_grep "first_epoch=$first" "$rec" "a malformed reader line must not restart the window"
+  # The regression: with the window preserved, the FIRST successful read of the
+  # still-terminal state escalates instead of starting the episode over.
+  out=$(tick_with "$state" "$DONE_LINE") || fail "recovered tick failed"
+  assert_contains "$out" "check: completion-alarm: helm done unsurfaced" \
+    "the first successful read after reader failures should escalate the aged episode"
+  [ "$(queue_alarm_count "$state" helm)" = 1 ] \
+    || fail "exactly one durable wake expected once the reader recovers"
+  pass "a failed reconciliation read preserves the record and its episode window"
+}
+
 test_tick_clears_orphaned_record() {
-  local state out
+  local state out rec
   state="$TMP_ROOT/tick-orphan/state"; mkdir -p "$state"
-  arm_record "$state" gone done "old completion" "$(epoch_ago 4000)"
+  arm_record "$state" gone 'done' "old completion" "$(epoch_ago 4000)"
+  # A record left behind by the teardown-vs-escalation-stamp race carries only
+  # the appended stamp, so it no longer names its task in the record body; the
+  # file name is still the task id, and the sweep must fall back to it.
+  rec=$(record_path "$state" stamped-only)
+  printf 'escalated_epoch=%s\n' "$(epoch_ago 4000)" > "$rec"
   out=$(tick_with "$state" "$DONE_LINE") || fail "tick failed"
   [ -z "$out" ] || fail "an orphaned record (no task meta) was escalated: $out"
   assert_absent "$(record_path "$state" gone)" "orphaned record must be removed"
-  pass "completion tick removes records whose task is gone"
+  assert_absent "$rec" "an orphaned record with no surviving meta keys must be removed"
+  pass "completion tick removes records whose task is gone, malformed ones included"
 }
 
 # --- watcher end-to-end -----------------------------------------------------
@@ -336,8 +403,8 @@ test_teardown_clears_task_record() {
     "window=firstmate:fm-task-x1" "endpoint_task_id=task-x1" \
     "worktree=$case_dir/wt" "project=$case_dir/project" \
     "kind=ship" "mode=local-only"
-  arm_record "$case_dir/state" task-x1 done "landed work"
-  arm_record "$case_dir/state" other-task done "unrelated completion"
+  arm_record "$case_dir/state" task-x1 'done' "landed work"
+  arm_record "$case_dir/state" other-task 'done' "unrelated completion"
   set +e
   FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
     FM_CONFIG_OVERRIDE="$case_dir/config" PATH="$fb:$PATH" \
@@ -360,6 +427,7 @@ test_tick_never_alarms_secondmate
 test_tick_never_alarms_declared_pause
 test_tick_defers_while_endpoint_busy
 test_tick_holds_done_with_armed_merge_poll
+test_tick_preserves_record_when_reader_fails
 test_tick_clears_orphaned_record
 test_watcher_alarms_lost_completion_and_rearms_after_restart
 test_teardown_clears_task_record

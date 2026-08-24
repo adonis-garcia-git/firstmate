@@ -44,6 +44,11 @@
 #      re-nags. A done task whose merge poll is armed (state/<id>.pr-poll,
 #      written by bin/fm-pr-check.sh) is already being actively landed, so it
 #      is held without escalating while the poll exists.
+#      Only a SUCCESSFUL reconciliation read may change a record: the reader
+#      exits 0 with a `state: unknown` verdict whenever it merely cannot
+#      attribute a state, so a non-zero exit or a non-`state:` line is a
+#      READER failure and leaves any record untouched (no arm, no discard, no
+#      escalation) rather than silently restarting the episode window.
 #   5. Never armed for kind=secondmate (an idle secondmate is healthy and its
 #      routed status stream has its own delivery contract), and never for a
 #      declared paused: external wait (fm-crew-state.sh reports paused, which
@@ -190,7 +195,8 @@ _fm_completion_alarm_busy() {  # <meta-file> <task> <state-dir>
 # persisted past the window (enqueued before the record is marked escalated,
 # and its reason printed for the caller to surface); any other state, a busy
 # endpoint, or an armed done-state merge poll clears or holds the record
-# without waking. Records whose task metadata is gone are removed. Returns
+# without waking. A failed reconciliation read leaves the task's record
+# untouched. Records whose task metadata is gone are removed. Returns
 # non-zero only when a due wake could not be durably enqueued.
 fm_completion_alarm_tick() {  # <state-dir>
   local state=$1 dir rec meta task kind line st detail sep rec_state first window escalated now age reason
@@ -205,7 +211,10 @@ fm_completion_alarm_tick() {  # <state-dir>
         .*) continue ;;
       esac
       task=$(fm_completion_alarm_get "$rec" task)
-      [ -n "$task" ] || continue
+      # A record whose meta keys are gone (teardown removed it between the
+      # tick's wake enqueue and its escalation stamp, and the stamp recreated
+      # the file) still names its task by construction: the file name.
+      [ -n "$task" ] || task=$(basename "$rec")
       [ -f "$state/$task.meta" ] || rm -f "$rec"
     done
   fi
@@ -228,10 +237,17 @@ fm_completion_alarm_tick() {  # <state-dir>
       fm_completion_alarm_discard "$state" "$task"
       continue
     fi
-    line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || line=''
+    # Only a SUCCESSFUL read may change a record. fm-crew-state.sh exits 0 and
+    # reports `state: unknown` even when it can attribute nothing, so a
+    # non-zero exit or a line that is not the canonical `state:` verdict means
+    # the READER failed rather than that the task is non-terminal. Leave the
+    # record exactly as it stands: treating a failed read as non-terminal would
+    # restart the episode window on every sweep, so intermittent reader failure
+    # could defer the alarm for a genuinely persisting terminal state forever.
+    line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || continue
     case "$line" in
       state:*) ;;
-      *) fm_completion_alarm_discard "$state" "$task"; continue ;;
+      *) continue ;;
     esac
     st=${line#state: }
     st=${st%% *}
@@ -260,7 +276,7 @@ fm_completion_alarm_tick() {  # <state-dir>
     # A done task with an armed merge poll is already being actively landed:
     # the poll's own merged wake is a guaranteed delivery path, so hold the
     # record without escalating while the poll exists.
-    if [ "$st" = done ] && [ -e "$state/$task.pr-poll" ]; then
+    if [ "$st" = 'done' ] && [ -e "$state/$task.pr-poll" ]; then
       continue
     fi
     first=$(fm_completion_alarm_get "$rec" first_epoch)
