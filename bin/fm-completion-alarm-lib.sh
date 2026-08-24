@@ -38,23 +38,28 @@
 #      and a record already past its window escalates on that first cycle.
 #   4. The record IS the completion episode, and escalated_epoch is therefore
 #      scoped to exactly one episode rather than to the worker. An episode is
-#      identified by its terminal state AND the branch head commit the worker
-#      completed on (episode=), which is what makes two episodes that share a
-#      state value distinguishable: reaching a run's approval gate and then its
-#      fix_review gate both reconcile as `parked`, but the fix step commits in
-#      between, so the heads differ and the second gate is a new episode that
-#      alarms on its own merits. Crucially that identity is read at completion
-#      time and does NOT depend on having observed the intervening working
-#      window - the observation this alarm exists because it cannot rely on.
-#      A reconciled completion whose identity differs from the record's re-arms
-#      the alarm; an identical one stays suppressed. Both directions follow: no
-#      second wake inside one episode, and no episode suppressed by an earlier
-#      one. When no head can be derived the identity is empty and comparison
-#      falls back to the state value alone, which is the only safe degenerate
-#      behaviour: re-arming on every unidentifiable sighting would reset the
-#      window forever and never alarm at all. In practice a task that
-#      reconciles terminal always has a readable worktree, because one that
-#      does not reconciles as unknown and is not terminal.
+#      identified by its terminal state AND the PIPELINE RUN it completed under
+#      (episode=`run:<id>@<head>`, from the FM_CREW_STATE_EPISODE line that
+#      bin/fm-crew-state.sh already has in hand on the run-step path). That is
+#      what makes two episodes sharing a state value distinguishable: a run's
+#      approval gate and its fix_review gate both reconcile as `parked`, and
+#      the fix round in between commits into the GATE repo, so the run head
+#      advances even though the crew worktree's own HEAD deliberately does not
+#      (fm_nm_head_matches_worktree's ancestor rule exists for exactly that).
+#      Keying on the crew HEAD would therefore miss the case this contract
+#      exists for. A completion with no run behind it (a scout, a done: read
+#      from the status log) falls back to that crew HEAD, which does move when
+#      that worker commits. Crucially the identity is read at completion time
+#      and does NOT depend on having observed the intervening working window -
+#      the observation this alarm exists because it cannot rely on.
+#      Only identities of the same derivable kind (episode_source=run|head) are
+#      ever compared: differing means a NEW episode that re-arms, identical
+#      means the same episode and stays suppressed. Anything else - an
+#      underivable identity, or evidence that changed kind - is never read as a
+#      match, but it does NOT reset the window either: the record keeps its
+#      first_epoch so the alarm still matures and fires once, where re-arming
+#      on every unidentifiable sighting would push the deadline forward forever
+#      and silently defeat the feature.
 #   5. Clearing is truth-based too: the record is dropped as soon as the task
 #      leaves the terminal state (the worker resumed, the decision was
 #      answered), its meta is gone, or teardown runs
@@ -84,8 +89,12 @@
 #   schema=fm-completion-alarm.v1
 #   task=            task id in this home
 #   state=           terminal state at first observation (done|failed|parked|blocked)
-#   episode=         branch head commit this episode completed on; empty when
-#                    it could not be derived
+#   episode=         identity of the episode: run:<id>@<head>, or the crew
+#                    worktree HEAD when no run is attributed; empty when
+#                    neither could be derived
+#   episode_source=  run|head|none - which of those episode= came from, so an
+#                    underivable identity is inspectable and can never be
+#                    mistaken for a genuine identity match
 #   detail=          short sanitized crew-state detail for the wake reason
 #   first_epoch=     when this state was first observed (window counts from here)
 #   window_secs=     alarm window bound at arm time
@@ -103,7 +112,8 @@
 # fm_completion_alarm_tick requires fm_wake_append from bin/fm-wake-lib.sh and
 # fm_run_timed from bin/fm-timeout-lib.sh in the calling environment; the
 # watcher loads both via fm-push-transition-lib.sh and tests source them
-# alongside this file. fm_run_timed hard-bounds each reconciliation read
+# alongside this file. fm_run_timed hard-bounds each reconciliation read and
+# the crew-HEAD identity fallback
 # (FM_COMPLETION_READ_TIMEOUT_SECS, default 20), because fm-crew-state.sh
 # bounds only its own no-mistakes calls, not its tmux or git reads, and one
 # wedged read inside the watcher's synchronous poll loop would otherwise stop
@@ -120,7 +130,8 @@
 # watcher's 45s scan pacing): every sweep reconciles at least one task so it
 # always makes progress, then stops taking on new ones once the budget is
 # spent. The budget alone bounds only how many reads a sweep STARTS, so it is
-# paired with the per-read bound above; together they cap one sweep at the
+# paired with the per-read bound above, which covers every external call the
+# sweep makes; together they cap one sweep at the
 # budget plus one read, which is what actually keeps a slow or wedged reader
 # from holding the watcher off its ordinary surfacing cadence. Sweeps RESUME
 # where the last truncated one
@@ -187,17 +198,20 @@ fm_completion_alarm_read_timeout_secs() {
   printf '%s' "$t"
 }
 
-# The identity of the completion episode <task> is currently in: the branch
-# head commit it completed on. It advances whenever the worker or a pipeline
-# fix step commits, so two completions separated by real work never share one,
-# and it is readable at completion time without having watched the interval
-# between them. Empty when no head can be derived.
-fm_completion_alarm_episode() {  # <state-dir> <task>
+# Fallback episode identity for a completion with no pipeline run behind it (a
+# scout, or a done: read straight from the status log): the crew worktree's own
+# HEAD, which does move when THAT worker commits. Bounded like the
+# reconciliation read, because a worktree on a stale mount can wedge git.
+# Empty when no head can be derived.
+fm_completion_alarm_head_episode() {  # <state-dir> <task> <timeout-secs>
   local wt
   wt=$(grep '^worktree=' "$1/$2.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
   [ -n "$wt" ] || return 0
-  [ -d "$wt" ] || return 0
-  git -C "$wt" rev-parse HEAD 2>/dev/null || true
+  if [ "$3" -gt 0 ] && declare -F fm_run_timed >/dev/null 2>&1; then
+    fm_run_timed "$3" git -C "$wt" rev-parse HEAD 2>/dev/null || true
+  else
+    git -C "$wt" rev-parse HEAD 2>/dev/null || true
+  fi
 }
 
 # Directory holding durable completion-alarm records for <state-dir>.
@@ -227,8 +241,8 @@ fm_completion_alarm_sanitize() {  # <text>
 }
 
 # Arm (or atomically restart, for a NEW episode) one durable record.
-fm_completion_alarm_arm() {  # <state-dir> <task> <terminal-state> <detail> [episode]
-  local state=$1 task=$2 tstate=$3 detail=$4 episode=${5:-} dir rec tmp now
+fm_completion_alarm_arm() {  # <state-dir> <task> <terminal-state> <detail> [episode] [episode-source]
+  local state=$1 task=$2 tstate=$3 detail=$4 episode=${5:-} esource=${6:-none} dir rec tmp now
   [ -n "$state" ] && [ -n "$task" ] && [ -n "$tstate" ] || return 2
   dir=$(fm_completion_alarm_dir "$state")
   mkdir -p "$dir" || return 1
@@ -241,6 +255,7 @@ schema=$FM_COMPLETION_ALARM_SCHEMA
 task=$task
 state=$tstate
 episode=$(fm_completion_alarm_sanitize "$episode")
+episode_source=$esource
 detail=$(fm_completion_alarm_sanitize "$detail")
 first_epoch=$now
 window_secs=$(fm_completion_alarm_window_secs)
@@ -306,7 +321,8 @@ _fm_completion_alarm_busy() {  # <meta-file> <task> <state-dir>
 # durably enqueued.
 fm_completion_alarm_tick() {  # <state-dir>
   local state=$1 dir rec meta task kind line st detail sep rec_state first window escalated now age reason budget started
-  local metas total cursor_file cursor start truncated last i n read_timeout episode rec_episode
+  local metas total cursor_file cursor start truncated last i n read_timeout
+  local out episode esource rec_episode rec_esource
   sep=' · '
   # Orphan sweep first, so a record left behind by a missed teardown cannot
   # sit forever (its task no longer exists to reconcile).
@@ -399,10 +415,13 @@ fm_completion_alarm_tick() {  # <state-dir>
     # restart the episode window on every sweep, so intermittent reader failure
     # could defer the alarm for a genuinely persisting terminal state forever.
     if [ "$read_timeout" -gt 0 ] && declare -F fm_run_timed >/dev/null 2>&1; then
-      line=$(fm_run_timed "$read_timeout" "$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || continue
+      out=$(FM_CREW_STATE_EPISODE=1 fm_run_timed "$read_timeout" "$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || continue
     else
-      line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || continue
+      out=$(FM_CREW_STATE_EPISODE=1 "$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || continue
     fi
+    # The reader answers with the canonical verdict line, optionally followed
+    # by the run-identity line the episode contract is built on.
+    line=$(printf '%s\n' "$out" | head -1)
     case "$line" in
       state:*) ;;
       *) continue ;;
@@ -417,29 +436,50 @@ fm_completion_alarm_tick() {  # <state-dir>
       *"$sep"*"$sep"*) detail=${line#*"$sep"}; detail=${detail#*"$sep"} ;;
       *) detail='' ;;
     esac
-    episode=$(fm_completion_alarm_episode "$state" "$task")
+    # The run this completion belongs to is the episode identity. Its head
+    # advances with every pipeline fix round while the crew worktree's own HEAD
+    # deliberately does not, so it is the only thing that separates a run's
+    # approval gate from its fix_review gate. A completion with no run behind
+    # it falls back to the crew HEAD, which does move when that worker commits.
+    episode=$(printf '%s\n' "$out" | sed -n 's/^episode: //p' | head -1)
+    esource='run'
+    if [ -z "$episode" ]; then
+      episode=$(fm_completion_alarm_head_episode "$state" "$task" "$read_timeout")
+      esource='head'
+    fi
+    [ -n "$episode" ] || esource='none'
     rec=$(fm_completion_alarm_path "$state" "$task")
     if [ ! -f "$rec" ]; then
-      fm_completion_alarm_arm "$state" "$task" "$st" "$detail" "$episode" || true
+      fm_completion_alarm_arm "$state" "$task" "$st" "$detail" "$episode" "$esource" || true
       continue
     fi
     rec_state=$(fm_completion_alarm_get "$rec" state)
     if [ "$rec_state" != "$st" ]; then
       # A different terminal state is a NEW completion episode (e.g. parked
       # gate answered, run finished as done): restart the window.
-      fm_completion_alarm_arm "$state" "$task" "$st" "$detail" "$episode" || true
+      fm_completion_alarm_arm "$state" "$task" "$st" "$detail" "$episode" "$esource" || true
       continue
     fi
-    # Same state value, but a head that has moved since the record was armed
-    # means the worker completed, did more work, and completed again: two
-    # episodes that would otherwise merge behind one state value (a run's
-    # approval gate and its fix_review gate both reconcile as parked). Only a
-    # head derived on BOTH sides can prove a difference, so an underivable one
-    # falls back to the state value rather than restarting the window forever.
+    # Same state value, but a moved identity means the worker completed, did
+    # more work, and completed again: two episodes that would otherwise merge
+    # behind one state value. Only identities of the SAME derivable kind can
+    # prove a difference - comparing a run token against a crew HEAD would read
+    # a mere change of evidence as a new completion.
     rec_episode=$(fm_completion_alarm_get "$rec" episode)
-    if [ -n "$episode" ] && [ -n "$rec_episode" ] && [ "$episode" != "$rec_episode" ]; then
-      fm_completion_alarm_arm "$state" "$task" "$st" "$detail" "$episode" || true
+    rec_esource=$(fm_completion_alarm_get "$rec" episode_source)
+    if [ "$esource" != 'none' ] && [ "$esource" = "$rec_esource" ] \
+      && [ "$episode" != "$rec_episode" ]; then
+      fm_completion_alarm_arm "$state" "$task" "$st" "$detail" "$episode" "$esource" || true
       continue
+    fi
+    # Neither the same nor provably different: an identity that cannot be
+    # derived, or evidence that changed kind. Never treat that as a match -
+    # record what is known now, but KEEP the window start, so the alarm still
+    # matures and fires once instead of resetting on every unidentifiable
+    # sighting and never maturing at all.
+    if [ "$esource" != 'none' ] && [ "$esource" != "$rec_esource" ]; then
+      printf 'episode=%s\nepisode_source=%s\n' \
+        "$(fm_completion_alarm_sanitize "$episode")" "$esource" >> "$rec"
     fi
     escalated=$(fm_completion_alarm_get "$rec" escalated_epoch)
     [ -z "$escalated" ] || continue

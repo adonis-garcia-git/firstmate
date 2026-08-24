@@ -13,10 +13,14 @@
 #   - The same persisting terminal state escalates exactly one actionable
 #     check wake past the window - never a second wake for the same episode.
 #   - A task that resumes clears its record; a NEW terminal state restarts the
-#     episode and may alarm again. So does a completion on a MOVED branch head
-#     under the same state value, which is what keeps a run's approval gate and
-#     its fix_review gate from merging into one episode without relying on
-#     having observed the working interval between them. Only a SUCCESSFUL read
+#     episode and may alarm again. So does a completion under an ADVANCED
+#     pipeline run head at the same state value, which is what keeps a run's
+#     approval gate and its fix_review gate from merging into one episode
+#     without relying on having observed the working interval between them -
+#     the crew worktree HEAD cannot serve there, because a fix round commits
+#     into the gate repo and leaves it untouched. An identity that cannot be
+#     derived at all is never read as a match, but still leaves the window
+#     start alone so the alarm matures and fires once. Only a SUCCESSFUL read
 #     decides any of it: a failed, malformed, or timed-out reader leaves the
 #     record and its window untouched, and one wedged read cannot stall a sweep.
 #   - A healthy idle secondmate, a declared paused: external wait, a provably
@@ -52,6 +56,10 @@ TMP_ROOT=$(fm_test_tmproot fm-completion-alarm-tests)
 # verdict comes from FM_FAKE_CREW_STATE (or a per-id override) per call.
 FAKE_CREW=$(make_fake_crew_state "$TMP_ROOT")
 
+# The run-identity token the fake reader reports, when a case cares. Empty for
+# every case that does not, which exercises the crew-HEAD fallback.
+FAKE_EPISODE=""
+
 # --- helpers ----------------------------------------------------------------
 
 # Run one lib function in a subshell scoped to <state>, with the fake
@@ -61,7 +69,8 @@ FAKE_CREW=$(make_fake_crew_state "$TMP_ROOT")
 tick_with() {
   local state=$1 verdict=$2 now=${3:-}
   FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$FAKE_CREW" \
-    FM_FAKE_CREW_STATE="$verdict" FM_COMPLETION_ALARM_NOW="$now" bash -c '
+    FM_FAKE_CREW_STATE="$verdict" FM_COMPLETION_ALARM_NOW="$now" \
+    FM_FAKE_CREW_EPISODE="${FAKE_EPISODE:-}" bash -c '
     set -u
     # shellcheck disable=SC1090
     . "$1"
@@ -393,43 +402,82 @@ test_tick_busy_period_ends_episode_and_next_completion_alarms() {
 }
 
 test_tick_distinct_episodes_never_merge_behind_one_state() {
-  local state wt out rec t
+  local state wt out rec t crew_head
   state="$TMP_ROOT/tick-episode/state"; mkdir -p "$state"
+  # A real crew worktree, whose HEAD a no-mistakes fix round does NOT touch:
+  # the pipeline commits into the gate repo, and fm_nm_head_matches_worktree's
+  # ancestor rule exists precisely because the crew HEAD stays behind. So this
+  # worktree is committed to exactly once and never again - anything that
+  # depended on it moving would be testing a state the system never produces.
   wt="$TMP_ROOT/tick-episode/wt"
   git init -q "$wt"
-  git -C "$wt" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "gate 1"
+  git -C "$wt" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "crew work"
+  crew_head=$(git -C "$wt" rev-parse HEAD)
   fm_write_meta "$state/helm.meta" "kind=ship" "worktree=$wt"
   t=$(date +%s)
   rec=$(record_path "$state" helm)
+  # Gate 1: the run parks at approval. Same run, head as the pipeline sees it.
+  FAKE_EPISODE="run:R1@1111111111111111111111111111111111111111"
   out=$(tick_with "$state" "$PARKED_LINE" "$t") || fail "arm tick failed"
   [ -z "$out" ] || fail "the first gate escalated inside its window: $out"
+  assert_grep "episode_source=run" "$rec" "a run-backed completion should bind the run identity"
   out=$(tick_with "$state" "$PARKED_LINE" "$(( t + 400 ))") || fail "escalation tick failed"
   assert_contains "$out" "check: completion-alarm: helm parked unsurfaced" \
     "the first gate should escalate"
   [ "$(queue_alarm_count "$state" helm)" = 1 ] || fail "expected one wake for gate 1"
-  # The supervisor answers the gate, the pipeline's fix step commits, and the
-  # run parks again at the NEXT gate - which reconciles as `parked` all over
-  # again. That whole working interval falls between two sweeps, so no
-  # reconciliation ever observes it: the completion identity has to carry the
-  # difference on its own.
-  git -C "$wt" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "fix round"
+  # The supervisor answers the gate and the fix step lands its commits in the
+  # GATE repo, so the run head advances while the crew worktree HEAD does not.
+  # The run then parks at fix_review, which reconciles as `parked` all over
+  # again, and that whole working interval falls between two sweeps - so no
+  # reconciliation observes it and the identity must carry the difference.
+  FAKE_EPISODE="run:R1@2222222222222222222222222222222222222222"
   out=$(tick_with "$state" "$PARKED_LINE" "$(( t + 500 ))") || fail "re-arm tick failed"
+  [ "$(git -C "$wt" rev-parse HEAD)" = "$crew_head" ] \
+    || fail "the test moved the crew HEAD, which a real fix round never does"
   [ -z "$out" ] || fail "the second episode escalated inside its own window: $out"
   assert_grep "first_epoch=$(( t + 500 ))" "$rec" \
-    "a completion on a moved head must restart the episode window"
+    "a completion under an advanced run head must restart the episode window"
   [ "$(queue_alarm_count "$state" helm)" = 1 ] || fail "the new episode woke inside its window"
   out=$(tick_with "$state" "$PARKED_LINE" "$(( t + 900 ))") || fail "gate 2 tick failed"
   assert_contains "$out" "check: completion-alarm: helm parked unsurfaced" \
     "the second gate is a distinct episode and must alarm on its own merits"
   [ "$(queue_alarm_count "$state" helm)" = 2 ] \
     || fail "two distinct episodes merged behind one state value"
-  # An unmoved head is the SAME episode and must stay suppressed, so the
-  # identity closes the merge without reopening the re-nag direction.
+  # An unmoved run identity is the SAME episode and must stay suppressed, so
+  # this closes the merge without reopening the re-nag direction.
   out=$(tick_with "$state" "$PARKED_LINE" "$(( t + 1400 ))") || fail "same-episode tick failed"
   [ -z "$out" ] || fail "an unchanged episode re-nagged: $out"
   [ "$(queue_alarm_count "$state" helm)" = 2 ] \
     || fail "an unchanged episode queued a duplicate wake"
-  pass "two distinct episodes sharing one state value never merge, and one never re-nags"
+  FAKE_EPISODE=""
+  pass "two distinct run episodes sharing one state value never merge, and one never re-nags"
+}
+
+test_tick_underivable_identity_still_matures_the_alarm() {
+  local state out rec
+  state="$TMP_ROOT/tick-noident/state"; mkdir -p "$state"
+  # No run token from the reader and no worktree= in the meta, so neither
+  # identity can be derived. The window must still run down from where it
+  # started: re-arming on each unidentifiable sighting would push the deadline
+  # forward every sweep and the alarm would never mature at all.
+  fm_write_meta "$state/helm.meta" "kind=ship"
+  rec=$(record_path "$state" helm)
+  out=$(tick_with "$state" "$DONE_LINE" "$(epoch_ago 400)") || fail "arm tick failed"
+  [ -z "$out" ] || fail "an unidentifiable completion escalated immediately: $out"
+  assert_grep "episode_source=none" "$rec" \
+    "an underivable identity must be recorded as such, never as a real one"
+  assert_grep "first_epoch=$(epoch_ago 400)" "$rec" "the window should start at first sighting"
+  out=$(tick_with "$state" "$DONE_LINE" "$(epoch_ago 350)") || fail "second tick failed"
+  [ -z "$out" ] || fail "escalated before the window elapsed: $out"
+  assert_grep "first_epoch=$(epoch_ago 400)" "$rec" \
+    "an unidentifiable sighting must not reset the window start"
+  out=$(tick_with "$state" "$DONE_LINE") || fail "matured tick failed"
+  assert_contains "$out" "check: completion-alarm: helm done unsurfaced" \
+    "the alarm must still mature and fire once without a derivable identity"
+  [ "$(queue_alarm_count "$state" helm)" = 1 ] || fail "expected exactly one wake"
+  out=$(tick_with "$state" "$DONE_LINE") || fail "post-escalation tick failed"
+  [ -z "$out" ] || fail "an unidentifiable episode re-nagged: $out"
+  pass "an underivable identity still matures the alarm and fires it exactly once"
 }
 
 test_tick_bounds_a_single_hung_read() {
@@ -653,6 +701,7 @@ test_tick_holds_done_with_armed_merge_poll
 test_tick_busy_flap_never_renags_escalated_episode
 test_tick_busy_period_ends_episode_and_next_completion_alarms
 test_tick_distinct_episodes_never_merge_behind_one_state
+test_tick_underivable_identity_still_matures_the_alarm
 test_tick_bounds_a_single_hung_read
 test_tick_bounds_one_sweeps_work
 test_tick_preserves_record_when_reader_fails
