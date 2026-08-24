@@ -18,9 +18,11 @@
 #     approval gate and its fix_review gate from merging into one episode
 #     without relying on having observed the working interval between them -
 #     the crew worktree HEAD cannot serve there, because a fix round commits
-#     into the gate repo and leaves it untouched. An identity that cannot be
-#     derived at all is never read as a match, but still leaves the window
-#     start alone so the alarm matures and fires once. Only a SUCCESSFUL read
+#     into the gate repo and leaves it untouched. Losing run attribution
+#     between two gates changes the KIND of evidence rather than the identity,
+#     and an already-fired record re-arms rather than letting that flap swallow
+#     the next gate. An identity that cannot be derived at all leaves the
+#     window start alone so the alarm matures and fires once. Only a SUCCESSFUL read
 #     decides any of it: a failed, malformed, or timed-out reader leaves the
 #     record and its window untouched, and one wedged read cannot stall a sweep.
 #   - A healthy idle secondmate, a declared paused: external wait, a provably
@@ -453,6 +455,41 @@ test_tick_distinct_episodes_never_merge_behind_one_state() {
   pass "two distinct run episodes sharing one state value never merge, and one never re-nags"
 }
 
+test_tick_lost_run_attribution_still_alarms_next_gate() {
+  local state wt out rec t
+  state="$TMP_ROOT/tick-flap/state"; mkdir -p "$state"
+  wt="$TMP_ROOT/tick-flap/wt"
+  git init -q "$wt"
+  git -C "$wt" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "crew work"
+  fm_write_meta "$state/helm.meta" "kind=ship" "worktree=$wt"
+  t=$(date +%s)
+  rec=$(record_path "$state" helm)
+  FAKE_EPISODE="run:R1@1111111111111111111111111111111111111111"
+  out=$(tick_with "$state" "$PARKED_LINE" "$t") || fail "arm tick failed"
+  out=$(tick_with "$state" "$PARKED_LINE" "$(( t + 400 ))") || fail "escalation tick failed"
+  assert_contains "$out" "check: completion-alarm: helm parked unsurfaced" \
+    "the first gate should escalate"
+  [ "$(queue_alarm_count "$state" helm)" = 1 ] || fail "expected one wake for gate 1"
+  # A bounded no-mistakes read times out, so the reader loses run attribution
+  # and answers from the status log with no identity line at all. The evidence
+  # kind changed, so the stamped identity is no longer comparable - an already
+  # fired record must not ride that flap out and swallow what comes next.
+  FAKE_EPISODE=""
+  out=$(tick_with "$state" "$PARKED_LINE" "$(( t + 500 ))") || fail "flap tick failed"
+  [ -z "$out" ] || fail "the attribution flap escalated on the spot: $out"
+  assert_grep "episode_source=head" "$rec" "the flap should record the evidence it now has"
+  # The supervisor answers the gate, the fix round lands in the gate repo, and
+  # the run parks at fix_review with an advanced head. Attribution is back.
+  FAKE_EPISODE="run:R1@2222222222222222222222222222222222222222"
+  out=$(tick_with "$state" "$PARKED_LINE" "$(( t + 900 ))") || fail "gate 2 tick failed"
+  assert_contains "$out" "check: completion-alarm: helm parked unsurfaced" \
+    "a gate reached across an attribution flap must still alarm"
+  [ "$(queue_alarm_count "$state" helm)" = 2 ] \
+    || fail "the second gate was swallowed by the flapped evidence kind"
+  FAKE_EPISODE=""
+  pass "a completion whose run attribution flapped still alarms on the next gate"
+}
+
 test_tick_underivable_identity_still_matures_the_alarm() {
   local state out rec
   state="$TMP_ROOT/tick-noident/state"; mkdir -p "$state"
@@ -701,6 +738,7 @@ test_tick_holds_done_with_armed_merge_poll
 test_tick_busy_flap_never_renags_escalated_episode
 test_tick_busy_period_ends_episode_and_next_completion_alarms
 test_tick_distinct_episodes_never_merge_behind_one_state
+test_tick_lost_run_attribution_still_alarms_next_gate
 test_tick_underivable_identity_still_matures_the_alarm
 test_tick_bounds_a_single_hung_read
 test_tick_bounds_one_sweeps_work

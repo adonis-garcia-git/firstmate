@@ -47,19 +47,31 @@
 #      advances even though the crew worktree's own HEAD deliberately does not
 #      (fm_nm_head_matches_worktree's ancestor rule exists for exactly that).
 #      Keying on the crew HEAD would therefore miss the case this contract
-#      exists for. A completion with no run behind it (a scout, a done: read
-#      from the status log) falls back to that crew HEAD, which does move when
-#      that worker commits. Crucially the identity is read at completion time
-#      and does NOT depend on having observed the intervening working window -
-#      the observation this alarm exists because it cannot rely on.
-#      Only identities of the same derivable kind (episode_source=run|head) are
-#      ever compared: differing means a NEW episode that re-arms, identical
-#      means the same episode and stays suppressed. Anything else - an
-#      underivable identity, or evidence that changed kind - is never read as a
-#      match, but it does NOT reset the window either: the record keeps its
-#      first_epoch so the alarm still matures and fires once, where re-arming
-#      on every unidentifiable sighting would push the deadline forward forever
-#      and silently defeat the feature.
+#      exists for. The guarantee is exact only for run-backed completions. A
+#      completion the reader could not attribute to a FULL run falls back to
+#      the crew worktree HEAD (episode_source=head): a scout, a done: read from
+#      the status log, and also a run known only through the coarse runs-list
+#      fallback, which does have a run behind it and still falls back, because
+#      only the full `axi status` path has an id and head to report.
+#      For the run token the identity is read at completion time and does NOT
+#      depend on having observed the intervening working window - the
+#      observation this alarm exists because it cannot rely on. The crew-HEAD
+#      fallback carries no such guarantee: it separates two episodes only when
+#      the worker COMMITTED between them, so a non-committing worker (a scout
+#      answering two needs-decision:s in a row) is still told apart only by a
+#      sweep that catches the working verdict in between.
+#      Identities of the same kind are compared directly: differing means a NEW
+#      episode that re-arms, identical means the same episode and stays
+#      suppressed. A change of KIND makes the two incomparable, so a record
+#      that has ALREADY escalated re-arms rather than riding the flap out on
+#      its stamp (one duplicate beats one missed completion, and the flap
+#      self-limits because the re-armed record is unescalated again), while one
+#      that has not escalated yet records the new evidence and keeps its
+#      window. The single case that stays suppressed is a record whose identity
+#      was underivable when it armed and is underivable still: nothing
+#      distinguishes the two sightings, and re-arming on every unidentifiable
+#      sighting would re-nag every window forever, which requirement (3)
+#      forbids.
 #   5. Clearing is truth-based too: the record is dropped as soon as the task
 #      leaves the terminal state (the worker resumed, the decision was
 #      answered), its meta is gone, or teardown runs
@@ -472,16 +484,28 @@ fm_completion_alarm_tick() {  # <state-dir>
       fm_completion_alarm_arm "$state" "$task" "$st" "$detail" "$episode" "$esource" || true
       continue
     fi
-    # Neither the same nor provably different: an identity that cannot be
-    # derived, or evidence that changed kind. Never treat that as a match -
-    # record what is known now, but KEEP the window start, so the alarm still
-    # matures and fires once instead of resetting on every unidentifiable
-    # sighting and never maturing at all.
-    if [ "$esource" != 'none' ] && [ "$esource" != "$rec_esource" ]; then
-      printf 'episode=%s\nepisode_source=%s\n' \
-        "$(fm_completion_alarm_sanitize "$episode")" "$esource" >> "$rec"
-    fi
     escalated=$(fm_completion_alarm_get "$rec" escalated_epoch)
+    if [ "$esource" != "$rec_esource" ]; then
+      # The KIND of evidence changed - run attribution came or went, e.g. a
+      # bounded no-mistakes read timed out and the reader fell back to the
+      # status log. The two identities are not comparable, so this may well be
+      # a different episode. An episode that has already fired must NOT ride
+      # that flap out on its stamp: re-arm, because one duplicate alert is far
+      # cheaper than the missed completion this alarm exists to prevent, and
+      # the flap self-limits (the re-armed record is unescalated again).
+      if [ -n "$escalated" ]; then
+        fm_completion_alarm_arm "$state" "$task" "$st" "$detail" "$episode" "$esource" || true
+        continue
+      fi
+      # Not yet fired: the window is what matters, so keep it and just record
+      # the better evidence. An identity that went underivable is not recorded
+      # over a derivable one - the last one that could be derived is the more
+      # useful thing to compare the next sighting against.
+      if [ "$esource" != 'none' ]; then
+        printf 'episode=%s\nepisode_source=%s\n' \
+          "$(fm_completion_alarm_sanitize "$episode")" "$esource" >> "$rec"
+      fi
+    fi
     [ -z "$escalated" ] || continue
     # A done task with an armed merge poll is already being actively landed:
     # the poll's own merged wake is a guaranteed delivery path, so hold the
