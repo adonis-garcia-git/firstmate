@@ -80,7 +80,16 @@
 #      distinguishes the two sightings, and re-arming on every unidentifiable
 #      sighting would re-nag every window forever, which requirement (3)
 #      forbids.
-#   5. Clearing is truth-based too: the record is dropped as soon as the task
+#   5. Clearing is truth-based too, and one confidence rule governs all of it:
+#      only a verdict entitled to disprove a terminal state may RETIRE an armed
+#      record (fm_completion_alarm_may_retire). Destroying a record is the one
+#      unrecoverable act in this library - the alarm is simply gone - whereas
+#      holding one too long merely surfaces something the supervisor dismisses,
+#      so evidence that can fail to confirm a completion but cannot disprove it
+#      is allowed to keep, arm, or ignore a record, never to end one. Today
+#      that is the coarse runs-list verdict, which reports `working` for a crew
+#      genuinely parked at a gate. Subject to that guard the record is dropped
+#      as soon as the task
 #      leaves the terminal state (the worker resumed, the decision was
 #      answered), its meta is gone, or teardown runs
 #      (fm_completion_alarm_clear_task). A busy endpoint drops a record that
@@ -113,12 +122,17 @@
 #                    empty while no run has been attributed to it
 #   episode_head=    last crew worktree HEAD seen for this record, empty while
 #                    none could be derived
-#   episode_source=  run|head|none - the kind the record last recorded, so an
-#                    underivable identity is inspectable and can never be
-#                    mistaken for a genuine identity match. Each kind keeps its
-#                    OWN last value above, so evidence that flaps between kinds
-#                    stays comparable instead of erasing what the other knew.
-#   detail=          short sanitized crew-state detail for the wake reason
+#   episode_source=  run|head|none - the kind of the last identity WRITTEN, not
+#                    of the last sighting: a sighting whose identity already
+#                    matches writes nothing, so this can name an older kind
+#                    than the one just read. Inspectability only; the per-kind
+#                    fields above carry every comparison, and each keeps its
+#                    OWN last value, so evidence that flaps between kinds stays
+#                    comparable instead of erasing what the other knew.
+#   detail=          crew-state detail as it read when the record was written.
+#                    Inspectability only - nothing reads it back, and the wake
+#                    reason interpolates the CURRENT read instead, so a stale
+#                    finding count can never reach the supervisor
 #   first_epoch=     when this state was first observed (window counts from here)
 #   window_secs=     alarm window bound at arm time
 #   escalated_epoch= empty until THIS episode's one alarm wake has been queued
@@ -154,8 +168,11 @@
 # always makes progress, then stops taking on new ones once the budget is
 # spent. The budget alone bounds only how many reads a sweep STARTS, so it is
 # paired with the per-read bound above, which covers every external call the
-# sweep makes; together they cap one sweep at the
-# budget plus one read, which is what actually keeps a slow or wedged reader
+# sweep makes. One task can make TWO of them - the reconciliation read, and
+# then the crew-HEAD identity fallback when that read returned a terminal state
+# with no run token - so together they cap one sweep at the budget plus one
+# task's bounded reads: 30 + 20 + 20 = 70s on the defaults. That is what keeps
+# a slow or wedged reader
 # from holding the watcher off its ordinary surfacing cadence. Sweeps RESUME
 # where the last truncated one
 # stopped and wrap around, so the bound defers a task rather than starving it:
@@ -235,6 +252,22 @@ fm_completion_alarm_head_episode() {  # <state-dir> <task> <timeout-secs>
   else
     git -C "$wt" rev-parse HEAD 2>/dev/null || true
   fi
+}
+
+# 0 iff a verdict attributed this way is allowed to RETIRE an armed record.
+# This is the library's one confidence rule, and it exists because destroying a
+# record is the only unrecoverable act here: an alarm dropped on bad evidence is
+# gone, while an alarm held on stale evidence merely surfaces something the
+# supervisor can dismiss. A `coarse` verdict comes from the bare runs-list row,
+# which reports `working` for a crew genuinely parked at a gate, so it can
+# confirm a terminal state but never disprove one - it may keep a record, arm
+# one, or do nothing, and must never be what ends one. Every other attribution
+# is a direct reading of THIS task (a full run step, its pane, its status log)
+# and retires normally. A reader that reports no attribution at all - an older
+# binary, a test double - is treated as conclusive, so this narrows nothing
+# that was previously trusted.
+fm_completion_alarm_may_retire() {  # <attribution>
+  [ "$1" != 'coarse' ]
 }
 
 # Directory holding durable completion-alarm records for <state-dir>.
@@ -349,7 +382,7 @@ _fm_completion_alarm_busy() {  # <meta-file> <task> <state-dir>
 fm_completion_alarm_tick() {  # <state-dir>
   local state=$1 dir rec meta task kind line st detail sep rec_state first window escalated now age reason budget started
   local metas total cursor_file cursor start truncated last i n read_timeout
-  local out episode esource rec_run rec_head rec_same erun ehead
+  local out episode esource rec_run rec_head rec_same erun ehead attribution
   sep=' · '
   # Orphan sweep first, so a record left behind by a missed teardown cannot
   # sit forever (its task no longer exists to reconcile).
@@ -455,9 +488,17 @@ fm_completion_alarm_tick() {  # <state-dir>
     esac
     st=${line#state: }
     st=${st%% *}
+    attribution=$(printf '%s\n' "$out" | sed -n 's/^attribution: //p' | head -1)
     case "$st" in
       done|failed|parked|blocked) ;;
-      *) fm_completion_alarm_discard "$state" "$task"; continue ;;
+      *)
+        # The completion is over - unless the verdict is not entitled to say
+        # so, in which case hold the record exactly as a failed read does.
+        if fm_completion_alarm_may_retire "$attribution"; then
+          fm_completion_alarm_discard "$state" "$task"
+        fi
+        continue
+        ;;
     esac
     case "$line" in
       *"$sep"*"$sep"*) detail=${line#*"$sep"}; detail=${detail#*"$sep"} ;;

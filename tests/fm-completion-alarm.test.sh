@@ -12,6 +12,10 @@
 #     durable record per terminal state (done/failed/parked/blocked).
 #   - The same persisting terminal state escalates exactly one actionable
 #     check wake past the window - never a second wake for the same episode.
+#   - Only a verdict entitled to disprove a completion may RETIRE its record:
+#     the coarse runs-list row reports `working` for a crew genuinely parked at
+#     a gate, so it can never be what destroys an armed record, while a fully
+#     attributed working verdict retires it as usual.
 #   - A task that resumes clears its record; a NEW terminal state restarts the
 #     episode and may alarm again. So does a completion under an ADVANCED
 #     pipeline run head at the same state value, which is what keeps a run's
@@ -64,6 +68,9 @@ FAKE_CREW=$(make_fake_crew_state "$TMP_ROOT")
 # The run-identity token the fake reader reports, when a case cares. Empty for
 # every case that does not, which exercises the crew-HEAD fallback.
 FAKE_EPISODE=""
+# How confidently the fake reader attributes its verdict. Empty for every case
+# that does not care, which reads as conclusive.
+FAKE_ATTRIBUTION=""
 
 # --- helpers ----------------------------------------------------------------
 
@@ -75,7 +82,8 @@ tick_with() {
   local state=$1 verdict=$2 now=${3:-}
   FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$FAKE_CREW" \
     FM_FAKE_CREW_STATE="$verdict" FM_COMPLETION_ALARM_NOW="$now" \
-    FM_FAKE_CREW_EPISODE="${FAKE_EPISODE:-}" bash -c '
+    FM_FAKE_CREW_EPISODE="${FAKE_EPISODE:-}" \
+    FM_FAKE_CREW_ATTRIBUTION="${FAKE_ATTRIBUTION:-}" bash -c '
     set -u
     # shellcheck disable=SC1090
     . "$1"
@@ -515,6 +523,44 @@ test_tick_lost_run_attribution_still_alarms_next_gate() {
   pass "attribution flapping never re-nags one episode, and a new gate still alarms"
 }
 
+test_tick_coarse_working_verdict_cannot_retire_a_record() {
+  local state out rec t
+  state="$TMP_ROOT/tick-coarse/state"; mkdir -p "$state"
+  fm_write_meta "$state/helm.meta" "kind=ship"
+  t=$(date +%s)
+  rec=$(record_path "$state" helm)
+  FAKE_ATTRIBUTION="full"
+  FAKE_EPISODE="run:R1@1111111111111111111111111111111111111111"
+  out=$(tick_with "$state" "$PARKED_LINE" "$t") || fail "arm tick failed"
+  assert_present "$rec" "the gate should arm a record"
+  # `axi status` starts answering for ANOTHER crew's branch, so the reader
+  # falls to the bare runs-list row. That row has no gate detail and reports
+  # `working` for a crew that is genuinely parked - it can fail to confirm a
+  # completion but it cannot disprove one, so it must not destroy the record.
+  FAKE_ATTRIBUTION="coarse"
+  FAKE_EPISODE=""
+  out=$(tick_with "$state" "$WORKING_LINE" "$(( t + 45 ))") || fail "coarse tick failed"
+  [ -z "$out" ] || fail "the coarse verdict escalated: $out"
+  assert_present "$rec" "a coarse working verdict must not retire an armed record"
+  assert_grep "first_epoch=$t" "$rec" "a coarse verdict must not restart the window either"
+  # Attribution recovers and helm is still parked at the same gate. Because the
+  # window survived the flap, the completion matures instead of being reset out
+  # of existence on every alternating sweep.
+  FAKE_ATTRIBUTION="full"
+  FAKE_EPISODE="run:R1@1111111111111111111111111111111111111111"
+  out=$(tick_with "$state" "$PARKED_LINE" "$(( t + 100 ))") || fail "recovered tick failed"
+  assert_contains "$out" "check: completion-alarm: helm parked unsurfaced" \
+    "a gate flapping through coarse attribution must still alarm"
+  [ "$(queue_alarm_count "$state" helm)" = 1 ] || fail "expected exactly one wake"
+  # A confidently attributed non-terminal verdict still retires normally: the
+  # guard narrows which evidence may end an episode, not whether one ends.
+  out=$(tick_with "$state" "$WORKING_LINE" "$(( t + 200 ))") || fail "full working tick failed"
+  assert_absent "$rec" "a fully attributed working verdict must still retire the record"
+  FAKE_ATTRIBUTION=""
+  FAKE_EPISODE=""
+  pass "only a verdict entitled to disprove a completion may retire its record"
+}
+
 test_tick_underivable_identity_still_matures_the_alarm() {
   local state out rec
   state="$TMP_ROOT/tick-noident/state"; mkdir -p "$state"
@@ -764,6 +810,7 @@ test_tick_busy_flap_never_renags_escalated_episode
 test_tick_busy_period_ends_episode_and_next_completion_alarms
 test_tick_distinct_episodes_never_merge_behind_one_state
 test_tick_lost_run_attribution_still_alarms_next_gate
+test_tick_coarse_working_verdict_cannot_retire_a_record
 test_tick_underivable_identity_still_matures_the_alarm
 test_tick_bounds_a_single_hung_read
 test_tick_bounds_one_sweeps_work

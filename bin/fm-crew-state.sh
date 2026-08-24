@@ -18,10 +18,16 @@
 #
 #   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
 #
-# With FM_CREW_STATE_EPISODE=1 a caller additionally gets a second line naming
-# the pipeline run this state was attributed to:
+# With FM_CREW_STATE_EPISODE=1 a caller additionally gets the pipeline run this
+# state was attributed to, and how confidently:
 #
 #   episode: run:<run-id>@<run-head>
+#   attribution: full|coarse|none
+#
+# `attribution` is always reported under that opt-in; `episode` only when a full
+# run backs the verdict. A `coarse` verdict came from the bare runs-list row,
+# which has no step or gate detail and so reports `working` for a crew that is
+# genuinely parked at a gate - it can confirm a state but never disprove one.
 #
 # It is emitted only on the run-step path, from fields `axi status` already
 # returned, and is omitted entirely when no run is attributed. That token is how
@@ -110,13 +116,26 @@ SEP=' · '
 # existing consumer sees a changed contract.
 EPISODE_TOKEN=""
 
+# How confidently this verdict is attributed to a no-mistakes run: `full` when
+# `axi status` answered for this crew's own branch and head, `coarse` when only
+# the runs list did, `none` when no run backs the verdict at all (a scout, a
+# pane or status-log reading, an early exit). A `coarse` verdict is the one
+# that cannot tell a parked gate from a running step - it reports `working`
+# either way - so a consumer that acts on the ABSENCE of a terminal state has
+# to know it was reading the coarse row. Reported on the same FM_CREW_STATE_EPISODE
+# opt-in as the episode line.
+ATTRIBUTION=none
+
 # Emit the one canonical line and exit 0. Detail is optional.
 emit() {  # <state> <source> [detail]
   local line="state: $1${SEP}source: $2"
   [ -n "${3:-}" ] && line="$line${SEP}$3"
   printf '%s\n' "$line"
-  if [ "${FM_CREW_STATE_EPISODE:-}" = 1 ] && [ -n "$EPISODE_TOKEN" ]; then
-    printf 'episode: %s\n' "$EPISODE_TOKEN"
+  if [ "${FM_CREW_STATE_EPISODE:-}" = 1 ]; then
+    if [ -n "$EPISODE_TOKEN" ]; then
+      printf 'episode: %s\n' "$EPISODE_TOKEN"
+    fi
+    printf 'attribution: %s\n' "$ATTRIBUTION"
   fi
   exit 0
 }
@@ -489,6 +508,7 @@ fi
 # --- run-step authoritative path -------------------------------------------
 
 if [ "$HAVE_RUN" = 1 ]; then
+  ATTRIBUTION=$RUN_SOURCE
   RUN_STATE=working
   RUN_DETAIL=""
   CI_STEP_STATUS=""
