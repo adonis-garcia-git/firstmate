@@ -1038,8 +1038,11 @@ while :; do
   # reconciled current state is terminal for the supervisor (done/failed/
   # parked/blocked) and stayed unhandled past its window. Paced on its own
   # restart-surviving marker because each sweep may run a bounded
-  # fm-crew-state.sh read per task; the durable records make a completion
-  # that happened while no watcher ran alarm on the first healthy cycle. A
+  # fm-crew-state.sh read per task, and the sweep itself carries a wall-clock
+  # budget (FM_COMPLETION_SCAN_BUDGET_SECS) under that pacing so a slow reader
+  # defers its tail to the next sweep instead of starving this poll loop; the
+  # durable records make a completion that happened while no watcher ran alarm
+  # on the first healthy cycle, tail included. A
   # due wake is durably enqueued INSIDE the tick before the record is marked
   # escalated (enqueue before suppress); surface the first reason. Exactly
   # one wake per completion episode; bin/fm-completion-alarm-lib.sh owns the

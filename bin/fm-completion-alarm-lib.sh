@@ -38,10 +38,14 @@
 #      and a record already past its window escalates on that first cycle.
 #   4. Clearing is truth-based too: the record is dropped as soon as the task
 #      leaves the terminal state (the worker resumed, the decision was
-#      answered), its endpoint turns busy, its meta is gone, or teardown runs
-#      (fm_completion_alarm_clear_task). A NEW terminal state (parked ->
-#      done) restarts the episode and may alarm again; the same state never
-#      re-nags. A done task whose merge poll is armed (state/<id>.pr-poll,
+#      answered), its meta is gone, or teardown runs
+#      (fm_completion_alarm_clear_task). A busy endpoint drops a record that
+#      has not escalated yet - detection is merely deferred - but HOLDS one
+#      that has, so the one-shot stamp survives a busy interval and a single
+#      episode can never alarm twice however often the endpoint flaps. A NEW
+#      terminal state (parked -> done) restarts the episode and may alarm
+#      again; the same state never re-nags. A done task whose merge poll is
+#      armed (state/<id>.pr-poll,
 #      written by bin/fm-pr-check.sh) is already being actively landed, so it
 #      is held without escalating while the poll exists.
 #      Only a SUCCESSFUL reconciliation read may change a record: the reader
@@ -76,8 +80,18 @@
 # detection proceeds (surface bias, matching the watcher's
 # absorb-only-when-provably-working rule).
 #
+# One sweep runs synchronously inside the watcher's poll loop and spends a
+# bounded but non-trivial reconciliation read per task, so it also carries a
+# wall-clock budget (FM_COMPLETION_SCAN_BUDGET_SECS, default 30, below the
+# watcher's 45s scan pacing): once spent, the sweep stops taking on new tasks
+# and the untouched tail is simply reconciled by the next sweep. That bounds
+# how long a slow or hung reader can hold the watcher off its ordinary
+# surfacing cadence. Records are durable, so a deferred tail loses no state.
+#
 # Tunables (env):
 #   FM_COMPLETION_ALARM_WINDOW_SECS  alarm window in seconds (default 90)
+#   FM_COMPLETION_SCAN_BUDGET_SECS   per-sweep wall-clock budget (default 30,
+#                                    0 disables the bound)
 #   FM_COMPLETION_ALARM_NOW          fixed epoch for deterministic tests
 #   FM_CREW_STATE_BIN                current-state reader override (tests)
 #
@@ -86,6 +100,7 @@
 
 FM_COMPLETION_ALARM_SCHEMA='fm-completion-alarm.v1'
 FM_COMPLETION_ALARM_WINDOW_DEFAULT=90
+FM_COMPLETION_SCAN_BUDGET_DEFAULT=30
 
 # The crew current-state reader, resolved exactly as bin/fm-classify-lib.sh
 # resolves it, so a caller that already sourced that library (the watcher)
@@ -107,6 +122,16 @@ fm_completion_alarm_window_secs() {
     ''|*[!0-9]*) w=$FM_COMPLETION_ALARM_WINDOW_DEFAULT ;;
   esac
   printf '%s' "$w"
+}
+
+# Wall-clock seconds one sweep may spend before it defers its remaining tasks
+# to the next sweep. 0 means unbounded.
+fm_completion_alarm_budget_secs() {
+  local b=${FM_COMPLETION_SCAN_BUDGET_SECS:-$FM_COMPLETION_SCAN_BUDGET_DEFAULT}
+  case "$b" in
+    ''|*[!0-9]*) b=$FM_COMPLETION_SCAN_BUDGET_DEFAULT ;;
+  esac
+  printf '%s' "$b"
 }
 
 # Directory holding durable completion-alarm records for <state-dir>.
@@ -166,6 +191,19 @@ fm_completion_alarm_discard() {  # <state-dir> <task>
   rm -f "$rec"
 }
 
+# Defer detection for a task whose endpoint is busy. An episode that has not
+# escalated yet is dropped outright (a busy worker is mid-turn on this very
+# state, so there is nothing to surface); one that HAS escalated is held, so
+# its one-shot escalated_epoch stamp outlives the busy interval and the same
+# completion can never alarm a second time.
+fm_completion_alarm_defer() {  # <state-dir> <task>
+  local rec
+  rec=$(fm_completion_alarm_path "$1" "$2")
+  [ -f "$rec" ] || return 0
+  [ -z "$(fm_completion_alarm_get "$rec" escalated_epoch)" ] || return 0
+  fm_completion_alarm_discard "$1" "$2"
+}
+
 # Remove the record belonging to <task> (teardown cleanup).
 fm_completion_alarm_clear_task() {  # <state-dir> <task>
   local state=$1 task=$2 dir
@@ -196,10 +234,12 @@ _fm_completion_alarm_busy() {  # <meta-file> <task> <state-dir>
 # and its reason printed for the caller to surface); any other state, a busy
 # endpoint, or an armed done-state merge poll clears or holds the record
 # without waking. A failed reconciliation read leaves the task's record
-# untouched. Records whose task metadata is gone are removed. Returns
-# non-zero only when a due wake could not be durably enqueued.
+# untouched, and a busy endpoint never drops an already-escalated one.
+# Records whose task metadata is gone are removed. Tasks still unreconciled
+# once the sweep's wall-clock budget is spent are left for the next sweep.
+# Returns non-zero only when a due wake could not be durably enqueued.
 fm_completion_alarm_tick() {  # <state-dir>
-  local state=$1 dir rec meta task kind line st detail sep rec_state first window escalated now age reason
+  local state=$1 dir rec meta task kind line st detail sep rec_state first window escalated now age reason budget started
   sep=' · '
   # Orphan sweep first, so a record left behind by a missed teardown cannot
   # sit forever (its task no longer exists to reconcile).
@@ -218,8 +258,17 @@ fm_completion_alarm_tick() {  # <state-dir>
       [ -f "$state/$task.meta" ] || rm -f "$rec"
     done
   fi
+  budget=$(fm_completion_alarm_budget_secs)
+  started=$(date +%s)
   for meta in "$state"/*.meta; do
     [ -f "$meta" ] || continue
+    # This sweep runs synchronously in the watcher's poll loop, so it stops
+    # taking on new tasks once its wall-clock budget is spent rather than
+    # letting a slow reader hold the watcher off its surfacing cadence. The
+    # untouched tail keeps its durable records and is reconciled next sweep.
+    if [ "$budget" -gt 0 ] && [ "$(( $(date +%s) - started ))" -ge "$budget" ]; then
+      break
+    fi
     task=$(basename "$meta")
     task=${task%.meta}
     kind=$(grep '^kind=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
@@ -232,9 +281,11 @@ fm_completion_alarm_tick() {  # <state-dir>
     fi
     # A provably busy endpoint means the worker is mid-turn on this very
     # state (e.g. composing a gate response): actively worked, not
-    # unsurfaced. Checked before the costlier reconciliation read.
+    # unsurfaced. Checked before the costlier reconciliation read. An episode
+    # that already escalated keeps its record here, so busy flapping on a
+    # completion the supervisor is deliberately holding cannot re-nag it.
     if _fm_completion_alarm_busy "$meta" "$task" "$state"; then
-      fm_completion_alarm_discard "$state" "$task"
+      fm_completion_alarm_defer "$state" "$task"
       continue
     fi
     # Only a SUCCESSFUL read may change a record. fm-crew-state.sh exits 0 and

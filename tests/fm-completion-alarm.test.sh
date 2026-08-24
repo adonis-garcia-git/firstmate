@@ -17,7 +17,11 @@
 #     failed or malformed reader leaves the record and its window untouched.
 #   - A healthy idle secondmate, a declared paused: external wait, a provably
 #     busy endpoint (e.g. a worker composing a gate response), and a done task
-#     with an armed merge poll never alarm.
+#     with an armed merge poll never alarm. A busy endpoint defers detection
+#     but never drops an already-escalated record, so busy flapping on a
+#     completion the supervisor is holding cannot re-nag it.
+#   - One sweep is bounded by its own wall-clock budget and defers the tail to
+#     the next sweep rather than starving the watcher's poll loop.
 #   - The durable records and truth-based scan make a completion that
 #     happened while no watcher ran alarm after a restart, without
 #     duplicating an already-escalated episode.
@@ -95,6 +99,34 @@ tick_with_broken_reader() {  # <state> <mode> [now]
   esac
   FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$bin" \
     FM_COMPLETION_ALARM_NOW="$now" bash -c '
+    set -u
+    # shellcheck disable=SC1090
+    . "$1"
+    # shellcheck disable=SC1090
+    . "$2"
+    fm_completion_alarm_tick "$3"
+  ' _ "$WAKE_LIB" "$ALARM_LIB" "$state"
+}
+
+# Same tick, against a deliberately SLOW current-state reader and an explicit
+# per-sweep wall-clock budget, so the test can observe one sweep bounding its
+# own work and deferring the tail rather than starving the watcher poll loop.
+tick_with_slow_reader() {  # <state> <sleep-secs> <budget-secs>
+  local state=$1 secs=$2 budget=$3 bin
+  bin="$TMP_ROOT/slow-crew-state.sh"
+  if [ ! -x "$bin" ]; then
+    cat > "$bin" <<'SH'
+#!/usr/bin/env bash
+set -u
+sleep "${FM_FAKE_CREW_SLEEP:-0}"
+printf '%s\n' "${FM_FAKE_CREW_STATE:-state: unknown · source: none}"
+exit 0
+SH
+    chmod +x "$bin"
+  fi
+  FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$bin" \
+    FM_FAKE_CREW_SLEEP="$secs" FM_FAKE_CREW_STATE="$DONE_LINE" \
+    FM_COMPLETION_SCAN_BUDGET_SECS="$budget" bash -c '
     set -u
     # shellcheck disable=SC1090
     . "$1"
@@ -263,6 +295,62 @@ test_tick_holds_done_with_armed_merge_poll() {
   pass "a done task with an armed merge poll is held without alarming"
 }
 
+test_tick_busy_flap_never_renags_escalated_episode() {
+  local state out rec t
+  state="$TMP_ROOT/tick-busy-flap/state"; mkdir -p "$state"
+  fm_write_meta "$state/helm.meta" "kind=ship"
+  t=$(date +%s)
+  arm_record "$state" helm 'done' "checks green" "$(( t - 400 ))"
+  rec=$(record_path "$state" helm)
+  out=$(tick_with "$state" "$DONE_LINE" "$t") || fail "escalation tick failed"
+  assert_contains "$out" "check: completion-alarm: helm done unsurfaced" \
+    "the aged completion episode should escalate once"
+  [ "$(queue_alarm_count "$state" helm)" = 1 ] || fail "expected exactly one wake"
+  # The supervisor messages the done-and-parked worker (a routine action on a
+  # completion being deliberately held), so its endpoint is busy for a turn.
+  out=$(tick_with_busy "$state" "$DONE_LINE" "busy claude-hook" "$(( t + 10 ))") \
+    || fail "busy tick failed"
+  [ -z "$out" ] || fail "a busy endpoint escalated: $out"
+  assert_present "$rec" "a busy endpoint must not drop an already-escalated record"
+  grep -qE '^escalated_epoch=[0-9]+$' "$rec" \
+    || fail "the busy interval dropped the one-shot escalation stamp"
+  # Endpoint idle again and still done, now well past a fresh window: the
+  # episode was already surfaced, so it must never wake a second time.
+  out=$(tick_with "$state" "$DONE_LINE" "$(( t + 20 ))") || fail "post-busy tick failed"
+  [ -z "$out" ] || fail "the same completion episode re-nagged right after a busy flap: $out"
+  out=$(tick_with "$state" "$DONE_LINE" "$(( t + 400 ))") || fail "late tick failed"
+  [ -z "$out" ] || fail "the same completion episode re-nagged after a busy flap: $out"
+  [ "$(queue_alarm_count "$state" helm)" = 1 ] \
+    || fail "a busy flap produced a duplicate wake for one completion episode"
+  pass "a busy flap after escalation never re-nags the same completion episode"
+}
+
+test_tick_bounds_one_sweeps_work() {
+  local state out
+  state="$TMP_ROOT/tick-budget/state"; mkdir -p "$state"
+  fm_write_meta "$state/aaa.meta" "kind=ship"
+  fm_write_meta "$state/bbb.meta" "kind=ship"
+  fm_write_meta "$state/ccc.meta" "kind=ship"
+  # A reader slower than the whole sweep's budget: the first task consumes it,
+  # so the sweep must stop taking on new tasks instead of running N x slow
+  # reads inside the watcher's poll loop.
+  out=$(tick_with_slow_reader "$state" 2 1) || fail "budgeted tick failed"
+  [ -z "$out" ] || fail "a budgeted sweep escalated: $out"
+  assert_present "$(record_path "$state" aaa)" "the sweep should reconcile its first task"
+  assert_absent "$(record_path "$state" bbb)" \
+    "a sweep past its budget must stop taking on new tasks"
+  assert_absent "$(record_path "$state" ccc)" \
+    "a sweep past its budget must stop taking on new tasks"
+  # The tail is deferred, never dropped: the next sweep reconciles it, so the
+  # bound costs latency and never detection.
+  out=$(tick_with "$state" "$DONE_LINE") || fail "follow-up tick failed"
+  assert_present "$(record_path "$state" bbb)" \
+    "the next sweep should reconcile the deferred tail"
+  assert_present "$(record_path "$state" ccc)" \
+    "the next sweep should reconcile the deferred tail"
+  pass "one sweep is bounded by its wall-clock budget and defers its tail"
+}
+
 test_tick_preserves_record_when_reader_fails() {
   local state out rec first
   state="$TMP_ROOT/tick-reader-fail/state"; mkdir -p "$state"
@@ -427,6 +515,8 @@ test_tick_never_alarms_secondmate
 test_tick_never_alarms_declared_pause
 test_tick_defers_while_endpoint_busy
 test_tick_holds_done_with_armed_merge_poll
+test_tick_busy_flap_never_renags_escalated_episode
+test_tick_bounds_one_sweeps_work
 test_tick_preserves_record_when_reader_fails
 test_tick_clears_orphaned_record
 test_watcher_alarms_lost_completion_and_rearms_after_restart
