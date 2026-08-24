@@ -136,8 +136,14 @@
 #   git worktree root distinct from the primary project checkout.
 #   Before a fresh ship or scout worker starts, its clean task worktree fetches
 #   origin, resolves the current remote default branch, and resets to its tip.
-#   An unreachable origin, unresolved default branch, or non-clean worktree
-#   refuses the spawn rather than risking a PR based on stale history.
+#   A pooled worktree with NO origin remote (a local-only project) instead
+#   fetches the primary local copy by path and resets to that copy's
+#   default-branch ref, never its HEAD, so a primary parked on a feature branch
+#   still seeds the true default-branch tip rather than that stray branch.
+#   An unreachable origin, a default branch unresolvable on the remote or on
+#   the primary local copy, an unreadable primary copy, an unverifiable fetched
+#   tip, or a non-clean worktree refuses the spawn rather than risking a PR
+#   based on stale history.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -1727,29 +1733,73 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
 }
 
-freshen_spawn_worktree_base() {  # <worktree>
-  local worktree=$1 default target expected actual status
-  if ! git -C "$worktree" fetch --quiet origin; then
-    echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
+# Freshen a pooled ship/scout worktree onto the current default-branch tip.
+# A pool clone that HAS an `origin` remote resolves that base over the network
+# exactly as before. A local-only project has no `origin` in its pool clone
+# (usually no remote at all), so the primary local copy is the only authority
+# for current history: it is fetched by path, and its default-branch REF is
+# read rather than its HEAD, so a primary stranded on a feature branch cannot
+# seed the wrong base (the same rationale as fm-ff-lib.sh's
+# primary_head_commit). An unreadable primary, an unresolvable default branch,
+# or a fetched tip that disagrees with the primary's own ref refuses instead of
+# launching from an unverifiable base.
+# Both paths converge on one cleanliness refusal, hard reset, and post-reset
+# HEAD verification, so no path can discard uncommitted work or launch from an
+# unverified base.
+freshen_spawn_worktree_base() {  # <worktree> <primary-checkout>
+  local worktree=$1 primary=$2 default target label expected actual status fetched primary_top
+  if git -C "$worktree" remote get-url origin >/dev/null 2>&1; then
+    if ! git -C "$worktree" fetch --quiet origin; then
+      echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
+    if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
+      echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
+    default=$(default_branch "$worktree") || {
+      echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    }
+    target="origin/$default"
+    label="'$target'"
+    if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
+      echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
+    expected=$(git -C "$worktree" rev-parse --verify --quiet "$target^{commit}" 2>/dev/null) || {
+      echo "error: '$target' is not a commit for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    }
+  else
+    primary_top=$(git -C "$primary" rev-parse --show-toplevel 2>/dev/null || true)
+    if [ -z "$primary_top" ] || [ "$(real_path_or_raw "$primary_top")" != "$(real_path_or_raw "$primary")" ]; then
+      echo "error: pooled worktree '$worktree' has no 'origin' remote and its local copy '$primary' is not a readable git repository root; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
+    default=$(default_branch "$primary") || {
+      echo "error: could not determine the default branch of the local copy '$primary' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    }
+    expected=$(git -C "$primary" rev-parse --verify --quiet "refs/heads/$default^{commit}" 2>/dev/null) || {
+      echo "error: the local copy '$primary' has no commit on its default branch '$default' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    }
+    label="'$default' from the local copy '$primary'"
+    if ! git -C "$worktree" fetch --quiet "$primary" "+refs/heads/$default"; then
+      echo "error: could not fetch $label for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
+    fetched=$(git -C "$worktree" rev-parse --verify --quiet 'FETCH_HEAD^{commit}' 2>/dev/null) || {
+      echo "error: fetching $label for pooled worktree '$worktree' yielded no commit; refusing to launch from a potentially stale base" >&2
+      return 1
+    }
+    if [ "$fetched" != "$expected" ]; then
+      echo "error: fetched $label as '$fetched', not its current tip '$expected', for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
+    target=$expected
   fi
-  if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
-    echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  fi
-  default=$(default_branch "$worktree") || {
-    echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  }
-  target="origin/$default"
-  if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
-    echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  fi
-  expected=$(git -C "$worktree" rev-parse --verify --quiet "$target^{commit}" 2>/dev/null) || {
-    echo "error: '$target' is not a commit for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  }
   status=$(git -C "$worktree" status --porcelain) || {
     echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
     return 1
@@ -1759,12 +1809,12 @@ freshen_spawn_worktree_base() {  # <worktree>
     return 1
   fi
   if ! git -C "$worktree" reset --hard "$target" >/dev/null; then
-    echo "error: could not reset pooled worktree '$worktree' to '$target'; refusing to launch from a potentially stale base" >&2
+    echo "error: could not reset pooled worktree '$worktree' to $label; refusing to launch from a potentially stale base" >&2
     return 1
   fi
   actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)
   if [ "$actual" != "$expected" ]; then
-    echo "error: pooled worktree '$worktree' is at '${actual:-unknown}', not current '$target' ('$expected'); refusing to launch" >&2
+    echo "error: pooled worktree '$worktree' is at '${actual:-unknown}', not current $label ('$expected'); refusing to launch" >&2
     return 1
   fi
 }
@@ -2261,7 +2311,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   validate_spawn_worktree "treehouse get" "$T"
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
-  freshen_spawn_worktree_base "$WT" || exit 1
+  freshen_spawn_worktree_base "$WT" "$PROJ_ABS_REAL" || exit 1
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't

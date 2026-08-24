@@ -118,7 +118,43 @@ prime_seen() { # <state> <status>
   printf '%s' "$sig" > "$state/.seen-$(basename "$status" | tr '.' '_')"
 }
 
-reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
+# Stop a background process on a bounded budget. A watcher that already entered
+# its delivery path masks the termination signals (bin/fm-push-transition-lib.sh's
+# wake() clears HUP/INT/TERM before it publishes and unwinds), so a plain
+# kill-then-wait blocks for exactly as long as that process lingers. No assertion
+# in this file needs a watcher to end on its own, and an unbounded wait here is
+# what turns a single wedged watcher into a suite that hangs until the CI job cap
+# instead of failing with its evidence.
+reap() { # <pid>
+  local pid=$1 i=0
+  kill "$pid" 2>/dev/null || true
+  while [ "$i" -lt 50 ] && kill -0 "$pid" 2>/dev/null; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -9 "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
+
+# Wait for a watcher's delivered reason instead of for the process to exit.
+# wake() prints the reason (and the reconciliation queues its wake) before the
+# watcher unwinds, so the printed line is durable evidence the hook ran even when
+# the process itself lingers afterwards - and a lingering watcher is then reaped
+# rather than left to block the suite.
+# The budget spans a full reconciliation cadence (FM_INACTIVE_RECONCILE_SECS is
+# 60 here): a first scan cut short by its own process-group backstop retries only
+# after that cadence, so a shorter budget would report a spurious failure on a
+# loaded machine. A generous budget costs nothing when the watcher delivers,
+# which healthy runs do in well under a second.
+wait_delivered() { # <file> <reason> [limit-ticks]
+  local file=$1 reason=$2 limit=${3:-900} i=0
+  while [ "$i" -lt "$limit" ]; do
+    grep -Fq "$reason" "$file" 2>/dev/null && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
 
 # The main retains a terminal presentation receipt until the corresponding wake
 # is handled and acknowledged.
@@ -331,7 +367,7 @@ test_nonterminal_and_captain_held_states_do_not_report() {
 # The actual watcher poll invokes the helper, while an idle secondmate remains
 # exempt from wedge escalation and emits no false wake.
 test_watcher_hook_and_idle_secondmate_exemption() {
-  local out pid i
+  local out pid
   make_world watcher; write_child "$MAIN" child 'done: green'; prime_seen "$MAIN/state" "$MAIN/state/child.status"
   out="$WORLD/watch.out"
   PATH="$WORLD/fakebin:$PATH" FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" \
@@ -339,15 +375,13 @@ test_watcher_hook_and_idle_secondmate_exemption() {
     FM_FORGE_LOG="$WORLD/forge.log" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     FM_FAKE_CREW_STATE='done' "$WATCH" > "$out" 2>&1 &
   pid=$!
-  i=0
-  while [ "$i" -lt 40 ]; do
-    kill -0 "$pid" 2>/dev/null || break
-    [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] && break
-    sleep 0.1
-    i=$((i + 1))
-  done
-  wait "$pid" 2>/dev/null || true
-  grep -Fq 'check: inactive-outcome' "$out" || fail "watcher did not surface its reconciliation result"
+  wait_delivered "$out" 'check: inactive-outcome' \
+    || { reap "$pid"; fail "watcher did not surface its reconciliation result: $(cat "$out")"; }
+  # The reconciliation queues its presentation before wake() prints the reason,
+  # so the delivered line above already proves this wake is durable.
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] \
+    || { reap "$pid"; fail "watcher did not queue exactly one terminal presentation"; }
+  reap "$pid"
 
   make_world idle-secondmate; bind_secondmate local; write_mate_meta; prime_seen "$MAIN/state" "$MAIN/state/mate.status"
   PATH="$WORLD/fakebin:$PATH" FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" FM_POLL=1 FM_SIGNAL_GRACE=1 \

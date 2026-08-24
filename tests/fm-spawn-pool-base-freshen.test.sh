@@ -6,6 +6,9 @@
 # These tests drive the real spawn path with a fake terminal, then prove it
 # starts the worker from the fetched origin/main tip or stops when origin is
 # unreachable.
+# A local-only project has no remote at all, so its pooled worktree freshens
+# from the primary local copy instead; the same cleanliness, verification, and
+# refusal guarantees are asserted on that path.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -63,6 +66,36 @@ make_case() {
   git -C "$publisher" add advanced-main.txt
   git -C "$publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm advance-main
   git -C "$publisher" push --quiet origin "$default"
+
+  printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$initial|$default"
+}
+
+make_remoteless_case() {
+  local name=$1 id=$2 default=${3:-main} case_dir home project pool fakebin initial
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  project="$case_dir/project"
+  pool="$case_dir/pool"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  printf 'codex\n' > "$home/config/crew-harness"
+  printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+  touch "$home/state/.last-watcher-beat"
+
+  git init --quiet -b "$default" "$project"
+  printf 'base\n' > "$project/README.md"
+  git -C "$project" add README.md
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+  initial=$(git -C "$project" rev-parse HEAD)
+  git -C "$project" worktree add --quiet --detach "$pool" "$initial"
+
+  # No remote is ever added: this is the local-only project shape.
+  # Advance the primary's default branch after the pool worktree was allocated,
+  # so a pool left at its allocation base is provably stale.
+  printf 'must survive a newly spawned branch\n' > "$project/advanced-main.txt"
+  git -C "$project" add advanced-main.txt
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm advance-main
 
   printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$initial|$default"
 }
@@ -227,11 +260,98 @@ test_unresolved_remote_default_refuses_pool() {
   pass "an unresolved remote default branch refuses the pooled worktree"
 }
 
+test_remoteless_pool_refreshes_from_primary_copy() {
+  local rec id out status current branch_head
+  id='pool-local-only-r6'
+  rec=$(make_remoteless_case local-only "$id")
+  read_case_record "$rec"
+  git -C "$POOL_DIR" remote get-url origin >/dev/null 2>&1 \
+    && fail "fixture did not prove the pooled worktree has no origin remote"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should refresh a remote-less pooled worktree from the primary copy"
+  assert_contains "$out" "spawned $id" "spawn did not report success for a remote-less project"
+  current=$(git -C "$PROJECT_DIR" rev-parse "refs/heads/$DEFAULT_BRANCH")
+  branch_head=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$branch_head" = "$current" ] || fail "spawn left the remote-less pooled worktree on stale history"
+  [ "$branch_head" != "$INITIAL_SHA" ] || fail "fixture did not prove the primary advanced past the pool base"
+  assert_grep 'must survive a newly spawned branch' "$POOL_DIR/advanced-main.txt" \
+    "the remote-less refresh omitted the primary's newest content"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed remote-less spawn: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
+    printf '# observed remote-less base: HEAD=%s primary %s=%s\n' \
+      "$branch_head" "$DEFAULT_BRANCH" "$current"
+  fi
+  pass "a remote-less pooled worktree refreshes from the primary local copy before launch"
+}
+
+test_remoteless_dirty_pool_refuses_without_discarding_work() {
+  local rec id out status before
+  id='pool-local-only-dirty-r6'
+  rec=$(make_remoteless_case local-only-dirty "$id")
+  read_case_record "$rec"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  printf 'keep this local work\n' > "$POOL_DIR/uncommitted.txt"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite a dirty remote-less pooled worktree"
+  assert_contains "$out" "is not clean" "spawn did not clearly refuse a dirty remote-less pooled worktree"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved HEAD while refusing a dirty remote-less pooled worktree"
+  assert_grep 'keep this local work' "$POOL_DIR/uncommitted.txt" \
+    "spawn discarded uncommitted work while refusing a remote-less pool"
+  pass "a dirty remote-less pooled worktree is refused without discarding its local work"
+}
+
+test_remoteless_unresolvable_primary_base_refuses() {
+  local rec id out status before
+  id='pool-local-only-unresolvable-r6'
+  rec=$(make_remoteless_case local-only-unresolvable "$id" trunk)
+  read_case_record "$rec"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite an unresolvable primary base"
+  assert_contains "$out" "default branch of the local copy" \
+    "spawn did not clearly refuse an unresolvable primary base"
+  assert_contains "$out" "$POOL_DIR" "the refusal did not name the pooled worktree"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved HEAD after failing to resolve the primary base"
+
+  id='pool-local-only-unreadable-r6'
+  rec=$(make_remoteless_case local-only-unreadable "$id")
+  read_case_record "$rec"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  mkdir -p "$CASE_DIR/not-a-repo"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$POOL_DIR" \
+    PATH="$FAKEBIN_DIR:$PATH" \
+    "$SPAWN" "$id" "$CASE_DIR/not-a-repo" --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite an unreadable primary copy"
+  assert_contains "$out" "$POOL_DIR" "the unreadable-primary refusal did not name the pooled worktree"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved HEAD after failing to read the primary copy"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed unresolvable primary-base refusal: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
+  fi
+  pass "an unresolvable or unreadable primary base refuses the remote-less pooled worktree"
+}
+
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
+test_remoteless_pool_refreshes_from_primary_copy
+test_remoteless_dirty_pool_refuses_without_discarding_work
+test_remoteless_unresolvable_primary_base_refuses
 
 echo "# all fm-spawn-pool-base-freshen tests passed"
