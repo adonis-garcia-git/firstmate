@@ -21,7 +21,10 @@
 #     into the gate repo and leaves it untouched. Losing run attribution
 #     between two gates changes the KIND of evidence rather than the identity,
 #     and an already-fired record re-arms rather than letting that flap swallow
-#     the next gate. An identity that cannot be derived at all leaves the
+#     the next gate - but each kind remembers its own last identity, so
+#     attribution that keeps oscillating around one unchanged completion goes
+#     quiet after that single duplicate instead of re-nagging forever.
+#     An identity that cannot be derived at all leaves the
 #     window start alone so the alarm matures and fires once. Only a SUCCESSFUL read
 #     decides any of it: a failed, malformed, or timed-out reader leaves the
 #     record and its window untouched, and one wedged read cannot stall a sweep.
@@ -470,24 +473,46 @@ test_tick_lost_run_attribution_still_alarms_next_gate() {
   assert_contains "$out" "check: completion-alarm: helm parked unsurfaced" \
     "the first gate should escalate"
   [ "$(queue_alarm_count "$state" helm)" = 1 ] || fail "expected one wake for gate 1"
-  # A bounded no-mistakes read times out, so the reader loses run attribution
-  # and answers from the status log with no identity line at all. The evidence
-  # kind changed, so the stamped identity is no longer comparable - an already
-  # fired record must not ride that flap out and swallow what comes next.
+  # A bounded no-mistakes read times out (or axi status keeps answering for
+  # another crew's branch), so the reader loses run attribution and falls back
+  # to the status log with no identity line. Nothing the record holds is
+  # comparable to a crew HEAD, so this one transition is allowed its single
+  # duplicate rather than riding out on the stamp.
   FAKE_EPISODE=""
   out=$(tick_with "$state" "$PARKED_LINE" "$(( t + 500 ))") || fail "flap tick failed"
   [ -z "$out" ] || fail "the attribution flap escalated on the spot: $out"
   assert_grep "episode_source=head" "$rec" "the flap should record the evidence it now has"
-  # The supervisor answers the gate, the fix round lands in the gate repo, and
-  # the run parks at fix_review with an advanced head. Attribution is back.
+  out=$(tick_with "$state" "$PARKED_LINE" "$(( t + 900 ))") || fail "flap maturity tick failed"
+  [ "$(queue_alarm_count "$state" helm)" = 2 ] \
+    || fail "the first unseen evidence kind should be allowed its one duplicate"
+  # Attribution now oscillates while helm sits at the SAME gate the whole time.
+  # Every identity here has been seen before and none has moved, so this is one
+  # episode and must stay silent - a flap that re-nags every couple of minutes
+  # is exactly the crying-wolf failure this record shape exists to stop.
+  FAKE_EPISODE="run:R1@1111111111111111111111111111111111111111"
+  out=$(tick_with "$state" "$PARKED_LINE" "$(( t + 1000 ))") || fail "flap-back tick failed"
+  [ -z "$out" ] || fail "a flap back to an UNCHANGED run identity re-nagged: $out"
+  FAKE_EPISODE=""
+  out=$(tick_with "$state" "$PARKED_LINE" "$(( t + 1100 ))") || fail "flap tick failed"
+  [ -z "$out" ] || fail "a flap back to an UNCHANGED crew head re-nagged: $out"
+  FAKE_EPISODE="run:R1@1111111111111111111111111111111111111111"
+  out=$(tick_with "$state" "$PARKED_LINE" "$(( t + 1200 ))") || fail "flap-back tick failed"
+  [ -z "$out" ] || fail "a repeating flap re-nagged one completion episode: $out"
+  [ "$(queue_alarm_count "$state" helm)" = 2 ] \
+    || fail "oscillating attribution re-nagged the same completion episode"
+  # The supervisor answers the gate, the fix round lands in the GATE repo, and
+  # the run parks at fix_review with an advanced head. That identity is
+  # genuinely new, so it is a distinct episode and must alarm on its own.
   FAKE_EPISODE="run:R1@2222222222222222222222222222222222222222"
-  out=$(tick_with "$state" "$PARKED_LINE" "$(( t + 900 ))") || fail "gate 2 tick failed"
+  out=$(tick_with "$state" "$PARKED_LINE" "$(( t + 1300 ))") || fail "gate 2 arm tick failed"
+  [ -z "$out" ] || fail "the second gate escalated inside its own window: $out"
+  out=$(tick_with "$state" "$PARKED_LINE" "$(( t + 1700 ))") || fail "gate 2 tick failed"
   assert_contains "$out" "check: completion-alarm: helm parked unsurfaced" \
     "a gate reached across an attribution flap must still alarm"
-  [ "$(queue_alarm_count "$state" helm)" = 2 ] \
+  [ "$(queue_alarm_count "$state" helm)" = 3 ] \
     || fail "the second gate was swallowed by the flapped evidence kind"
   FAKE_EPISODE=""
-  pass "a completion whose run attribution flapped still alarms on the next gate"
+  pass "attribution flapping never re-nags one episode, and a new gate still alarms"
 }
 
 test_tick_underivable_identity_still_matures_the_alarm() {

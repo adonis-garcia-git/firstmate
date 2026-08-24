@@ -39,7 +39,7 @@
 #   4. The record IS the completion episode, and escalated_epoch is therefore
 #      scoped to exactly one episode rather than to the worker. An episode is
 #      identified by its terminal state AND the PIPELINE RUN it completed under
-#      (episode=`run:<id>@<head>`, from the FM_CREW_STATE_EPISODE line that
+#      (episode_run=`run:<id>@<head>`, from the FM_CREW_STATE_EPISODE line that
 #      bin/fm-crew-state.sh already has in hand on the run-step path). That is
 #      what makes two episodes sharing a state value distinguishable: a run's
 #      approval gate and its fix_review gate both reconcile as `parked`, and
@@ -60,15 +60,23 @@
 #      the worker COMMITTED between them, so a non-committing worker (a scout
 #      answering two needs-decision:s in a row) is still told apart only by a
 #      sweep that catches the working verdict in between.
-#      Identities of the same kind are compared directly: differing means a NEW
-#      episode that re-arms, identical means the same episode and stays
-#      suppressed. A change of KIND makes the two incomparable, so a record
-#      that has ALREADY escalated re-arms rather than riding the flap out on
-#      its stamp (one duplicate beats one missed completion, and the flap
-#      self-limits because the re-armed record is unescalated again), while one
-#      that has not escalated yet records the new evidence and keeps its
-#      window. The single case that stays suppressed is a record whose identity
-#      was underivable when it armed and is underivable still: nothing
+#      Each kind keeps its own last value on the record, so identities are
+#      always compared like with like: a moved identity is a NEW episode that
+#      re-arms, an unmoved one is the same episode and stays suppressed no
+#      matter how often the evidence kind flaps around it. The first time a
+#      given kind speaks for a record there is nothing comparable, so a record
+#      that has ALREADY escalated re-arms rather than riding it out on its
+#      stamp - one duplicate beats one missed completion - and one that has not
+#      records the new evidence and keeps its window. Carrying BOTH kinds
+#      through every re-arm is what bounds that to a single duplicate: a record
+#      re-armed while run attribution is missing still remembers the run token,
+#      so the flap back matches instead of re-arming again. Without it a
+#      flapping attribution - routine on a multi-worker fleet sharing one repo,
+#      where `axi status` keeps answering for another crew's branch - would
+#      re-nag one completion every couple of minutes, and an alarm that cries
+#      wolf that often destroys the value this one exists to provide.
+#      The single case that stays suppressed is a record whose identity was
+#      underivable when it armed and is underivable still: nothing
 #      distinguishes the two sightings, and re-arming on every unidentifiable
 #      sighting would re-nag every window forever, which requirement (3)
 #      forbids.
@@ -101,12 +109,15 @@
 #   schema=fm-completion-alarm.v1
 #   task=            task id in this home
 #   state=           terminal state at first observation (done|failed|parked|blocked)
-#   episode=         identity of the episode: run:<id>@<head>, or the crew
-#                    worktree HEAD when no run is attributed; empty when
-#                    neither could be derived
-#   episode_source=  run|head|none - which of those episode= came from, so an
+#   episode_run=     last run identity seen for this record (run:<id>@<head>),
+#                    empty while no run has been attributed to it
+#   episode_head=    last crew worktree HEAD seen for this record, empty while
+#                    none could be derived
+#   episode_source=  run|head|none - the kind the record last recorded, so an
 #                    underivable identity is inspectable and can never be
-#                    mistaken for a genuine identity match
+#                    mistaken for a genuine identity match. Each kind keeps its
+#                    OWN last value above, so evidence that flaps between kinds
+#                    stays comparable instead of erasing what the other knew.
 #   detail=          short sanitized crew-state detail for the wake reason
 #   first_epoch=     when this state was first observed (window counts from here)
 #   window_secs=     alarm window bound at arm time
@@ -252,9 +263,12 @@ fm_completion_alarm_sanitize() {  # <text>
   printf '%s' "$cleaned"
 }
 
-# Arm (or atomically restart, for a NEW episode) one durable record.
-fm_completion_alarm_arm() {  # <state-dir> <task> <terminal-state> <detail> [episode] [episode-source]
-  local state=$1 task=$2 tstate=$3 detail=$4 episode=${5:-} esource=${6:-none} dir rec tmp now
+# Arm (or atomically restart, for a NEW episode) one durable record. The two
+# identities are carried per KIND, so a record re-armed while one kind of
+# evidence is unavailable still remembers what the other kind last said and can
+# recognize a flap back to it as the same episode.
+fm_completion_alarm_arm() {  # <state-dir> <task> <terminal-state> <detail> [source] [run-id] [head-id]
+  local state=$1 task=$2 tstate=$3 detail=$4 esource=${5:-none} erun=${6:-} ehead=${7:-} dir rec tmp now
   [ -n "$state" ] && [ -n "$task" ] && [ -n "$tstate" ] || return 2
   dir=$(fm_completion_alarm_dir "$state")
   mkdir -p "$dir" || return 1
@@ -266,8 +280,9 @@ fm_completion_alarm_arm() {  # <state-dir> <task> <terminal-state> <detail> [epi
 schema=$FM_COMPLETION_ALARM_SCHEMA
 task=$task
 state=$tstate
-episode=$(fm_completion_alarm_sanitize "$episode")
 episode_source=$esource
+episode_run=$(fm_completion_alarm_sanitize "$erun")
+episode_head=$(fm_completion_alarm_sanitize "$ehead")
 detail=$(fm_completion_alarm_sanitize "$detail")
 first_epoch=$now
 window_secs=$(fm_completion_alarm_window_secs)
@@ -334,7 +349,7 @@ _fm_completion_alarm_busy() {  # <meta-file> <task> <state-dir>
 fm_completion_alarm_tick() {  # <state-dir>
   local state=$1 dir rec meta task kind line st detail sep rec_state first window escalated now age reason budget started
   local metas total cursor_file cursor start truncated last i n read_timeout
-  local out episode esource rec_episode rec_esource
+  local out episode esource rec_run rec_head rec_same erun ehead
   sep=' · '
   # Orphan sweep first, so a record left behind by a missed teardown cannot
   # sit forever (its task no longer exists to reconcile).
@@ -461,49 +476,53 @@ fm_completion_alarm_tick() {  # <state-dir>
     fi
     [ -n "$episode" ] || esource='none'
     rec=$(fm_completion_alarm_path "$state" "$task")
+    # Both kinds travel with every write, so whichever kind this sighting could
+    # not supply keeps whatever the record last knew about it.
+    rec_run=$(fm_completion_alarm_get "$rec" episode_run)
+    rec_head=$(fm_completion_alarm_get "$rec" episode_head)
+    erun=$rec_run
+    ehead=$rec_head
+    rec_same=''
+    case "$esource" in
+      run)  erun=$episode;  rec_same=$rec_run ;;
+      head) ehead=$episode; rec_same=$rec_head ;;
+    esac
     if [ ! -f "$rec" ]; then
-      fm_completion_alarm_arm "$state" "$task" "$st" "$detail" "$episode" "$esource" || true
+      fm_completion_alarm_arm "$state" "$task" "$st" "$detail" "$esource" "$erun" "$ehead" || true
       continue
     fi
     rec_state=$(fm_completion_alarm_get "$rec" state)
     if [ "$rec_state" != "$st" ]; then
       # A different terminal state is a NEW completion episode (e.g. parked
       # gate answered, run finished as done): restart the window.
-      fm_completion_alarm_arm "$state" "$task" "$st" "$detail" "$episode" "$esource" || true
-      continue
-    fi
-    # Same state value, but a moved identity means the worker completed, did
-    # more work, and completed again: two episodes that would otherwise merge
-    # behind one state value. Only identities of the SAME derivable kind can
-    # prove a difference - comparing a run token against a crew HEAD would read
-    # a mere change of evidence as a new completion.
-    rec_episode=$(fm_completion_alarm_get "$rec" episode)
-    rec_esource=$(fm_completion_alarm_get "$rec" episode_source)
-    if [ "$esource" != 'none' ] && [ "$esource" = "$rec_esource" ] \
-      && [ "$episode" != "$rec_episode" ]; then
-      fm_completion_alarm_arm "$state" "$task" "$st" "$detail" "$episode" "$esource" || true
+      fm_completion_alarm_arm "$state" "$task" "$st" "$detail" "$esource" "$erun" "$ehead" || true
       continue
     fi
     escalated=$(fm_completion_alarm_get "$rec" escalated_epoch)
-    if [ "$esource" != "$rec_esource" ]; then
-      # The KIND of evidence changed - run attribution came or went, e.g. a
-      # bounded no-mistakes read timed out and the reader fell back to the
-      # status log. The two identities are not comparable, so this may well be
-      # a different episode. An episode that has already fired must NOT ride
-      # that flap out on its stamp: re-arm, because one duplicate alert is far
-      # cheaper than the missed completion this alarm exists to prevent, and
-      # the flap self-limits (the re-armed record is unescalated again).
-      if [ -n "$escalated" ]; then
-        fm_completion_alarm_arm "$state" "$task" "$st" "$detail" "$episode" "$esource" || true
+    if [ "$esource" != 'none' ]; then
+      if [ -n "$rec_same" ]; then
+        # This kind has spoken for this record before, so the two are directly
+        # comparable. A moved identity means the worker completed, did more
+        # work, and completed again: a NEW episode behind one state value.
+        # An unmoved one is the SAME episode, however often the evidence kind
+        # flaps around it.
+        if [ "$episode" != "$rec_same" ]; then
+          fm_completion_alarm_arm "$state" "$task" "$st" "$detail" "$esource" "$erun" "$ehead" || true
+          continue
+        fi
+      elif [ -n "$escalated" ]; then
+        # First time THIS kind has spoken, on a record that already fired.
+        # Nothing here is comparable, so it may be a new episode: re-arm rather
+        # than ride it out on the stamp, since one duplicate beats one missed
+        # completion. Carrying the other kind's identity is what bounds it to
+        # that single duplicate - the next flap back finds a match above.
+        fm_completion_alarm_arm "$state" "$task" "$st" "$detail" "$esource" "$erun" "$ehead" || true
         continue
-      fi
-      # Not yet fired: the window is what matters, so keep it and just record
-      # the better evidence. An identity that went underivable is not recorded
-      # over a derivable one - the last one that could be derived is the more
-      # useful thing to compare the next sighting against.
-      if [ "$esource" != 'none' ]; then
-        printf 'episode=%s\nepisode_source=%s\n' \
-          "$(fm_completion_alarm_sanitize "$episode")" "$esource" >> "$rec"
+      else
+        # First time this kind has spoken and nothing has fired yet: the window
+        # is what matters, so keep it and just remember the new evidence.
+        printf 'episode_%s=%s\nepisode_source=%s\n' \
+          "$esource" "$(fm_completion_alarm_sanitize "$episode")" "$esource" >> "$rec"
       fi
     fi
     [ -z "$escalated" ] || continue
