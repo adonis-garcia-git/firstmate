@@ -84,6 +84,9 @@ make_fake_root() {
   # fm-steer-ack-lib.sh: teardown sources it to clear leftover pending-ack
   # records; a no-op in this fixture, but a real sibling teardown requires.
   ln -s "$ROOT/bin/fm-steer-ack-lib.sh" "$fake/bin/fm-steer-ack-lib.sh"
+  # fm-completion-alarm-lib.sh: teardown sources it to clear the task's
+  # completion-alarm record; a no-op in this fixture, same as steer-ack.
+  ln -s "$ROOT/bin/fm-completion-alarm-lib.sh" "$fake/bin/fm-completion-alarm-lib.sh"
   # fm-guard.sh: stub (teardown calls it with `|| true`).
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -168,6 +171,9 @@ test_teardown_skips_gracefully_without_tasktmp() {
   # fm-steer-ack-lib.sh: teardown sources it to clear leftover pending-ack
   # records; a no-op in this fixture, but a real sibling teardown requires.
   ln -s "$ROOT/bin/fm-steer-ack-lib.sh" "$fake/bin/fm-steer-ack-lib.sh"
+  # fm-completion-alarm-lib.sh: teardown sources it to clear the task's
+  # completion-alarm record; a no-op in this fixture, same as steer-ack.
+  ln -s "$ROOT/bin/fm-completion-alarm-lib.sh" "$fake/bin/fm-completion-alarm-lib.sh"
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0
