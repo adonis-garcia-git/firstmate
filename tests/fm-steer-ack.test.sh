@@ -6,10 +6,12 @@
 # Incident background: a steer can submit cleanly (composer verification proves
 # SUBMISSION) and still never be processed into a turn by the worker, leaving
 # supervision falsely reporting the work as under way. The contract under test:
-#   - fm-send --ack prefixes a visible [ack=<token>] mark and arms one durable
-#     pending-ack record; a plain send arms nothing; a failed or unconfirmed
-#     submit discards the record; secondmate, --key, and harness-command
-#     targets are refused.
+#   - fm-send --ack prefixes a visible [ack=<token>] mark into the order's
+#     durable steering-inbox record and arms one pending-ack record; a plain
+#     send arms nothing; both directions of the delivery boundary hold - an
+#     order whose inbox record cannot be written discards the pending-ack
+#     record, while a skipped or failed doorbell keeps it armed; secondmate,
+#     --key, and harness-command targets are refused.
 #   - The watcher tick clears an acked or orphaned record, and queues exactly
 #     one actionable check wake per order that stays unacknowledged past its
 #     window - never a second wake for the same order.
