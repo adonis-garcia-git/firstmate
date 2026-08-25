@@ -76,6 +76,16 @@
 #                          acknowledgment window with no ack line in the task's
 #                          status file; fired exactly once per order
 #                          (bin/fm-steer-ack-lib.sh owns the contract)
+#   check: completion-alarm: <task> <state> unsurfaced ...
+#                          a live task's reconciled CURRENT state (via
+#                          bin/fm-crew-state.sh, not the status log's last
+#                          line) is terminal for the supervisor - done, failed,
+#                          parked, or blocked - and persisted past the alarm
+#                          window with no handling; fired exactly once per
+#                          completion episode, independently of whether the
+#                          done-status append's own wake ever reached a
+#                          session (bin/fm-completion-alarm-lib.sh owns the
+#                          contract)
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
 #   check: inactive-outcome bounded poll-loop reconciliation found a suspicious
@@ -115,6 +125,11 @@ mkdir -p "$STATE"
 # acked orders and surfaces unacknowledged ones; cheap when no records exist.
 # shellcheck source=bin/fm-steer-ack-lib.sh
 . "$SCRIPT_DIR/fm-steer-ack-lib.sh"
+# Durable completion-alarm records for terminal-but-unsurfaced workers: the
+# steer-ack analog for lost or collapsed completion wakes. The paced tick
+# reconciles every live task's current state and escalates once per episode.
+# shellcheck source=bin/fm-completion-alarm-lib.sh
+. "$SCRIPT_DIR/fm-completion-alarm-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 
@@ -152,6 +167,12 @@ HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
 DECISION_DIGEST_INTERVAL=${FM_DECISION_DIGEST_INTERVAL:-86400}  # seconds between decision-wait digest wakes
+# Seconds between completion-alarm reconciliation sweeps. Each sweep may run
+# one bounded fm-crew-state.sh read per not-provably-busy task (which can make
+# a bounded no-mistakes call), so it is paced on its own restart-surviving
+# mtime marker rather than run every poll; the default keeps detection latency
+# well under the 90s alarm window while bounding the reconciliation cost.
+COMPLETION_SCAN_INTERVAL=${FM_COMPLETION_SCAN_INTERVAL:-45}
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
@@ -1011,6 +1032,29 @@ while :; do
   ack_reasons=$(fm_steer_ack_tick "$STATE") || exit 1
   if [ -n "$ack_reasons" ]; then
     wake "$(printf '%s\n' "$ack_reasons" | head -1)"
+  fi
+
+  # Completion-alarm reconciliation: truth-based detection of a task whose
+  # reconciled current state is terminal for the supervisor (done/failed/
+  # parked/blocked) and stayed unhandled past its window. Paced on its own
+  # restart-surviving marker because each sweep may run a bounded
+  # fm-crew-state.sh read per task, and the sweep itself carries a wall-clock
+  # budget (FM_COMPLETION_SCAN_BUDGET_SECS) under that pacing so a slow reader
+  # cannot starve this poll loop; a truncated sweep resumes where it stopped,
+  # so its tail is deferred by a sweep or two and never skipped. The durable
+  # records make a completion that happened while no watcher ran alarm on the
+  # first healthy cycle, tail included. A
+  # due wake is durably enqueued INSIDE the tick before the record is marked
+  # escalated (enqueue before suppress); surface the first reason. Exactly
+  # one wake per completion episode; bin/fm-completion-alarm-lib.sh owns the
+  # record contract. The marker advances before the wake exit so a surfaced
+  # alarm cannot re-run the sweep on the very next cycle.
+  if [ "$(age_of "$STATE/.last-completion-scan")" -ge "$COMPLETION_SCAN_INTERVAL" ]; then
+    completion_reasons=$(fm_completion_alarm_tick "$STATE") || exit 1
+    touch "$STATE/.last-completion-scan"
+    if [ -n "$completion_reasons" ]; then
+      wake "$(printf '%s\n' "$completion_reasons" | head -1)"
+    fi
   fi
 
   # Process-to-event liveness repair. This never discovers a result by polling:

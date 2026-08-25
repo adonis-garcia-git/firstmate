@@ -1367,6 +1367,96 @@ test_active_run_descendant_fix_head_remains_current() {
   pass "active run with valid descendant fix head remains current"
 }
 
+# The opt-in run-identity line (FM_CREW_STATE_EPISODE=1) that
+# bin/fm-completion-alarm-lib.sh binds a completion episode to. It must name the
+# RUN's head, not the crew worktree's: a pipeline fix round commits into the
+# gate repo, so those two deliberately differ, and only the run head moves
+# between a run's approval gate and its fix_review gate.
+test_episode_line_reports_run_identity_not_crew_head() {
+  reset_fakes
+  local d base_head fix_head out
+  d=$(new_case episode-token)
+  make_repo_on_branch "$d/wt" fm/feat-episode
+  base_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" commit -q --allow-empty -m 'pipeline fix commit'
+  fix_head=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" reset -q --hard "$base_head"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/pipe.meta" "window=fm:fm-pipe" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_RUN_HEAD="$fix_head"
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-episode)"
+  # Off by default: every existing consumer sees the canonical line only.
+  out=$(run_crew_state "$d" pipe)
+  assert_contains "$out" "state: parked" "the canonical verdict is unchanged"
+  assert_not_contains "$out" "episode:" "the identity line must stay opt-in"
+  out=$(FM_CREW_STATE_EPISODE=1 run_crew_state "$d" pipe)
+  assert_contains "$out" "state: parked" "opting in must not disturb the canonical line"
+  assert_contains "$out" "episode: run:01RUN@$fix_head" \
+    "the identity line should name the run id and the RUN head"
+  assert_not_contains "$out" "$base_head" \
+    "the identity must not be the crew worktree HEAD, which a fix round leaves behind"
+  pass "the opt-in episode line reports the run identity, not the crew head"
+}
+
+# The opt-in attribution line, which tells a consumer how much authority the
+# verdict carries. The coarse runs-list row is the one that reports `working`
+# for a crew genuinely parked at a gate, so it has to be distinguishable from a
+# full run step saying the same word.
+test_attribution_line_marks_the_coarse_runs_list_verdict() {
+  reset_fakes
+  local d short out
+  d=$(new_case attribution-coarse)
+  make_repo_on_branch "$d/wt" fm/feat-coarse
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/coarse.meta" "window=fm:fm-coarse" "worktree=$d/wt" "kind=ship"
+  # axi status answers for another crew, so only the runs list attributes this
+  # branch - and its bare `running` row becomes a working verdict.
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-07-02 22:10
+  running    fm/feat-coarse ${short}  2026-07-02 22:05
+EOF
+)"
+  out=$(FM_CREW_STATE_EPISODE=1 run_crew_state "$d" coarse)
+  assert_contains "$out" "state: working" "the coarse row reports a working verdict"
+  assert_contains "$out" "attribution: coarse" \
+    "a runs-list-only attribution must be reported as coarse"
+  assert_not_contains "$out" "episode:" "a coarse run has no id or head to report"
+  pass "the attribution line marks a coarse runs-list verdict as such"
+}
+
+test_attribution_line_marks_a_full_run_step() {
+  reset_fakes
+  local d out
+  d=$(new_case attribution-full)
+  make_repo_on_branch "$d/wt" fm/feat-full
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/full.meta" "window=fm:fm-full" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-full)"
+  out=$(FM_CREW_STATE_EPISODE=1 run_crew_state "$d" full)
+  assert_contains "$out" "attribution: full" \
+    "a verdict from this crew's own run step is fully attributed"
+  out=$(run_crew_state "$d" full)
+  assert_not_contains "$out" "attribution:" "the attribution line must stay opt-in"
+  pass "the attribution line marks this crew's own run step as fully attributed"
+}
+
+# A completion with no run attributed reports no identity line at all, so the
+# alarm falls back to the crew HEAD rather than binding a phantom run.
+test_episode_line_absent_without_a_run() {
+  reset_fakes
+  local d out
+  d=$(new_case episode-norun)
+  make_repo_on_branch "$d/wt" fm/feat-norun
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/solo.meta" "window=fm:fm-solo" "worktree=$d/wt" "kind=scout"
+  printf 'done: scouted the area\n' > "$d/state/solo.status"
+  out=$(FM_CREW_STATE_EPISODE=1 run_crew_state "$d" solo)
+  assert_not_contains "$out" "episode:" "no attributed run means no run identity"
+  pass "the episode line is omitted when no run is attributed"
+}
+
 # Head-binding: local work that advanced past the run head invalidates the run.
 test_local_advanced_past_run_head_invalidates() {
   reset_fakes
@@ -1459,6 +1549,10 @@ test_not_provably_working_when_stopped
 test_usage_error
 test_historical_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current
+test_episode_line_reports_run_identity_not_crew_head
+test_attribution_line_marks_the_coarse_runs_list_verdict
+test_attribution_line_marks_a_full_run_step
+test_episode_line_absent_without_a_run
 test_local_advanced_past_run_head_invalidates
 test_missing_run_head_falls_back_to_current_state
 

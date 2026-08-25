@@ -18,6 +18,25 @@
 #
 #   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
 #
+# With FM_CREW_STATE_EPISODE=1 a caller additionally gets the pipeline run this
+# state was attributed to, and how confidently:
+#
+#   episode: run:<run-id>@<run-head>
+#   attribution: full|coarse|none
+#
+# `attribution` is always reported under that opt-in; `episode` only when a full
+# run backs the verdict. A `coarse` verdict came from the bare runs-list row,
+# which has no step or gate detail and so reports `working` for a crew that is
+# genuinely parked at a gate - it can confirm a state but never disprove one.
+#
+# It is emitted only on the run-step path, from fields `axi status` already
+# returned, and is omitted entirely when no run is attributed. That token is how
+# bin/fm-completion-alarm-lib.sh tells one completion episode from the next: the
+# run head advances with each pipeline fix round while the CREW worktree HEAD
+# deliberately does not (see fm_nm_head_matches_worktree's ancestor rule), so
+# the run identity is the only thing that separates a run's approval gate from
+# its fix_review gate. The canonical line is unchanged either way.
+#
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta. A meta
 #      recording remote_host= is a remote secondmate: its worktree and endpoint
@@ -89,11 +108,35 @@ FM_CREW_STATE_RUNS_LIMIT=${FM_CREW_STATE_RUNS_LIMIT:-200}
 case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;; esac
 SEP=' · '
 
+# Identity of the pipeline run this state was attributed to, as `<id>@<head>`.
+# Set only on the run-step path, where `axi status` already supplied both, so
+# reporting it costs no extra call. Callers that need to tell one completion
+# episode from the next opt in with FM_CREW_STATE_EPISODE=1 and get it on a
+# SECOND line; the canonical line above is byte-identical either way, so no
+# existing consumer sees a changed contract.
+EPISODE_TOKEN=""
+
+# How confidently this verdict is attributed to a no-mistakes run: `full` when
+# `axi status` answered for this crew's own branch and head, `coarse` when only
+# the runs list did, `none` when no run backs the verdict at all (a scout, a
+# pane or status-log reading, an early exit). A `coarse` verdict is the one
+# that cannot tell a parked gate from a running step - it reports `working`
+# either way - so a consumer that acts on the ABSENCE of a terminal state has
+# to know it was reading the coarse row. Reported on the same FM_CREW_STATE_EPISODE
+# opt-in as the episode line.
+ATTRIBUTION=none
+
 # Emit the one canonical line and exit 0. Detail is optional.
 emit() {  # <state> <source> [detail]
   local line="state: $1${SEP}source: $2"
   [ -n "${3:-}" ] && line="$line${SEP}$3"
   printf '%s\n' "$line"
+  if [ "${FM_CREW_STATE_EPISODE:-}" = 1 ]; then
+    if [ -n "$EPISODE_TOKEN" ]; then
+      printf 'episode: %s\n' "$EPISODE_TOKEN"
+    fi
+    printf 'attribution: %s\n' "$ATTRIBUTION"
+  fi
   exit 0
 }
 
@@ -465,6 +508,7 @@ fi
 # --- run-step authoritative path -------------------------------------------
 
 if [ "$HAVE_RUN" = 1 ]; then
+  ATTRIBUTION=$RUN_SOURCE
   RUN_STATE=working
   RUN_DETAIL=""
   CI_STEP_STATUS=""
@@ -488,6 +532,11 @@ if [ "$HAVE_RUN" = 1 ]; then
   else
     status=$(strip_quotes "$(nm_field status)")
     RUN_STATUS=$status
+    run_id=$(strip_quotes "$(nm_field id)")
+    run_head=$(strip_quotes "$(nm_field head)")
+    if [ -n "$run_id" ] || [ -n "$run_head" ]; then
+      EPISODE_TOKEN="run:${run_id}@${run_head}"
+    fi
     outcome=$(strip_quotes "$(nm_field outcome)")
     awaiting=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*awaiting_agent:' | head -1 || true)
     gate_status=$(nm_gate_status)

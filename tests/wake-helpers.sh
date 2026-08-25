@@ -104,6 +104,18 @@ key=$(printf '%s' "$id" | tr -c 'A-Za-z0-9' '_')
 var="FM_FAKE_CREW_STATE_$key"
 val=${!var:-${FM_FAKE_CREW_STATE:-}}
 printf '%s\n' "${val:-state: unknown · source: none · fake default}"
+# The run-identity second line, emitted on the same opt-in the real reader
+# uses, so a test can model a run whose head advances between two gates.
+if [ "${FM_CREW_STATE_EPISODE:-}" = 1 ]; then
+  if [ -n "${FM_FAKE_CREW_EPISODE:-}" ]; then
+    printf 'episode: %s\n' "$FM_FAKE_CREW_EPISODE"
+  fi
+  # How confidently the verdict is attributed, so a test can model the coarse
+  # runs-list row that cannot tell a parked gate from a running step.
+  if [ -n "${FM_FAKE_CREW_ATTRIBUTION:-}" ]; then
+    printf 'attribution: %s\n' "$FM_FAKE_CREW_ATTRIBUTION"
+  fi
+fi
 exit 0
 SH
   chmod +x "$fakebin/fm-crew-state.sh"
