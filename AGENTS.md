@@ -368,6 +368,9 @@ The worker reports the PR when CI first becomes green rather than waiting for me
 
 For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` after CI is green, while `direct-PR` reports `done: PR <url>` after opening the PR.
 Run `bin/fm-pr-check.sh <id> <PR url>` - it records `pr=` and the forge's `pr_head=` when available in the task's meta and arms the watcher's merge poll.
+On a `no-mistakes` PR, the `## Pipeline` section no-mistakes writes into the body - its signature line plus the machine-read `<!-- no-mistakes-pipeline-attestation:v1 ... -->` comment - is part of the body contract the required `Require no-mistakes` check reads, not decoration.
+Never rewrite a PR description without carrying that whole section through verbatim: the check reads the body from the event that triggered it, so a body edit that drops the section fails that `edited` event, leaves every later `synchronize` event failing too, and re-running the job cannot clear it.
+Recover by restoring the exact section into the body, which fires a fresh passing `edited` event, or by pushing the branch through the gate again so no-mistakes rewrites it.
 Tell the captain the PR's full URL, always the complete `https://...` link rather than a bare `#number`, a concise outcome summary, and the no-mistakes risk level when applicable.
 A captain instruction to merge is explicit authority; `yolo` is the only standing routine merge authority.
 For any custom `state/<id>.check.sh` you write yourself, keep it an ordinary single-link mode-`0700` file, print one line only when firstmate should wake, print nothing otherwise, finish before `FM_CHECK_TIMEOUT`, then bind its current bytes with `bin/fm-check-register.sh <id>` before the watcher may execute it.
