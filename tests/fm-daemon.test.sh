@@ -1194,7 +1194,7 @@ test_submit_ack_confirms_on_bordered_empty_composer() {
 
 test_submit_ack_reports_pending_on_persistent_swallow() {
   # A genuinely swallowed Enter (text stays in the box across all retries) is
-  # reported as "pending" — the daemon keeps the buffer, fm-send exits non-zero —
+  # reported as "pending" - the daemon keeps the buffer, fm-send exits non-zero -
   # and the digest is typed ONCE (Enter-only retries, never a retype).
   local dir fakebin sent verdict
   dir=$(make_bordered_case ack-swallow)
