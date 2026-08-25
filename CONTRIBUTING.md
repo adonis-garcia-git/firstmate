@@ -11,6 +11,9 @@ Pushing through it runs an AI-driven review/test/lint pipeline in an isolated wo
 
 A GitHub Actions check (`Require no-mistakes`) runs on PRs targeting `main` and fails if the body is missing the deterministic signature that no-mistakes writes.
 It evaluates every PR opening and body edit independently, so a later edit cannot replace an earlier pending compliance check.
+That cuts both ways: the `## Pipeline` section no-mistakes appends - the signature line plus the machine-read `<!-- no-mistakes-pipeline-attestation:v1 ... -->` comment - is part of the PR body contract, not decoration.
+Rewriting the description without carrying that section over fails the check on the resulting `edited` event even when the PR opened green, and re-running the failed job cannot clear it because the job reads the body from the event that triggered it.
+Either preserve the section when you edit the body, or push the branch through the gate again so no-mistakes rewrites it.
 GitHub Actions and Dependabot are exempt so their automation keeps working, but regular contributor PRs without the signature will not be reviewed or merged.
 
 ## Workflow
