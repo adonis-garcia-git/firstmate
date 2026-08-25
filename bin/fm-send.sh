@@ -879,7 +879,14 @@ else
   fi
   if [ "$INBOX_PLANE" = 1 ]; then
     INBOX_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
-    INBOX_META_LOCK=$(fm_meta_lock_path "$TARGET_META") || exit 1
+    if ! INBOX_META_LOCK=$(fm_meta_lock_path "$TARGET_META"); then
+      fm_send_discard_armed_ack || true
+      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
+        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+      fi
+      echo "error: steer not sent to $INBOX_TASK_ID: its task metadata path yields no valid lock for final delivery validation" >&2
+      exit 1
+    fi
     if ! fm_task_inbox_lock_acquire "$INBOX_META_LOCK"; then
       fm_send_discard_armed_ack || true
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then

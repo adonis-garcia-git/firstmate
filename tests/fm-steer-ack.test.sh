@@ -9,7 +9,8 @@
 #   - fm-send --ack prefixes a visible [ack=<token>] mark into the order's
 #     durable steering-inbox record and arms one pending-ack record; a plain
 #     send arms nothing; both directions of the delivery boundary hold - an
-#     order whose inbox record cannot be written discards the pending-ack
+#     order the inbox plane refuses before transport, whether its record cannot
+#     be written or its task record cannot be locked, discards the pending-ack
 #     record, while a skipped or failed doorbell keeps it armed; secondmate,
 #     --key, and harness-command targets are refused.
 #   - The watcher tick clears an acked or orphaned record, and queues exactly
@@ -296,6 +297,29 @@ test_ack_send_discards_record_on_undeliverable_order() {
   pass "fm-send --ack discards the record when the order cannot be delivered"
 }
 
+test_ack_send_discards_record_when_the_meta_lock_is_unresolvable() {
+  # The other pre-transport exit of the same class: the inbox plane validates
+  # the target under the task's metadata lock, so a task record whose lock path
+  # cannot be derived never reaches the inbox at all. fm-spawn.sh refuses to
+  # create such an id, so this models a hand-written or externally supplied
+  # record - but arming does not validate the id, so without the discard the
+  # watcher would escalate an order that was never written anywhere.
+  local dir fb log home rc id
+  dir="$TMP_ROOT/send-lockpath"; mkdir -p "$dir"
+  fb=$(make_send_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_send_home send-lockpath-home)
+  id='my task'
+  write_ship_meta "$home/state" "$id"
+  FM_STEER_ACK_TOKEN=feedc0de run_send "$fb" "$home" "$log" "fm-$id" --ack "rebase now"; rc=$?
+  [ "$rc" -ne 0 ] || fail "an unlockable task record should fail loudly, got $rc"
+  [ ! -e "$home/state/$id.inbox" ] || fail "no inbox record may exist for an order that was refused before transport"
+  assert_absent "$(record_path "$home/state" "$id" feedc0de)" \
+    "an order that never reached the inbox must discard the pending-ack record"
+  assert_grep "no valid lock for final delivery validation" "$log.err" \
+    "the failure should name why the order was never recorded"
+  pass "fm-send --ack discards the record when the task metadata lock cannot be resolved"
+}
+
 test_ack_send_keeps_record_when_only_the_doorbell_fails() {
   # The complement of the case above: the record landed, so the order IS
   # delivered and detection must stay armed even though the ring failed.
@@ -569,6 +593,7 @@ test_plain_send_arms_nothing
 test_ack_send_refusals
 test_ack_send_preserves_record_on_unrung_doorbell
 test_ack_send_discards_record_on_undeliverable_order
+test_ack_send_discards_record_when_the_meta_lock_is_unresolvable
 test_ack_send_keeps_record_when_only_the_doorbell_fails
 test_tick_is_silent_inside_window
 test_tick_escalates_exactly_once_past_window
