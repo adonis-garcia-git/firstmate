@@ -6,10 +6,13 @@
 # Incident background: a steer can submit cleanly (composer verification proves
 # SUBMISSION) and still never be processed into a turn by the worker, leaving
 # supervision falsely reporting the work as under way. The contract under test:
-#   - fm-send --ack prefixes a visible [ack=<token>] mark and arms one durable
-#     pending-ack record; a plain send arms nothing; a failed or unconfirmed
-#     submit discards the record; secondmate, --key, and harness-command
-#     targets are refused.
+#   - fm-send --ack prefixes a visible [ack=<token>] mark into the order's
+#     durable steering-inbox record and arms one pending-ack record; a plain
+#     send arms nothing; both directions of the delivery boundary hold - an
+#     order the inbox plane refuses before transport, whether its record cannot
+#     be written or its task record cannot be locked, discards the pending-ack
+#     record, while a skipped or failed doorbell keeps it armed; secondmate,
+#     --key, and harness-command targets are refused.
 #   - The watcher tick clears an acked or orphaned record, and queues exactly
 #     one actionable check wake per order that stays unacknowledged past its
 #     window - never a second wake for the same order.
@@ -63,6 +66,13 @@ run_tick() {  # <state>
 
 record_path() {  # <state> <task> <token>
   printf '%s/pending-acks/%s.%s' "$1" "$2" "$3"
+}
+
+# The order text an --ack send delivers now lives in the task's steering-inbox
+# record, so assertions about the mark read it through the library that owns
+# the record format (bin/fm-task-inbox-lib.sh).
+record_body() {  # <record>
+  bash -c '. "$1"; fm_task_inbox_body "$2"' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$1"
 }
 
 queue_steer_ack_count() {  # <state> <task> <token>
@@ -168,20 +178,28 @@ setup_send_home() {  # <name> -> echoes home dir with state/
 # --- fm-send arming behavior ------------------------------------------------
 
 test_ack_send_arms_record_and_prefixes_mark() {
-  local dir fb log home rc got token rec
+  local dir fb log home rc got token rec typed
   dir="$TMP_ROOT/send-arm"; mkdir -p "$dir"
   fb=$(make_send_stubs "$dir"); log="$dir/send.log"
   home=$(setup_send_home send-arm-home)
   write_ship_meta "$home/state" helm
+  # An --ack order is text to a task recorded in this home, so it rides the
+  # steering-inbox plane like any other: the mark must land in the durable
+  # record the worker actually reads, and the pane must see only the doorbell.
   FM_STEER_ACK_TOKEN=1234abcd run_send "$fb" "$home" "$log" fm-helm "rebase onto main now"; rc=$?
   expect_code 0 "$rc" "plain-send probe to a crewmate should succeed"
-  got=$(cat "$log")
+  got=$(record_body "$home/state/helm.inbox/001.msg")
   [ "$got" = "rebase onto main now" ] || fail "plain-send probe altered the literal text: $got"
   FM_STEER_ACK_TOKEN=1234abcd run_send "$fb" "$home" "$log" fm-helm --ack "rebase onto main now"; rc=$?
-  expect_code 0 "$rc" "--ack send should succeed on a confirmed submit"
-  got=$(cat "$log")
+  expect_code 0 "$rc" "--ack send should succeed on a durable enqueue"
+  got=$(record_body "$home/state/helm.inbox/002.msg")
   [ "$got" = "[ack=1234abcd] rebase onto main now" ] \
     || fail "--ack send did not prefix the visible mark exactly once: $got"
+  typed=$(cat "$log")
+  case "$typed" in
+    *"rebase onto main now"*)
+      fail "the order payload must never be typed into the pane:"$'\n'"$typed" ;;
+  esac
   token=1234abcd
   rec=$(record_path "$home/state" helm "$token")
   assert_present "$rec" "--ack send should arm a durable pending-ack record"
@@ -235,28 +253,78 @@ test_ack_send_refusals() {
   pass "fm-send --ack refuses secondmate, --key, harness-command, and non-selector targets"
 }
 
-test_ack_send_preserves_record_on_pending_submit() {
-  # A composer still rendering the text after Enter is the delivered-unconfirmed
-  # outcome (exit 3): the order very likely landed, so detection must stay armed.
-  # An acknowledged order clears the record through the tick, and a lost one
-  # still escalates - discarding here would leave a delivered order unmonitored.
+test_ack_send_preserves_record_on_unrung_doorbell() {
+  # A composer visibly holding text makes the doorbell advisory-skip. On the
+  # inbox plane the durable record IS the delivery, so the send still succeeds
+  # and the watcher owns the re-ring - but detection must stay armed, because
+  # an order nobody rang for is exactly the one that goes unnoticed. Discarding
+  # the record here would leave a delivered order unmonitored.
   local dir fb log home rc
   dir="$TMP_ROOT/send-stuck"; mkdir -p "$dir"
   fb=$(make_stuck_send_stubs "$dir"); log="$dir/send.log"
   home=$(setup_send_home send-stuck-home)
   write_ship_meta "$home/state" helm
   FM_STEER_ACK_TOKEN=feedc0de run_send "$fb" "$home" "$log" fm-helm --ack "rebase now"; rc=$?
-  expect_code 3 "$rc" "a delivered-unconfirmed submit should report the documented exit 3"
-  assert_grep "submission is unconfirmed" "$log.err" \
-    "the delivered-unconfirmed outcome should tell the caller to verify, not resend"
+  expect_code 0 "$rc" "a durable enqueue succeeds even when the doorbell is skipped"
+  [ -f "$home/state/helm.inbox/001.msg" ] \
+    || fail "the order must be durably recorded even when the doorbell is skipped"
+  assert_grep "the watcher will re-ring" "$log.err" \
+    "a skipped doorbell should tell the caller the watcher owns the retry, not resend"
   assert_present "$(record_path "$home/state" helm feedc0de)" \
-    "a delivered-unconfirmed submit must keep the pending-ack record armed"
-  pass "fm-send --ack keeps detection armed on a delivered-unconfirmed submit"
+    "an unrung doorbell must keep the pending-ack record armed"
+  pass "fm-send --ack keeps detection armed when the doorbell is skipped"
 }
 
-test_ack_send_discards_record_on_failed_submit() {
+test_ack_send_discards_record_on_undeliverable_order() {
+  # On the inbox plane a failed keystroke is not a failed delivery - the durable
+  # record is. The proven-undelivered case is therefore an inbox that cannot be
+  # written, and that is the one case where the pending-ack record MUST go: an
+  # armed record for an order the worker was never given would escalate a steer
+  # that never existed.
   local dir fb log home rc
   dir="$TMP_ROOT/send-fail"; mkdir -p "$dir"
+  fb=$(make_send_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_send_home send-fail-home)
+  write_ship_meta "$home/state" helm
+  # Block the record write by parking a non-directory where the inbox must live.
+  : > "$home/state/helm.inbox"
+  FM_STEER_ACK_TOKEN=feedc0de run_send "$fb" "$home" "$log" fm-helm --ack "rebase now"; rc=$?
+  [ "$rc" -ne 0 ] || fail "an unwritable inbox should fail loudly, got $rc"
+  assert_grep "inbox record could not be written" "$log.err" \
+    "the failure should name the undeliverable record, not a keystroke"
+  assert_absent "$(record_path "$home/state" helm feedc0de)" \
+    "an order that was never recorded must discard the pending-ack record"
+  pass "fm-send --ack discards the record when the order cannot be delivered"
+}
+
+test_ack_send_discards_record_when_the_meta_lock_is_unresolvable() {
+  # The other pre-transport exit of the same class: the inbox plane validates
+  # the target under the task's metadata lock, so a task record whose lock path
+  # cannot be derived never reaches the inbox at all. fm-spawn.sh refuses to
+  # create such an id, so this models a hand-written or externally supplied
+  # record - but arming does not validate the id, so without the discard the
+  # watcher would escalate an order that was never written anywhere.
+  local dir fb log home rc id
+  dir="$TMP_ROOT/send-lockpath"; mkdir -p "$dir"
+  fb=$(make_send_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_send_home send-lockpath-home)
+  id='my task'
+  write_ship_meta "$home/state" "$id"
+  FM_STEER_ACK_TOKEN=feedc0de run_send "$fb" "$home" "$log" "fm-$id" --ack "rebase now"; rc=$?
+  [ "$rc" -ne 0 ] || fail "an unlockable task record should fail loudly, got $rc"
+  [ ! -e "$home/state/$id.inbox" ] || fail "no inbox record may exist for an order that was refused before transport"
+  assert_absent "$(record_path "$home/state" "$id" feedc0de)" \
+    "an order that never reached the inbox must discard the pending-ack record"
+  assert_grep "no valid lock for final delivery validation" "$log.err" \
+    "the failure should name why the order was never recorded"
+  pass "fm-send --ack discards the record when the task metadata lock cannot be resolved"
+}
+
+test_ack_send_keeps_record_when_only_the_doorbell_fails() {
+  # The complement of the case above: the record landed, so the order IS
+  # delivered and detection must stay armed even though the ring failed.
+  local dir fb log home rc
+  dir="$TMP_ROOT/send-ringfail"; mkdir -p "$dir"
   fb=$(make_send_stubs "$dir"); log="$dir/send.log"
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -272,13 +340,14 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
-  home=$(setup_send_home send-fail-home)
+  home=$(setup_send_home send-ringfail-home)
   write_ship_meta "$home/state" helm
   FM_STEER_ACK_TOKEN=feedc0de run_send "$fb" "$home" "$log" fm-helm --ack "rebase now"; rc=$?
-  [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ] || fail "a failed submit should fail loudly (not exit 0 or 3), got $rc"
-  assert_absent "$(record_path "$home/state" helm feedc0de)" \
-    "a failed submit must discard the pending-ack record"
-  pass "fm-send --ack discards the record when the submit fails outright"
+  expect_code 0 "$rc" "a durable record survives a failed doorbell"
+  [ -f "$home/state/helm.inbox/001.msg" ] || fail "the order was not durably recorded"
+  assert_present "$(record_path "$home/state" helm feedc0de)" \
+    "a delivered order must keep detection armed when only the ring failed"
+  pass "fm-send --ack keeps detection armed when only the doorbell fails"
 }
 
 # --- lib tick behavior ------------------------------------------------------
@@ -522,8 +591,10 @@ test_teardown_clears_task_records() {
 test_ack_send_arms_record_and_prefixes_mark
 test_plain_send_arms_nothing
 test_ack_send_refusals
-test_ack_send_preserves_record_on_pending_submit
-test_ack_send_discards_record_on_failed_submit
+test_ack_send_preserves_record_on_unrung_doorbell
+test_ack_send_discards_record_on_undeliverable_order
+test_ack_send_discards_record_when_the_meta_lock_is_unresolvable
+test_ack_send_keeps_record_when_only_the_doorbell_fails
 test_tick_is_silent_inside_window
 test_tick_escalates_exactly_once_past_window
 test_tick_clears_on_ack_including_late_and_duplicate

@@ -3,7 +3,7 @@
 # status-phrase matrix (a product contract), escalation batching/dedupe, afk
 # presence-gating, and the injection-hardening units that an e2e cannot
 # deterministically reach (persistent-Enter-swallow, max-defer wedge alarms,
-# fm-send swallow reporting, composer-pending ANSI parsing). The operator-visible
+# fm-send typed-plane swallow reporting, composer-pending ANSI parsing). The operator-visible
 # inject flow lives in fm-afk-inject-e2e and fm-wake-daemon-lifecycle-e2e.
 set -u
 
@@ -1194,7 +1194,7 @@ test_submit_ack_confirms_on_bordered_empty_composer() {
 
 test_submit_ack_reports_pending_on_persistent_swallow() {
   # A genuinely swallowed Enter (text stays in the box across all retries) is
-  # reported as "pending" — the daemon keeps the buffer, fm-send exits non-zero —
+  # reported as "pending" - the daemon keeps the buffer, fm-send exits non-zero -
   # and the digest is typed ONCE (Enter-only retries, never a retype).
   local dir fakebin sent verdict
   dir=$(make_bordered_case ack-swallow)
@@ -1651,8 +1651,8 @@ test_inject_wedge_alarm_throttles_when_marker_cannot_be_written() {
 }
 
 test_fm_send_reports_delivered_unconfirmed_submit() {
-  # When text was typed and Enter sent but the submit read-back remains pending,
-  # fm-send must return its documented delivered-unconfirmed status and prevent
+  # When typed-plane text was typed and Enter sent but the submit read-back
+  # remains pending, fm-send must return its documented delivered-unconfirmed status and prevent
   # a duplicate resend reflex. A synchronously confirmed submit remains zero.
   local dir fakebin err rc
   dir=$(make_bordered_case send-swallow)

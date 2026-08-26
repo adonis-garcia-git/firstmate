@@ -562,7 +562,7 @@ test_tick_coarse_working_verdict_cannot_retire_a_record() {
 }
 
 test_tick_underivable_identity_still_matures_the_alarm() {
-  local state out rec
+  local state out rec armed_at
   state="$TMP_ROOT/tick-noident/state"; mkdir -p "$state"
   # No run token from the reader and no worktree= in the meta, so neither
   # identity can be derived. The window must still run down from where it
@@ -570,14 +570,19 @@ test_tick_underivable_identity_still_matures_the_alarm() {
   # forward every sweep and the alarm would never mature at all.
   fm_write_meta "$state/helm.meta" "kind=ship"
   rec=$(record_path "$state" helm)
-  out=$(tick_with "$state" "$DONE_LINE" "$(epoch_ago 400)") || fail "arm tick failed"
+  # Anchor the arming epoch ONCE. Recomputing epoch_ago per use races the
+  # wall clock: a second boundary crossing between two calls makes the
+  # expected first_epoch differ from the recorded one by one and fails a
+  # test that is asserting about window arithmetic, not about the clock.
+  armed_at=$(epoch_ago 400)
+  out=$(tick_with "$state" "$DONE_LINE" "$armed_at") || fail "arm tick failed"
   [ -z "$out" ] || fail "an unidentifiable completion escalated immediately: $out"
   assert_grep "episode_source=none" "$rec" \
     "an underivable identity must be recorded as such, never as a real one"
-  assert_grep "first_epoch=$(epoch_ago 400)" "$rec" "the window should start at first sighting"
-  out=$(tick_with "$state" "$DONE_LINE" "$(epoch_ago 350)") || fail "second tick failed"
+  assert_grep "first_epoch=$armed_at" "$rec" "the window should start at first sighting"
+  out=$(tick_with "$state" "$DONE_LINE" "$(( armed_at + 50 ))") || fail "second tick failed"
   [ -z "$out" ] || fail "escalated before the window elapsed: $out"
-  assert_grep "first_epoch=$(epoch_ago 400)" "$rec" \
+  assert_grep "first_epoch=$armed_at" "$rec" \
     "an unidentifiable sighting must not reset the window start"
   out=$(tick_with "$state" "$DONE_LINE") || fail "matured tick failed"
   assert_contains "$out" "check: completion-alarm: helm done unsurfaced" \

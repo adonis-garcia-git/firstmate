@@ -9,11 +9,20 @@
 # gap with an opt-in acknowledgment contract:
 #
 #   1. fm-send.sh --ack prefixes the outbound order with a visible
-#      "[ack=<token>]" mark and arms one durable record BEFORE submitting;
-#      a proven send failure discards the record (already a loud fm-send
-#      error), while a delivered-but-unconfirmed submit (the pending verdict,
-#      exit 3) keeps it armed - the order very likely landed, so detection
-#      must keep tracking it.
+#      "[ack=<token>]" mark and arms one durable record BEFORE delivery. An
+#      acknowledged order always rides fm-send's steering-inbox plane, because
+#      --ack's own eligibility rules (a task recorded in this home, not a
+#      secondmate, not a parser-native invocation) are exactly the conditions
+#      that select that plane: this is an order-level supervision layer over
+#      the durable steering record, not a second transport. The steering
+#      record's fate alone decides the pending-ack record's. A proven
+#      undelivered order - an endpoint that cannot be locked or revalidated, an
+#      unwritable inbox record, a failed remote leg - discards it through
+#      fm-send's single known-undelivered cleanup owner (already a loud fm-send
+#      error), because escalating a steer the worker was never given is worse
+#      than silence. A written record keeps it armed even when the doorbell is
+#      skipped or never lands: the order WAS delivered, so detection must keep
+#      tracking it.
 #   2. The generated brief scaffold (bin/fm-brief.sh) teaches ship and scout
 #      workers to append `resolved [key=ack-<token>]: starting <restatement>`
 #      to their status file as the FIRST action on receiving a token-marked
