@@ -34,9 +34,9 @@ Never reorder these, and never hand-edit the labels to "clean up" a half-finishe
 
 ## Picking one up
 
-1. Read the poll's line: it leads with anything that makes the report incomplete, such as a repository that could not be read, then the issues waiting to be picked up, then a per-repository count of the issues marked building with no task behind them.
-   Each of those three parts names a couple of items and then says how many more it did not name, so a count that moved is a real change even when the named examples did not.
-   A repository that could not be read is not a repository with nothing waiting; treat it as a forge or credential problem, not as silence.
+1. Read the poll's line: it is COUNTS and nothing else, in a fixed shape - anything that makes the report incomplete first, then how many issues are ready to pick up, then how many are marked building with no task here, then the labels and directory to look in.
+   It names no issue and no repository, so finding out which issues are involved is a follow-up step, not something to read off the wake: `gh-axi issue list -R <owner>/<repo> --label fm:dispatched` on the clones under `projects/`.
+   A count of repositories that could not be read is not a count of repositories with nothing waiting; treat it as a forge or credential problem, not as silence.
 2. Read the spec: `gh-axi issue view <n> -R <owner>/<repo> --full`.
    The issue body is the captain's spec and is treated exactly as a spec pasted into chat: resolve the project, classify ship or scout, and resolve the delivery mode and merge posture at intake under `AGENTS.md` section 7.
 3. Choose the task id, then `claim` it.
@@ -53,8 +53,8 @@ Never reorder these, and never hand-edit the labels to "clean up" a half-finishe
 
 An `fm:building` issue with no task record here is an ANOMALY, not a pickup.
 The poll reports it because nothing else will: the poll only offers `fm:dispatched` issues, so a half-finished claim never comes back on its own.
-It reports them per repository as a count and a few named examples, because they all end at the same place, so the count is the news and a summary naming two of nine is not a truncated list.
-List them yourself with `gh-axi issue list -R <owner>/<repo> --label fm:building` when you need the rest.
+The poll reports how many there are and nothing more, because they all end at the same place, so the count is the news.
+List them yourself with `gh-axi issue list -R <owner>/<repo> --label fm:building` on each clone to find out which ones they are.
 
 **Never spawn against it.**
 The poll cannot tell this machine's half-finished claim from a build another machine is running right now, and it deliberately does not try, so spawning from this state is how one spec gets built twice.

@@ -82,7 +82,7 @@ while [ "$#" -gt 0 ]; do
 done
 d=$(repo_dir "$repo")
 case "$sub:$verb:$json" in
-  issue:list:number,title)
+  issue:list:number)
     # A repository this mock forge does not host is an error, as it is for real
     # gh. Answering "no issues" instead would let a build that polled the wrong
     # project - or a project that is not on GitHub at all - look clean.
@@ -101,14 +101,10 @@ case "$sub:$verb:$json" in
     # shells out to, and a mock that forked per issue would drown that signal.
     for f in "$d"/*.issue; do
       [ -e "$f" ] || continue
-      state=; t=; matched=0
+      state=; matched=0
       while IFS= read -r ln || [ -n "$ln" ]; do
         case "$ln" in
           state=*) [ -n "$state" ] || state=${ln#state=} ;;
-          # Deliberately NOT applying the query's own control-character strip, so
-          # a title's whitespace reaches the script and its second line of
-          # defence is exercised rather than assumed.
-          title=*) [ -n "$t" ] || t=${ln#title=} ;;
           label=*) if [ "${ln#label=}" = "$label" ]; then matched=1; fi ;;
         esac
       done < "$f"
@@ -116,7 +112,7 @@ case "$sub:$verb:$json" in
       [ "$matched" = 1 ] || continue
       n=${f##*/}
       n=${n%.issue}
-      printf '%s\t%s\n' "$n" "$t"
+      printf '%s\n' "$n"
     done
     ;;
   issue:view:state,labels)
@@ -392,7 +388,7 @@ test_a_second_poll_over_the_same_issue_creates_nothing() {
 
   run_pickup "$home" "$out" check
   expect_code 0 "$RUN_STATUS" "first check exit"
-  assert_contains "$(cat "$out")" "ready to pick up $REPO_SLUG#7" "the first poll did not offer the dispatched issue"
+  assert_contains "$(cat "$out")" 'ready to pick up: 1' "the first poll did not offer the dispatched issue"
 
   run_pickup "$home" "$out" claim fm-first "$url"
   expect_code 0 "$RUN_STATUS" "first claim exit"
@@ -436,8 +432,8 @@ test_a_claim_that_never_became_a_task_is_reported_not_offered_again() {
   run_pickup "$home" "$out" check
   expect_code 0 "$RUN_STATUS" "check exit"
   report=$(cat "$out")
-  assert_contains "$report" "$REPO_SLUG has 1 issue marked building with no task here: #11" "an issue claimed but never spawned was not reported as stuck"
-  assert_not_contains "$report" "ready to pick up" "an issue already marked building was offered for pickup again"
+  assert_contains "$report" 'marked building with no task here: 1' "an issue claimed but never spawned was not reported as stuck"
+  assert_contains "$report" 'ready to pick up: 0' "an issue already marked building was offered for pickup again"
   pass "a claim that never became a task is reported as stuck, not offered for pickup again"
 }
 
@@ -471,7 +467,7 @@ test_every_unclaimed_building_issue_is_reported_as_anomalous() {
   run_pickup "$home" "$out" check
   expect_code 0 "$RUN_STATUS" "check exit"
   report=$(cat "$out")
-  assert_contains "$report" "$REPO_SLUG has 3 issues marked building with no task here, including #12, #13" \
+  assert_contains "$report" 'marked building with no task here: 3' \
     "the three unclaimed building issues were not all counted as anomalous"
   pass "every unclaimed building issue is reported as anomalous, whatever it carries"
 }
@@ -574,10 +570,10 @@ test_many_building_issues_do_not_starve_the_next_repository() {
     "$PICKUP" check >"$out" 2>&1 || RUN_STATUS=$?
   expect_code 0 "$RUN_STATUS" "check exit"
   report=$(cat "$out")
-  assert_contains "$report" "ready to pick up $OTHER_SLUG#9" \
+  assert_contains "$report" 'ready to pick up: 1' \
     "a repository full of building issues crowded the next repository's waiting work out of the report"
-  assert_contains "$report" "$REPO_SLUG has 12 issues marked building with no task here, including" \
-    "the building issues were not reported at all, so this proves nothing about their not crowding the pickup out"
+  assert_contains "$report" 'marked building with no task here: 12' \
+    "the building issues were not counted, so this proves nothing about their not crowding the pickup out"
   n=$(wc -l < "$calls" | tr -d '[:space:]')
   # Two label listings per repository is the whole cost of a clean sweep, so
   # anything approaching one call per issue is a per-issue probe.
@@ -611,9 +607,9 @@ test_a_read_failure_survives_a_full_slate_of_waiting_pickups() {
   run_pickup "$home" "$out" check
   expect_code 0 "$RUN_STATUS" "check exit"
   report=$(cat "$out")
-  assert_contains "$report" "could not read $OTHER_SLUG" \
+  assert_contains "$report" 'repositories that could not be read: 1' \
     "an unreachable repository was crowded out of the report by the work waiting in another one"
-  assert_contains "$report" "ready to pick up $REPO_SLUG#701" "the waiting work was not reported at all"
+  assert_contains "$report" 'ready to pick up: 10' "the waiting work was not reported at all"
   pass "a read failure survives a full slate of waiting pickups"
 }
 
@@ -631,7 +627,7 @@ test_a_new_read_failure_is_reported_even_when_the_pickups_are_unchanged() {
   done
   out="$home/out.txt"
   run_pickup "$home" "$out" check
-  assert_contains "$(cat "$out")" 'ready to pick up' "the first poll did not report the waiting work"
+  assert_contains "$(cat "$out")" 'ready to pick up: 10' "the first poll did not report the waiting work"
 
   run_pickup "$home" "$out" check
   [ ! -s "$out" ] || fail "an unchanged finding set was reported twice in a row: $(cat "$out")"
@@ -639,7 +635,7 @@ test_a_new_read_failure_is_reported_even_when_the_pickups_are_unchanged() {
   # Now the second repository stops answering, with the pickups untouched.
   : > "$(repo_dir_of "$home" "$OTHER_SLUG")/.list-fails"
   run_pickup "$home" "$out" check
-  assert_contains "$(cat "$out")" "could not read $OTHER_SLUG" \
+  assert_contains "$(cat "$out")" 'repositories that could not be read: 1' \
     "the forge going unreachable produced no wake, because the finding never reached the printed line"
   pass "a read failure that appears while the pickups are unchanged is a new report"
 }
@@ -673,10 +669,9 @@ test_every_class_is_counted_and_the_line_is_not_cut() {
   run_pickup "$home" "$out" check
   expect_code 0 "$RUN_STATUS" "check exit"
   report=$(cat "$out")
-  assert_contains "$report" 'and 2 more problems reading the forge' "the degraded class did not say how many it left unnamed"
-  assert_contains "$report" 'and 22 more issues ready to pick up' "the pickup class did not say how many it left unnamed"
-  assert_contains "$report" 'and 1 more repositories with issues marked building with no task' \
-    "the anomaly class did not say how many it left unnamed"
+  assert_contains "$report" 'repositories that could not be read: 4' "the unreadable repositories were not counted"
+  assert_contains "$report" 'ready to pick up: 24' "the waiting issues were not counted"
+  assert_contains "$report" 'marked building with no task here: 24' "the anomalous issues were not counted"
   assert_not_contains "$report" 'truncated' \
     "the report still had to be cut, so bounding the classes moved the cut rather than removing it"
   pass "every class carries a count and the bounded report is not cut"
@@ -699,9 +694,9 @@ test_a_truncated_building_list_says_it_was_cut() {
   run_pickup "$home" "$out" check
   expect_code 0 "$RUN_STATUS" "check exit"
   report=$(cat "$out")
-  assert_contains "$report" "$REPO_SLUG has at least 50 issues marked building, so this list is cut" \
+  assert_contains "$report" "an issue list hit the 50 cap, so a count below may be low" \
     "a stuck-issue list that hit the query cap was presented as the complete set"
-  assert_not_contains "$report" 'with no task here' "an issue with a task record behind it was reported as anomalous"
+  assert_contains "$report" 'marked building with no task here: 0' "an issue with a task record behind it was counted as anomalous"
   pass "a stuck-issue list that hits the query cap says it was cut"
 }
 
@@ -983,7 +978,7 @@ test_unreachable_github_is_reported_not_an_empty_list() {
   expect_code 0 "$RUN_STATUS" "check exit"
   report=$(cat "$out")
   [ -n "$report" ] || fail "an unreachable forge produced the same silence as nothing dispatched"
-  assert_contains "$report" "could not read $REPO_SLUG" "the report does not name the repository that could not be read"
+  assert_contains "$report" 'repositories that could not be read: 1' "the report does not count the repository that could not be read"
   pass "an unreachable forge is reported by name, never as an empty list"
 }
 
@@ -1033,7 +1028,7 @@ test_issues_disabled_is_silent_but_a_failed_list_stays_loud() {
     FM_MOCK_GH_FAIL_LIST=1 FM_CHECK_TIMEOUT=30 FM_DISPATCH_PICKUP_INTERVAL=0 \
     "$PICKUP" check >"$out" 2>&1 || RUN_STATUS=$?
   expect_code 0 "$RUN_STATUS" "check exit"
-  assert_contains "$(cat "$out")" "could not read $REPO_SLUG" \
+  assert_contains "$(cat "$out")" 'repositories that could not be read: 1' \
     "a listing that failed on a repository that still answers was swallowed as a posture"
   pass "a repository with Issues turned off is silent, and a failed listing is still loud"
 }
@@ -1063,31 +1058,65 @@ test_a_clone_without_a_github_origin_is_skipped_silently() {
   pass "a clone with no GitHub origin is skipped in silence"
 }
 
-test_several_findings_and_an_odd_title_stay_one_line() {
-  local home out lines report
-  # The whole report is one line, because it becomes one wake record. Several
-  # findings must not become several records, and a title is captain-typed text
-  # whose own whitespace must not split a finding either.
-  home=$(make_home odd-title)
+test_the_report_is_one_line_of_counts_and_names_nothing() {
+  local home out lines report n
+  # The whole report is one line, because it becomes one wake record, and it
+  # carries counts only. Nothing a captain typed and no issue number reaches it,
+  # so no title can split a finding, no repository can crowd another out, and
+  # the line's width does not grow with the number of issues.
+  home=$(make_home counts-only)
+  add_repo "$home" "$OTHER_SLUG" zz-other-repo
   seed_issue "$home" 71 "$(printf 'Tabbed\ttitle')" fm:dispatched
-  seed_issue "$home" 72 'Second waiting item' fm:dispatched
-  seed_issue "$home" 73 'Stuck item' fm:building
+  n=1
+  while [ "$n" -le 6 ]; do
+    seed_issue "$home" "$((7100 + n))" "$WAITING_TITLE, part $n" fm:dispatched
+    seed_issue "$home" "$((7200 + n))" "$WAITING_TITLE, pass $n" fm:building
+    seed_issue_in "$home" "$OTHER_SLUG" "$((7300 + n))" "$WAITING_TITLE, item $n" fm:dispatched
+    n=$((n + 1))
+  done
   out="$home/out.txt"
   run_pickup "$home" "$out" check
   expect_code 0 "$RUN_STATUS" "check exit"
   lines=$(wc -l < "$out" | tr -d '[:space:]')
   [ "$lines" = 1 ] || fail "the report is $lines lines; it must be exactly one for the wake record"
   report=$(cat "$out")
-  assert_contains "$report" "$REPO_SLUG#71" "the first waiting issue is missing from the one-line report"
-  assert_contains "$report" "$REPO_SLUG#72" "the second waiting issue is missing from the one-line report"
-  assert_contains "$report" "$REPO_SLUG has 1 issue marked building with no task here: #73" "the stuck issue is missing from the one-line report"
+  assert_contains "$report" 'ready to pick up: 13' "the waiting issues across both repositories were not counted"
+  assert_contains "$report" 'marked building with no task here: 6' "the stuck issues were not counted"
+  assert_not_contains "$report" '#' "an issue number reached the report, which is not a count"
+  assert_not_contains "$report" 'Tabbed' "captain-typed title text reached the report"
+  assert_not_contains "$report" "$WAITING_TITLE" "captain-typed title text reached the report"
+  assert_not_contains "$report" "$REPO_SLUG" "a repository name reached the report, which is not a count"
+  assert_not_contains "$report" "$OTHER_SLUG" "a repository name reached the report, which is not a count"
   case "$report" in
-    *"$(printf '\t')"*) fail "a tab from an issue title survived into the wake record" ;;
+    *"$(printf '\t')"*) fail "a tab survived into the wake record" ;;
   esac
-  pass "several findings and an odd title still make exactly one line"
+  pass "the report is one line of counts and names nothing"
 }
 
-# --- cadence ----------------------------------------------------------------
+test_the_report_shape_is_the_same_for_one_issue_and_for_many() {
+  local one many few_home many_home n
+  # A fixed shape means the operator reads the same clauses every time and only
+  # the numbers move, which is also what makes a count change legible.
+  few_home=$(make_home shape-one)
+  seed_issue "$few_home" 74 "$WAITING_TITLE" fm:dispatched
+  run_pickup "$few_home" "$few_home/out.txt" check
+  one=$(cat "$few_home/out.txt")
+
+  many_home=$(make_home shape-many)
+  n=1
+  while [ "$n" -le 30 ]; do
+    seed_issue "$many_home" "$((7400 + n))" "$WAITING_TITLE, part $n" fm:dispatched
+    n=$((n + 1))
+  done
+  run_pickup "$many_home" "$many_home/out.txt" check
+  many=$(cat "$many_home/out.txt")
+
+  [ "$one" = "dispatched work: ready to pick up: 1; marked building with no task here: 0; look for fm:dispatched and fm:building on the clones under projects/" ] \
+    || fail "one waiting issue did not produce the fixed shape: $one"
+  [ "$many" = "dispatched work: ready to pick up: 30; marked building with no task here: 0; look for fm:dispatched and fm:building on the clones under projects/" ] \
+    || fail "thirty waiting issues did not produce the same shape with a different count: $many"
+  pass "the report shape is the same for one issue and for many"
+}
 
 test_findings_are_reported_once_until_they_change() {
   local home out
@@ -1095,75 +1124,72 @@ test_findings_are_reported_once_until_they_change() {
   seed_issue "$home" 81 'Waiting' fm:dispatched
   out="$home/out.txt"
   run_pickup "$home" "$out" check
-  assert_contains "$(cat "$out")" "$REPO_SLUG#81" "the first poll did not report the waiting issue"
+  assert_contains "$(cat "$out")" 'ready to pick up: 1' "the first poll did not report the waiting issue"
 
   run_pickup "$home" "$out" check
   [ ! -s "$out" ] || fail "the same unchanged finding was reported twice in a row: $(cat "$out")"
 
   seed_issue "$home" 82 'Also waiting' fm:dispatched
   run_pickup "$home" "$out" check
-  assert_contains "$(cat "$out")" "$REPO_SLUG#82" "a new waiting issue was suppressed as an unchanged finding"
+  assert_contains "$(cat "$out")" 'ready to pick up: 2' "a new waiting issue was suppressed as an unchanged finding"
   pass "findings are reported once until the finding set changes"
 }
 
-test_a_changed_anomaly_count_is_reported_even_when_the_examples_do_not_change() {
-  local home out first
-  # The report-once gate compares the line it PRINTED, so anything the printed
-  # line does not carry cannot be news. The building anomalies are summarized
-  # rather than enumerated, and the first named examples stay the same as more
-  # issues pile up, so the COUNT is what has to carry the change. Without it a
-  # repository going from two stuck issues to nine would print byte-identical
-  # text and be suppressed until the re-nag.
-  home=$(make_home anomaly-count)
-  seed_issue "$home" 84 'Add rate limiting to the ingestion endpoint' fm:building
-  seed_issue "$home" 85 'Rework the settings page empty state' fm:building
-  seed_issue "$home" 86 'Cache the project registry read on every wake' fm:building
-  seed_issue "$home" 87 'Retire the legacy steering inbox migration' fm:building
-  out="$home/out.txt"
-  run_pickup "$home" "$out" check
+test_a_count_that_moves_in_an_unnamed_repository_is_reported() {
+  local primary busy out first n
+  # The exact shape that went quiet before: the report named a couple of
+  # repositories and counted the rest, so a repository already past the naming
+  # limit could accumulate stuck issues without the printed line changing, and
+  # the poll suppressed it. Counting ISSUES rather than named repositories is
+  # what closes it - the third repository growing moves the number.
+  primary=$(make_home unnamed-repo-growth)
+  add_repo "$primary" 'fmtest-owner/fmtest-second' bb-second-repo
+  add_repo "$primary" 'fmtest-owner/fmtest-third' cc-third-repo
+  seed_issue "$primary" 7501 "$WAITING_TITLE, first repository" fm:building
+  seed_issue_in "$primary" 'fmtest-owner/fmtest-second' 7502 "$WAITING_TITLE, second repository" fm:building
+  seed_issue_in "$primary" 'fmtest-owner/fmtest-third' 7503 "$WAITING_TITLE, third repository" fm:building
+
+  out="$primary/out.txt"
+  run_pickup "$primary" "$out" check
   first=$(cat "$out")
-  assert_contains "$first" "$REPO_SLUG has 4 issues marked building with no task here, including #84, #85" \
-    "the first poll did not summarize the anomalies with a count above the naming limit"
+  assert_contains "$first" 'marked building with no task here: 3' "the first poll did not count the stuck issues"
 
-  run_pickup "$home" "$out" check
-  [ ! -s "$out" ] || fail "an unchanged anomaly set was reported twice in a row: $(cat "$out")"
+  run_pickup "$primary" "$out" check
+  [ ! -s "$out" ] || fail "an unchanged set was reported twice in a row: $(cat "$out")"
 
-  # A fifth issue, sorted after the ones already named. The summary is above the
-  # naming limit, so the named examples are unchanged and ONLY the count moves.
-  seed_issue "$home" 88 'Fold the digest cap into the shared cut' fm:building
-  run_pickup "$home" "$out" check
-  assert_contains "$(cat "$out")" "$REPO_SLUG has 5 issues marked building with no task here, including #84, #85" \
-    "a fifth stuck issue was suppressed, because the summary said nothing that changed"
-  pass "a changed anomaly count is reported even when the named examples do not change"
-}
-
-test_a_swap_among_the_unnamed_items_of_a_class_does_not_reprint_the_same_line() {
-  local home out first n
-  # The gate compares the line that was PRINTED, and every class names only a
-  # couple of items and then counts the rest. So the one change it cannot see is
-  # an item swapped for another inside a class's unnamed remainder: same count,
-  # same names, byte-identical line. Re-printing that would read as a fresh
-  # report and teach an operator to ignore the wake. It is not lost either - the
-  # re-nag resurfaces it on the ordinary cadence, like any unchanged set.
-  home=$(make_home unnamed-swap)
+  # The THIRD repository accumulates more, while the first two are untouched.
+  busy='fmtest-owner/fmtest-third'
   n=1
   while [ "$n" -le 20 ]; do
-    seed_issue "$home" "$((600 + n))" "$WAITING_TITLE, part $n" fm:dispatched
+    seed_issue_in "$primary" "$busy" "$((7600 + n))" "$WAITING_TITLE, pass $n" fm:building
     n=$((n + 1))
   done
+  run_pickup "$primary" "$out" check
+  assert_contains "$(cat "$out")" 'marked building with no task here: 23' \
+    "a repository past the report's attention accumulated twenty stuck issues and the poll stayed quiet"
+  pass "a count that moves in a repository the report does not name is still reported"
+}
+
+test_a_change_that_moves_no_count_does_not_reprint_the_same_line() {
+  local home out first
+  # The honest limit of a counts-only line, written down rather than claimed
+  # away: the gate compares what it printed, so one waiting issue being picked
+  # up while another arrives leaves every count identical and does not show.
+  # It is not lost - the re-nag resurfaces it on the ordinary cadence.
+  home=$(make_home counts-unchanged)
+  seed_issue "$home" 7701 "$WAITING_TITLE, part 1" fm:dispatched
+  seed_issue "$home" 7702 "$WAITING_TITLE, part 2" fm:dispatched
   out="$home/out.txt"
   run_pickup "$home" "$out" check
   first=$(cat "$out")
-  assert_contains "$first" 'and 18 more issues ready to pick up' \
-    "the fixture did not push the pickup class past its naming limit, so this case proves nothing"
+  assert_contains "$first" 'ready to pick up: 2' "the first poll did not count the waiting issues"
 
-  # One unnamed issue picked up, another arriving: the count and the two named
-  # examples are untouched, so the printed line cannot differ.
-  rm -f "$(repo_dir "$home")/620.issue"
-  seed_issue "$home" 621 "$WAITING_TITLE, part 21" fm:dispatched
+  # One picked up, one arriving: different issues, identical counts.
+  rm -f "$(repo_dir "$home")/7702.issue"
+  seed_issue "$home" 7703 "$WAITING_TITLE, part 3" fm:dispatched
   run_pickup "$home" "$out" check
-  [ ! -s "$out" ] || fail "a change nobody could see re-printed the same line: $(cat "$out")"
-  pass "a swap among a class's unnamed items does not reprint an identical line"
+  [ ! -s "$out" ] || fail "a change that moved no count reprinted the same line: $(cat "$out")"
+  pass "a change that moves no count does not reprint an identical line"
 }
 
 test_an_unchanged_finding_set_is_reported_again_after_the_renag() {
@@ -1179,7 +1205,7 @@ test_an_unchanged_finding_set_is_reported_again_after_the_renag() {
   env FM_HOME="$home" FM_MOCK_GH_DIR="$home/mock" PATH="$home/bin:$PATH" \
     FM_CHECK_TIMEOUT=30 FM_DISPATCH_PICKUP_INTERVAL=0 FM_DISPATCH_PICKUP_RENAG=3600 \
     FM_DISPATCH_PICKUP_NOW="$first" "$PICKUP" check >"$out" 2>&1 || RUN_STATUS=$?
-  assert_contains "$(cat "$out")" "$REPO_SLUG#91" "the first poll did not report the waiting issue"
+  assert_contains "$(cat "$out")" 'ready to pick up: 1' "the first poll did not report the waiting issue"
 
   env FM_HOME="$home" FM_MOCK_GH_DIR="$home/mock" PATH="$home/bin:$PATH" \
     FM_CHECK_TIMEOUT=30 FM_DISPATCH_PICKUP_INTERVAL=0 FM_DISPATCH_PICKUP_RENAG=3600 \
@@ -1189,7 +1215,7 @@ test_an_unchanged_finding_set_is_reported_again_after_the_renag() {
   env FM_HOME="$home" FM_MOCK_GH_DIR="$home/mock" PATH="$home/bin:$PATH" \
     FM_CHECK_TIMEOUT=30 FM_DISPATCH_PICKUP_INTERVAL=0 FM_DISPATCH_PICKUP_RENAG=3600 \
     FM_DISPATCH_PICKUP_NOW="$((first + 3600))" "$PICKUP" check >"$out" 2>&1 || true
-  assert_contains "$(cat "$out")" "$REPO_SLUG#91" "work nobody picked up went quiet forever instead of being reported again"
+  assert_contains "$(cat "$out")" 'ready to pick up: 1' "work nobody picked up went quiet forever instead of being reported again"
   pass "an unchanged finding set is reported again once the re-nag interval passes"
 }
 
@@ -1202,7 +1228,7 @@ test_probes_are_skipped_between_intervals() {
   env FM_HOME="$home" FM_MOCK_GH_DIR="$home/mock" PATH="$home/bin:$PATH" \
     FM_CHECK_TIMEOUT=30 FM_DISPATCH_PICKUP_INTERVAL=900 FM_DISPATCH_PICKUP_NOW=2000000 \
     "$PICKUP" check >"$out" 2>&1 || RUN_STATUS=$?
-  assert_contains "$(cat "$out")" "$REPO_SLUG#95" "the first poll did not report the waiting issue"
+  assert_contains "$(cat "$out")" 'ready to pick up: 1' "the first poll did not report the waiting issue"
 
   # A new issue inside the interval must not be probed for at all.
   seed_issue "$home" 96 'Arrived a minute later' fm:dispatched
@@ -1214,7 +1240,7 @@ test_probes_are_skipped_between_intervals() {
   env FM_HOME="$home" FM_MOCK_GH_DIR="$home/mock" PATH="$home/bin:$PATH" \
     FM_CHECK_TIMEOUT=30 FM_DISPATCH_PICKUP_INTERVAL=900 FM_DISPATCH_PICKUP_NOW=2000901 \
     "$PICKUP" check >"$out" 2>&1 || true
-  assert_contains "$(cat "$out")" "$REPO_SLUG#96" "the check did not probe again once its interval had passed"
+  assert_contains "$(cat "$out")" 'ready to pick up: 2' "the check did not probe again once its interval had passed"
   pass "probes are skipped between intervals and resume after one"
 }
 
@@ -1292,7 +1318,7 @@ test_armed_check_wakes_the_watcher_with_the_dispatched_report() {
     "$CHECKPOINT" --seconds 10 >"$out" 2>"$err" || status=$?
   expect_code 0 "$status" "watcher checkpoint exit"
   assert_contains "$(cat "$out")" "check:" "the armed check did not reach the watcher as a check wake"
-  assert_contains "$(cat "$out")" "dispatched work: ready to pick up $REPO_SLUG#101" "the wake did not carry the dispatched-work report"
+  assert_contains "$(cat "$out")" 'dispatched work: ready to pick up: 1' "the wake did not carry the dispatched-work report"
   pass "the armed check reaches the watcher as an ordinary check wake"
 }
 
@@ -1324,10 +1350,11 @@ test_issues_disabled_is_silent_but_a_failed_list_stays_loud
 test_missing_gh_is_reported_not_silence
 test_nothing_dispatched_is_silent
 test_a_clone_without_a_github_origin_is_skipped_silently
-test_several_findings_and_an_odd_title_stay_one_line
+test_the_report_is_one_line_of_counts_and_names_nothing
+test_the_report_shape_is_the_same_for_one_issue_and_for_many
 test_findings_are_reported_once_until_they_change
-test_a_changed_anomaly_count_is_reported_even_when_the_examples_do_not_change
-test_a_swap_among_the_unnamed_items_of_a_class_does_not_reprint_the_same_line
+test_a_count_that_moves_in_an_unnamed_repository_is_reported
+test_a_change_that_moves_no_count_does_not_reprint_the_same_line
 test_an_unchanged_finding_set_is_reported_again_after_the_renag
 test_probes_are_skipped_between_intervals
 test_an_oversized_budget_is_cut_to_fit_and_reported

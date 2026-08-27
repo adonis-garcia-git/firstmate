@@ -50,13 +50,10 @@
 # has. So the report is unconditional, and nothing is ever auto-built from it -
 # see the skill, which routes this state to firstmate and never to a spawn.
 #
-# Reported per REPOSITORY as a count plus a few named examples, not one line per
-# issue. Every one of them ends at the same "tell firstmate" outcome, so naming
-# them all buys nothing, and the whole report is one line that more urgent
-# classes have the stronger claim on. See the report section below for the three
-# classes, their order, and why every one of them is bounded: nothing in this
-# report is variable-length, so no class can push another off the end of the
-# line and go quiet.
+# Reported as a COUNT, not one line per issue and not per repository either.
+# Every one of them ends at the same "go look at the repository" step, so naming
+# them buys nothing and costs the line its other clauses. See the report section
+# below for the whole shape.
 #
 # IDEMPOTENCY. The issue URL is the key, and the task record carries it as
 # `issue=<url>`, the same shape as the existing `pr=` field. `claim` refuses
@@ -152,9 +149,6 @@ MAX_LINE=1000
 # How many issues one label query returns. A sweep that hits the cap says so
 # rather than presenting a truncated list as the whole of what is waiting.
 LIST_LIMIT=50
-# Titles are cosmetic in the report, so they are cut per issue to keep one
-# waiting issue from consuming the whole line cap.
-MAX_TITLE=80
 
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
@@ -511,93 +505,74 @@ newest_comment_id() { # <repo> <number>
 
 # --- check ------------------------------------------------------------------
 
-# THE REPORT IS THREE BOUNDED CLASSES, PRINTED IN THIS ORDER.
+# THE REPORT IS COUNTS, IN A FIXED SHAPE.
 #
-#   1. degraded   this report is not the whole truth - a repository that could
-#                 not be read, a list cut at the query cap, a sweep that ran out
-#                 of budget, a missing gh. The loud class, so it goes first.
-#   2. pickups    work waiting to be picked up here. The actionable class.
-#   3. anomalies  issues marked building with no task record here. The class a
-#                 person only has to look at, so it goes last.
+# One line, the same clauses in the same order every poll, and nothing
+# variable-length in any of them: no issue number, no title, no repository name.
+# What it carries is how many, and where to look:
 #
-# Every class names at most MAX_NAMED items and then says how many more it did
-# not name. That is what makes the capped comparison in action_check safe: a
-# class either names everything it has, so any change to it changes the text, or
-# it ends in a count that moves when the number of items moves. No class is
-# variable-length any more, so no class can push another off the end of the line.
+#   gh missing / repositories unread / sweep cut short / lists at the cap
+#   ready to pick up: N
+#   marked building with no task here: N
+#   where to look, as a constant string
 #
-# The arithmetic, for a repository slug up to 40 characters and a title cut to
-# MAX_TITLE: a degraded item runs about 100 characters, a pickup about 147, an
-# anomaly summary about 130, and each class adds a tail of at most 70. Two named
-# items per class puts the widest report near 930 characters against MAX_LINE of
-# 1000, so the shared cut does not fire in ordinary operation. It is kept as a
-# backstop, and it can still fire on a pathological slug or repository name,
-# which is a report that is awkward rather than a report that is wrong.
-MAX_NAMED=2
-
-DEGRADED=
-DEGRADED_N=0
-PICKUPS=
+# It got here the long way. Naming the findings meant one class could crowd out
+# another, and bounding each class to a few names plus a count moved the problem
+# rather than removing it: the count that moved was the count of NAMED things,
+# so a repository already past the bound could grow without the line changing,
+# and the poll went quiet about it. Counts of ISSUES have no such edge. The
+# names were never what an operator acted on anyway - every finding here routes
+# to the same "go look at the repository" step, and the constant pointer at the
+# end of the line is that step.
+#
+# WHAT THE LINE CAN AND CANNOT TELL YOU. The report-once gate compares this
+# line, so a change is news exactly when a COUNT changes. A change that leaves
+# every count identical - one waiting issue picked up while another arrives, one
+# stuck issue closing while another appears - does not show, and waits for the
+# re-nag like any unchanged set. That is the honest limit of a counts-only line,
+# stated here rather than claimed away.
+READ_FAILURES=0
 PICKUPS_N=0
-ANOMALIES=
 ANOMALIES_N=0
-INCOMPLETE_REPORTED=0
+LISTS_CUT=0
+SWEEP_INCOMPLETE=0
+GH_MISSING=0
+BUDGET_NOTE=
 
-# Each finding is flattened to a single line, because the whole report must stay
-# one line for the wake record.
-class_join() { # <existing> <text>
-  local text
-  text=$(printf '%s' "$2" | tr '\t\r\n' '   ')
+report_clause() { # <body> <clause>
   if [ -z "$1" ]; then
-    printf '%s' "$text"
+    printf '%s' "$2"
   else
-    printf '%s; %s' "$1" "$text"
+    printf '%s; %s' "$1" "$2"
   fi
 }
 
-emit_degraded() {
-  DEGRADED_N=$((DEGRADED_N + 1))
-  [ "$DEGRADED_N" -le "$MAX_NAMED" ] || return 0
-  DEGRADED=$(class_join "$DEGRADED" "$1")
+# Whether this poll has anything to say at all. Silence means nothing is
+# waiting, never "something is waiting and I already mentioned it".
+report_has_findings() {
+  [ "$GH_MISSING" -ne 0 ] && return 0
+  [ "$READ_FAILURES" -ne 0 ] && return 0
+  [ "$SWEEP_INCOMPLETE" -ne 0 ] && return 0
+  [ "$LISTS_CUT" -ne 0 ] && return 0
+  [ -n "$BUDGET_NOTE" ] && return 0
+  [ "$PICKUPS_N" -ne 0 ] && return 0
+  [ "$ANOMALIES_N" -ne 0 ] && return 0
+  return 1
 }
 
-emit_pickup() {
-  PICKUPS_N=$((PICKUPS_N + 1))
-  [ "$PICKUPS_N" -le "$MAX_NAMED" ] || return 0
-  PICKUPS=$(class_join "$PICKUPS" "$1")
-}
-
-emit_anomaly() {
-  ANOMALIES_N=$((ANOMALIES_N + 1))
-  [ "$ANOMALIES_N" -le "$MAX_NAMED" ] || return 0
-  ANOMALIES=$(class_join "$ANOMALIES" "$1")
-}
-
-# One class as it is printed: what it named, then how many it did not.
-class_line() { # <named> <count> <what-the-unnamed-are>
-  local named=$1 count=$2 noun=$3 extra
-  [ "$count" -gt 0 ] || return 0
-  extra=$((count - MAX_NAMED))
-  if [ "$extra" -gt 0 ]; then
-    printf '%s; and %s more %s' "$named" "$extra" "$noun"
-  else
-    printf '%s' "$named"
-  fi
-}
-
+# The degradations lead, because "I could not look" must never read like
+# "nothing is waiting". Every clause is a label and a number or a fixed
+# sentence, so nothing here has to agree with a plural.
 report_body() {
-  local body='' part
-  for part in \
-    "$(class_line "$DEGRADED" "$DEGRADED_N" 'problems reading the forge')" \
-    "$(class_line "$PICKUPS" "$PICKUPS_N" 'issues ready to pick up')" \
-    "$(class_line "$ANOMALIES" "$ANOMALIES_N" 'repositories with issues marked building with no task')"; do
-    [ -n "$part" ] || continue
-    if [ -z "$body" ]; then
-      body=$part
-    else
-      body="$body; $part"
-    fi
-  done
+  local body=''
+  [ "$GH_MISSING" -eq 0 ]     || body=$(report_clause "$body" 'gh is not on PATH, so nothing could be read')
+  [ "$READ_FAILURES" -eq 0 ]     || body=$(report_clause "$body" "repositories that could not be read: $READ_FAILURES")
+  [ "$SWEEP_INCOMPLETE" -eq 0 ]     || body=$(report_clause "$body" 'the time budget ran out before every repository was read')
+  [ "$LISTS_CUT" -eq 0 ]     || body=$(report_clause "$body" "an issue list hit the $LIST_LIMIT cap, so a count below may be low")
+  [ -z "$BUDGET_NOTE" ] || body=$(report_clause "$body" "$BUDGET_NOTE")
+  body=$(report_clause "$body" "ready to pick up: $PICKUPS_N")
+  body=$(report_clause "$body" "marked building with no task here: $ANOMALIES_N")
+  body=$(report_clause "$body" "look for $LABEL_DISPATCHED and $LABEL_BUILDING on the clones under projects/")
   printf '%s' "$body"
 }
 
@@ -610,19 +585,9 @@ budget_exhausted() {
 # cannot finish says so rather than being killed by the watcher with nothing
 # printed.
 budget_allows() { # <repo>
-  local repo=$1
   budget_exhausted || return 0
-  if [ "$INCOMPLETE_REPORTED" -eq 0 ]; then
-    INCOMPLETE_REPORTED=1
-    emit_degraded "check incomplete: the time budget ran out before $repo"
-  fi
+  SWEEP_INCOMPLETE=1
   return 1
-}
-
-short_title() {
-  local title=$1
-  fm_cap_line_var "$title" "$MAX_TITLE"
-  printf '%s\n' "$FM_LINE_CAP_LINE"
 }
 
 # The GitHub owner/repo a clone points at, or nothing when it points elsewhere.
@@ -666,16 +631,15 @@ clone_slugs() {
   done
 }
 
-# One label query. Prints "<number><tab><title>" per issue, with control
-# characters removed from the title inside the query so one issue is always
-# exactly one line whatever the captain typed into it.
+# One label query. Prints one issue number per line and nothing else: the report
+# is counts, so a title would only be text this script has to defend against.
 list_labeled() { # <repo> <label>
   gh_read issue list -R "$1" --state open --label "$2" --limit "$LIST_LIMIT" \
-    --json number,title --jq '.[] | "\(.number)\t\(.title | gsub("[[:cntrl:]]"; " "))"'
+    --json number --jq '.[] | "\(.number)"'
 }
 
 sweep_repo() { # <repo>
-  local repo=$1 raw number title count url status anomalies names noun
+  local repo=$1 raw number count url status
   # An unreadable repository is a finding, never an empty list. "Nothing was
   # dispatched" and "I could not look" must never render the same.
   if ! raw=$(list_labeled "$repo" "$LABEL_DISPATCHED"); then
@@ -690,33 +654,29 @@ sweep_repo() { # <repo>
       status=$?
       [ "$status" -ne 1 ] || return 0
     fi
-    emit_degraded "could not read $repo: the dispatched issues could not be listed"
+    READ_FAILURES=$((READ_FAILURES + 1))
     return 0
   fi
   count=0
-  while IFS=$'\t' read -r number title; do
+  while IFS= read -r number; do
     [ -n "$number" ] || continue
     case "$number" in
       *[!0-9]*) continue ;;
     esac
     count=$((count + 1))
-    emit_pickup "ready to pick up ${repo}#${number} \"$(short_title "$title")\""
+    PICKUPS_N=$((PICKUPS_N + 1))
   done <<EOF
 $raw
 EOF
-  if [ "$count" -ge "$LIST_LIMIT" ]; then
-    emit_degraded "$repo has at least $LIST_LIMIT dispatched issues, so this list is cut"
-  fi
+  [ "$count" -lt "$LIST_LIMIT" ] || LISTS_CUT=1
 
   budget_allows "$repo" || return 0
   if ! raw=$(list_labeled "$repo" "$LABEL_BUILDING"); then
-    emit_degraded "could not read $repo: the building issues could not be listed"
+    READ_FAILURES=$((READ_FAILURES + 1))
     return 0
   fi
   count=0
-  anomalies=0
-  names=
-  while IFS=$'\t' read -r number title; do
+  while IFS= read -r number; do
     [ -n "$number" ] || continue
     case "$number" in
       *[!0-9]*) continue ;;
@@ -731,35 +691,14 @@ EOF
     # is the deliberate trade: a report can never cause a duplicate build, and
     # every mechanism tried for staying quiet about the second case could.
     #
-    # Summarized rather than enumerated: every one of these routes to the same
-    # "tell firstmate and let a person decide" outcome, so naming them all buys
-    # nothing and costs the line the pickups need. The COUNT is what carries the
-    # news, so it is always in the text even when the named examples are not.
-    anomalies=$((anomalies + 1))
-    [ "$anomalies" -le "$MAX_NAMED" ] || continue
-    if [ -z "$names" ]; then
-      names="#${number}"
-    else
-      names="$names, #${number}"
-    fi
+    # Counted, not named: every one of these routes to the same "go look at the
+    # repository" step, and a count of issues is the one thing that always moves
+    # when the situation does.
+    ANOMALIES_N=$((ANOMALIES_N + 1))
   done <<EOF
 $raw
 EOF
-  if [ "$anomalies" -gt 0 ]; then
-    if [ "$anomalies" -eq 1 ]; then
-      noun='1 issue'
-    else
-      noun="$anomalies issues"
-    fi
-    if [ "$anomalies" -gt "$MAX_NAMED" ]; then
-      emit_anomaly "$repo has $noun marked building with no task here, including $names"
-    else
-      emit_anomaly "$repo has $noun marked building with no task here: $names"
-    fi
-  fi
-  if [ "$count" -ge "$LIST_LIMIT" ]; then
-    emit_degraded "$repo has at least $LIST_LIMIT issues marked building, so this list is cut"
-  fi
+  [ "$count" -lt "$LIST_LIMIT" ] || LISTS_CUT=1
   return 0
 }
 
@@ -815,7 +754,7 @@ record_write() { # <findings> <reported-epoch>
 }
 
 action_check() {
-  local slug line body now reported_epoch elapsed
+  local slug line now reported_epoch elapsed
 
   record_read
   now=$(record_epoch_now)
@@ -829,13 +768,13 @@ action_check() {
   claimed_urls_load
 
   if [ -n "$BUDGET_CUT_FROM" ]; then
-    emit_degraded "sweep budget ${BUDGET_CUT_FROM}s cut to ${BUDGET_SECS}s to stay inside the watcher check timeout of ${CHECK_TIMEOUT}s"
+    BUDGET_NOTE="sweep budget ${BUDGET_CUT_FROM}s cut to ${BUDGET_SECS}s to stay inside the watcher check timeout of ${CHECK_TIMEOUT}s"
   fi
 
   if ! command -v gh >/dev/null 2>&1; then
     # Reported rather than silent: with no gh, every repository below would look
     # exactly like a repository with nothing dispatched.
-    emit_degraded 'gh is not on PATH, so no dispatched work can be read'
+    GH_MISSING=1
   else
     while IFS= read -r slug; do
       [ -n "$slug" ] || continue
@@ -845,13 +784,12 @@ action_check() {
   fi
 
   line=
-  body=$(report_body)
-  if [ -n "$body" ]; then
-    # A backstop, not the mechanism. Every class bounds itself, so the widest
-    # ordinary report fits inside MAX_LINE; this only fires on a pathological
-    # slug or repository name, and when it does it carries the same visible
-    # truncation marker the digests use rather than ending mid-finding.
-    fm_cap_line_var "dispatched work: $body" "$MAX_LINE"
+  if report_has_findings; then
+    # A backstop that nothing ordinary reaches. The line is a fixed set of
+    # clauses carrying counts, so its width does not grow with the number of
+    # issues, repositories, or anything a captain typed; the shared cut stays
+    # only so a future clause cannot silently end the line mid-word.
+    fm_cap_line_var "dispatched work: $(report_body)" "$MAX_LINE"
     line=$FM_LINE_CAP_LINE
   fi
 
@@ -860,15 +798,12 @@ action_check() {
   # news. Report before recording, so a record that cannot be written costs a
   # repeated report rather than a lost one.
   #
-  # What is compared is the line that was PRINTED, not the findings behind it.
-  # Comparing something wider than the line makes a change nobody can see count
-  # as news, so an over-long report re-prints byte-identical text and reads as
-  # fresh. That comparison is safe because every class is bounded and counted:
-  # each one either names everything it holds, so any change to it changes the
-  # text, or ends in a count of what it did not name, which moves as soon as the
-  # number of items moves. The only change this cannot see is one item swapped
-  # for another among the unnamed remainder of a class, and that waits for the
-  # re-nag, which is the same cadence any unchanged set gets.
+  # What is compared is the line that was PRINTED. The line is counts, so a
+  # change is news exactly when a count changes - no more and no less. A change
+  # that leaves every count identical, such as one waiting issue being picked up
+  # while another arrives, does not show here and waits for the re-nag, the same
+  # cadence any unchanged set gets. That is the limit of a counts-only line, and
+  # it is written down rather than claimed away.
   reported_epoch=$RECORD_REPORTED_EPOCH
   if [ -n "$line" ]; then
     elapsed=-1
