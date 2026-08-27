@@ -34,6 +34,14 @@
 # next poll picks up and builds a SECOND time. Do not "tidy" this into the more
 # natural-looking order.
 #
+# WHOSE CLAIM IS IT. Both machines poll the same repositories, so an issue
+# marked building with no task record HERE is either this home's crashed claim
+# or the other machine's build in progress. The claim comment names the machine
+# that claimed it, and `check` reports only claims that are this machine's or
+# absent entirely. Reporting another machine's claim would send an operator to
+# spawn a second build of work already in flight, which is the one outcome this
+# whole transport exists to prevent.
+#
 # IDEMPOTENCY. The issue URL is the key, and the task record carries it as
 # `issue=<url>`, the same shape as the existing `pr=` field. `claim` refuses
 # when any task record in this home already claims that issue, so a double
@@ -43,7 +51,19 @@
 #
 # UNREACHABLE DEGRADES LOUDLY. "Nothing was dispatched" and "I could not reach
 # GitHub" never produce the same result: a repository that cannot be read is a
-# reported finding, never silence, and never an empty list.
+# reported finding, never silence, and never an empty list. The one exception is
+# a repository with GitHub Issues turned off, which is a registered posture like
+# a clone with no GitHub origin and is skipped in silence. That case is told
+# apart by asking gh for the repository's hasIssuesEnabled field, never by
+# matching an error message: only a definite "no" silences the finding, and
+# anything unreadable or unclear stays loud.
+#
+# THE WRITE-SIDE LABELS MUST ALREADY EXIST. gh resolves a label name to an id
+# and fails the whole edit on an unknown name, so fm:building, fm:built, and
+# fm:blocked have to exist in every target repository. A relabel that fails
+# names the missing label and says it has to be created there, because otherwise
+# a missing prerequisite reads exactly like a forge outage and every retry fails
+# the same way.
 #
 # WHICH FORGE CLI. Reads go through `gh` with `--json`/`--jq`, because this
 # script decides whether to spawn a worker and needs an exact machine-readable
@@ -56,7 +76,10 @@
 # WRITES ARE VERIFIED, NOT TRUSTED. After every relabel, comment, and close, the
 # resulting issue is read back and the expected state asserted. A forge CLI that
 # exits 0 without having applied the change would otherwise let the whole
-# ordering guarantee above quietly lapse.
+# ordering guarantee above quietly lapse. A comment is verified by requiring the
+# newest comment to have changed identity AND to carry the body that was posted,
+# and a comment that cannot be confirmed fails before the label change and the
+# close, so an outcome never closes an issue whose durable record is missing.
 #
 # CADENCE. `check` prints one line when something needs attention and prints
 # nothing at all otherwise, so it composes with the existing watcher state-check
@@ -241,6 +264,29 @@ record_epoch_now() {
 
 real_epoch() { date +%s; }
 
+# --- machine identity -------------------------------------------------------
+
+# The name this machine signs its claim comments with. It is derived from the
+# hostname rather than from FM_HOME, because the comment is posted into a public
+# issue and an absolute path inside this home is not something to publish. It is
+# reduced to one label and to characters that survive a round trip through a
+# comment body, so the marker this writes is the marker the sweep can match.
+machine_name() {
+  local name
+  name=$(hostname -s 2>/dev/null || uname -n 2>/dev/null || true)
+  name=${name%%.*}
+  name=$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '-')
+  [ -n "$name" ] || name=unknown
+  printf '%s\n' "$name"
+}
+
+MACHINE=$(machine_name)
+
+claim_comment_body() { # <task-id>
+  # shellcheck disable=SC2016  # The backticks are literal markdown in a comment body.
+  printf 'Picked up by firstmate as task `%s` on machine `%s`.\n' "$1" "$MACHINE"
+}
+
 # --- issue identity ---------------------------------------------------------
 
 FM_DISPATCH_OWNER=
@@ -375,6 +421,63 @@ issue_has_label() { # <label>
   printf '%s\n' "$FM_ISSUE_LABELS" | grep -q -x -F "$1"
 }
 
+# Whether the repository has GitHub Issues at all: 0 enabled, 1 disabled, 2
+# unknown. This asks a structural field rather than reading gh's error text,
+# because an error message is not a contract: a reworded one would turn a
+# registered posture back into a finding reported forever, or worse, teach this
+# to swallow a real outage. Only a definite "false" is allowed to silence
+# anything; unknown is treated as unreadable and stays loud.
+repo_issues_enabled() { # <repo>
+  local raw
+  raw=$(gh_read repo view -R "$1" --json hasIssuesEnabled --jq '.hasIssuesEnabled') || return 2
+  case "$raw" in
+    true) return 0 ;;
+    false) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
+# Whether a label exists in the repository: 0 present, 1 absent, 2 unknown.
+label_exists() { # <repo> <label>
+  local raw
+  raw=$(gh_read label list -R "$1" --search "$2" --limit "$LIST_LIMIT" \
+    --json name --jq '.[].name') || return 2
+  printf '%s\n' "$raw" | grep -q -x -F "$2" || return 1
+  return 0
+}
+
+# The clause a failed relabel gains when the label it was adding does not exist
+# in the target repository. gh resolves a label name to an id and errors on an
+# unknown name, so the edit fails before anything lands, and every retry fails
+# the same way; without naming the label this reads like a forge or network
+# fault rather than a prerequisite nobody created. Silent when the label is
+# there, and silent when it cannot be checked, because a guess here would be
+# worse than the plain failure.
+relabel_hint() { # <repo> <label>
+  local status
+  label_exists "$1" "$2"
+  status=$?
+  [ "$status" -eq 1 ] || return 0
+  printf '; the label %s does not exist in %s, so it must be created in that repository first' "$2" "$1"
+}
+
+newest_comment_id() { # <repo> <number>
+  gh_read issue view "$2" -R "$1" --json comments --jq '.comments[-1].id'
+}
+
+# The machines whose claim comments are on an issue, one per line. Each comment
+# is flattened inside the query, so one comment is always exactly one line
+# however it was written.
+issue_claim_machines() { # <repo> <number>
+  local raw
+  raw=$(gh_read issue view "$2" -R "$1" --json comments \
+    --jq '.comments[].body | gsub("[[:cntrl:]]"; " ")') || return 1
+  # shellcheck disable=SC2016  # The backticks are literal markdown the marker carries.
+  printf '%s\n' "$raw" \
+    | sed -n 's/.*Picked up by firstmate as task `[^`]*` on machine `\([^`]*\)`\..*/\1/p'
+  return 0
+}
+
 # --- check ------------------------------------------------------------------
 
 FINDINGS=
@@ -466,10 +569,21 @@ list_labeled() { # <repo> <label>
 }
 
 sweep_repo() { # <repo>
-  local repo=$1 raw number title count claimed url
+  local repo=$1 raw number title count claimed url machines status
   # An unreadable repository is a finding, never an empty list. "Nothing was
   # dispatched" and "I could not look" must never render the same.
   if ! raw=$(list_labeled "$repo" "$LABEL_DISPATCHED"); then
+    # Unless the repository simply has no issues to list. A repository with
+    # GitHub Issues turned off cannot host a dispatched issue at all, which is
+    # the same registered posture as a clone with no GitHub origin, and
+    # reporting it would wake firstmate about it every re-nag forever. Only a
+    # definite "issues are off" silences this; an answer that cannot be read is
+    # still an outage and still loud.
+    if budget_allows "$repo"; then
+      repo_issues_enabled "$repo"
+      status=$?
+      [ "$status" -ne 1 ] || return 0
+    fi
     emit "could not read $repo: the dispatched issues could not be listed"
     return 0
   fi
@@ -493,14 +607,30 @@ EOF
     emit "could not read $repo: the building issues could not be listed"
     return 0
   fi
+  count=0
   while IFS=$'\t' read -r number title; do
     [ -n "$number" ] || continue
     case "$number" in
       *[!0-9]*) continue ;;
     esac
+    count=$((count + 1))
     url=$(issue_url "${repo%%/*}" "${repo#*/}" "$number")
     claimed=$(issue_claimants "$url")
     [ -z "$claimed" ] || continue
+    # No task record here claims it, which means either this home crashed
+    # between the relabel and the spawn or the other machine is building it
+    # right now. Only the claim comment tells those apart, and reading it costs
+    # a probe, so it goes through the sweep budget like every other read.
+    budget_allows "${repo}#${number}" || continue
+    if ! machines=$(issue_claim_machines "$repo" "$number"); then
+      emit "could not read ${repo}#${number}: its claim comments could not be read"
+      continue
+    fi
+    if [ -n "$machines" ] && ! printf '%s\n' "$machines" | grep -q -x -F "$MACHINE"; then
+      # Another machine claimed it and is building it. Reporting it here would
+      # send an operator to spawn a second build of work already in flight.
+      continue
+    fi
     # The recoverable half of the relabel-before-spawn ordering: the issue was
     # claimed and the task never appeared. Nothing will pick it up again on its
     # own, because the poll only offers dispatched issues, so it is named here.
@@ -508,6 +638,9 @@ EOF
   done <<EOF
 $raw
 EOF
+  if [ "$count" -ge "$LIST_LIMIT" ]; then
+    emit "$repo has at least $LIST_LIMIT issues marked building, so this list is cut"
+  fi
   return 0
 }
 
@@ -646,8 +779,33 @@ relabel() { # <repo> <number> <add> <remove...>
   return 0
 }
 
+# Post a comment and prove it landed, for the same reason a relabel is read back:
+# gh-axi's exit status alone is not evidence. The comment is the durable record
+# this whole transport writes - the claim the other machine reads, and the
+# outcome the captain reads - so a CLI that exits 0 without posting would lose
+# exactly the thing that was being reported while reporting success.
+#
+# The proof is both halves together: the newest comment must have changed
+# identity, so a write that did nothing cannot pass, AND it must carry the body
+# that was posted, so somebody else's comment arriving in the same moment cannot
+# be mistaken for this one.
 comment_issue() { # <repo> <number> <body-file>
-  gh_write issue comment "$2" -R "$1" --body-file "$3"
+  local repo=$1 number=$2 body=$3 before after fetched ok=0
+  before=$(newest_comment_id "$repo" "$number") || return 1
+  gh_write issue comment "$number" -R "$repo" --body-file "$body" || return 1
+  after=$(newest_comment_id "$repo" "$number") || return 1
+  [ -n "$after" ] && [ "$after" != "$before" ] || return 1
+  fetched=$(mktemp "${TMPDIR:-/tmp}/fm-dispatch-posted.XXXXXX") || return 1
+  if gh_read issue view "$number" -R "$repo" --json comments \
+    --jq '.comments[-1].body' > "$fetched"; then
+    # Trailing newlines are dropped from both sides, because the posted file
+    # routinely ends with one and the forge does not promise to hand it back.
+    # Every other byte, including every interior newline of a multi-line
+    # outcome, has to match.
+    [ "$(cat "$body")" = "$(cat "$fetched")" ] && ok=1
+  fi
+  rm -f -- "$fetched"
+  [ "$ok" = 1 ]
 }
 
 # The message a report carries. A file is the primary form because an outcome is
@@ -727,15 +885,15 @@ action_claim() { # <task-id> <issue-url>
 
   # RELABEL FIRST, then comment, then the caller spawns. See the header.
   relabel "$repo" "$FM_DISPATCH_NUMBER" "$LABEL_BUILDING" "$LABEL_DISPATCHED" \
-    || die "could not relabel $FM_DISPATCH_URL to $LABEL_BUILDING, so nothing was claimed"
+    || die "could not relabel $FM_DISPATCH_URL to $LABEL_BUILDING, so nothing was claimed$(relabel_hint "$repo" "$LABEL_BUILDING")"
 
   body=$(mktemp "${TMPDIR:-/tmp}/fm-dispatch-claim.XXXXXX") || die 'cannot stage the claim comment'
-  printf "Picked up by firstmate as task \`%s\`.\n" "$id" > "$body"
+  claim_comment_body "$id" > "$body"
   if ! comment_issue "$repo" "$FM_DISPATCH_NUMBER" "$body"; then
     rm -f -- "$body"
     # The relabel already landed, so a retry of claim would correctly refuse.
     # Say exactly what is true so the caller reconciles rather than re-claims.
-    die "relabeled $FM_DISPATCH_URL to $LABEL_BUILDING but could not comment; spawn task $id and run bind, or reconcile the issue"
+    die "relabeled $FM_DISPATCH_URL to $LABEL_BUILDING but could not comment, and the comment may not have posted; spawn task $id and run bind, or reconcile the issue"
   fi
   rm -f -- "$body"
   claim_lock_release
@@ -822,12 +980,14 @@ action_report() { # <task-id> <--built|--blocked> <message source> <value>
 
   # The outcome is comment-first, so a failure between the two steps leaves the
   # reason visible on the issue rather than a bare label change nobody can read.
+  # It is also verified first, so a report can never close an issue whose
+  # outcome comment is missing.
   comment_issue "$repo" "$FM_DISPATCH_NUMBER" "$MESSAGE_FILE" \
-    || die "could not comment the outcome on $url, so nothing was changed"
+    || die "could not comment the outcome on $url, and the comment may not have posted, so nothing else was changed"
 
   if [ "$outcome" = --blocked ]; then
     relabel "$repo" "$FM_DISPATCH_NUMBER" "$LABEL_BLOCKED" "$LABEL_BUILDING" "$LABEL_DISPATCHED" \
-      || die "commented on $url but could not label it $LABEL_BLOCKED"
+      || die "commented on $url but could not label it $LABEL_BLOCKED$(relabel_hint "$repo" "$LABEL_BLOCKED")"
     # Deliberately left OPEN. A failure that closes its own issue is a silent
     # close, and the captain would never see it again.
     [ "$FM_ISSUE_STATE" = OPEN ] \
@@ -837,7 +997,7 @@ action_report() { # <task-id> <--built|--blocked> <message source> <value>
   fi
 
   relabel "$repo" "$FM_DISPATCH_NUMBER" "$LABEL_BUILT" "$LABEL_BUILDING" "$LABEL_DISPATCHED" \
-    || die "commented on $url but could not label it $LABEL_BUILT"
+    || die "commented on $url but could not label it $LABEL_BUILT$(relabel_hint "$repo" "$LABEL_BUILT")"
   gh_write issue close "$FM_DISPATCH_NUMBER" -R "$repo" --reason completed \
     || die "commented and labeled $url but could not close it"
   issue_read "$repo" "$FM_DISPATCH_NUMBER" || die "cannot confirm the state of $url"

@@ -39,7 +39,10 @@ fm_git_identity fmtest fmtest@example.invalid
 #   state=OPEN|CLOSED
 #   title=<one line>
 #   label=<name>            (repeated)
-# and a sibling <number>.comments holding one line per posted comment.
+# a sibling <number>.comments.d/<seq>.body holding each posted comment verbatim,
+# so a comment read back is the bytes that were posted rather than a summary of
+# them, and per-repository .labels (the labels the repository has) and
+# .issues-disabled (Issues turned off) alongside them.
 
 make_mocks() {
   local bin=$1
@@ -47,34 +50,46 @@ make_mocks() {
 
   cat > "$bin/gh" <<'SH'
 #!/usr/bin/env bash
-# Mock gh: only the two read queries fm-dispatch-pickup.sh makes are answered.
+# Mock gh: only the read queries fm-dispatch-pickup.sh makes are answered.
 set -u
 [ "${FM_MOCK_GH_FAIL_READ:-0}" = 1 ] && exit 1
-issue_file() { printf '%s/%s--%s/%s.issue\n' "$FM_MOCK_GH_DIR" "${2%%/*}" "${2#*/}" "$1"; }
+repo_dir() { printf '%s/%s--%s\n' "$FM_MOCK_GH_DIR" "${1%%/*}" "${1#*/}"; }
 labels_of() { sed -n 's/^label=//p' "$1"; }
 sub=${1:-}; shift || true
-[ "$sub" = issue ] || { printf 'mock gh: unsupported command %s\n' "$sub" >&2; exit 2; }
+case "$sub" in
+  issue|repo|label) ;;
+  *) printf 'mock gh: unsupported command %s\n' "$sub" >&2; exit 2 ;;
+esac
 verb=${1:-}; shift || true
-repo=; json=; label=; number=
-case "$verb" in
-  view) number=$1; shift ;;
+repo=; json=; label=; number=; jq=; search=
+case "$sub:$verb" in
+  issue:view) number=$1; shift ;;
 esac
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -R) repo=$2; shift 2 ;;
     --json) json=$2; shift 2 ;;
     --label) label=$2; shift 2 ;;
-    --jq|--limit|--state) shift 2 ;;
+    --jq) jq=$2; shift 2 ;;
+    --search) search=$2; shift 2 ;;
+    --limit|--state) shift 2 ;;
     *) printf 'mock gh: unsupported flag %s\n' "$1" >&2; exit 2 ;;
   esac
 done
-case "$verb:$json" in
-  list:number,title)
+d=$(repo_dir "$repo")
+case "$sub:$verb:$json" in
+  issue:list:number,title)
     # A repository this mock forge does not host is an error, as it is for real
     # gh. Answering "no issues" instead would let a build that polled the wrong
     # project - or a project that is not on GitHub at all - look clean.
-    [ -d "$FM_MOCK_GH_DIR/${repo%%/*}--${repo#*/}" ] || exit 1
-    for f in "$FM_MOCK_GH_DIR/${repo%%/*}--${repo#*/}"/*.issue; do
+    [ -d "$d" ] || exit 1
+    # A repository with Issues turned off answers exactly as real gh does: the
+    # listing fails outright rather than coming back empty. FM_MOCK_GH_FAIL_LIST
+    # is the other half of that fixture - a listing that fails while the
+    # repository itself still answers, which is an outage and not a posture.
+    [ -e "$d/.issues-disabled" ] && exit 1
+    [ "${FM_MOCK_GH_FAIL_LIST:-0}" = 1 ] && exit 1
+    for f in "$d"/*.issue; do
       [ -e "$f" ] || continue
       grep -q '^state=OPEN$' "$f" || continue
       labels_of "$f" | grep -q -x -F "$label" || continue
@@ -86,8 +101,8 @@ case "$verb:$json" in
       printf '%s\t%s\n' "$n" "$t"
     done
     ;;
-  view:state,labels)
-    f=$(issue_file "$number" "$repo")
+  issue:view:state,labels)
+    f="$d/$number.issue"
     [ -f "$f" ] || exit 1
     sed -n 's/^state=//p' "$f" | head -n 1
     labels_of "$f"
@@ -95,7 +110,43 @@ case "$verb:$json" in
     # on what was read, so a case can put two pickups inside it on purpose.
     [ "${FM_MOCK_GH_SLOW_VIEW:-0}" = 0 ] || sleep "$FM_MOCK_GH_SLOW_VIEW"
     ;;
-  *) printf 'mock gh: unsupported query %s %s\n' "$verb" "$json" >&2; exit 2 ;;
+  issue:view:comments)
+    f="$d/$number.issue"
+    [ -f "$f" ] || exit 1
+    cd="${f%.issue}.comments.d"
+    newest=
+    for c in "$cd"/*.body; do [ -e "$c" ] || continue; newest=$c; done
+    case "$jq" in
+      *'[-1].id'*)
+        # jq answers null for the newest comment of an issue with none, so an
+        # issue that has never been commented on is not confusable with one id.
+        if [ -n "$newest" ]; then printf 'IC%s\n' "$(basename "$newest" .body)"; else printf 'null\n'; fi
+        ;;
+      *'[-1].body'*)
+        if [ -n "$newest" ]; then cat "$newest"; else printf 'null\n'; fi
+        ;;
+      *'[].body'*)
+        for c in "$cd"/*.body; do
+          [ -e "$c" ] || continue
+          # The query itself flattens control characters, so one comment is
+          # always exactly one line however it was written.
+          tr '\n\r\t' '   ' < "$c"
+          printf '\n'
+        done
+        ;;
+      *) printf 'mock gh: unsupported comments query %s\n' "$jq" >&2; exit 2 ;;
+    esac
+    ;;
+  repo:view:hasIssuesEnabled)
+    [ -d "$d" ] || exit 1
+    if [ -e "$d/.issues-disabled" ]; then printf 'false\n'; else printf 'true\n'; fi
+    ;;
+  label:list:name)
+    [ -d "$d" ] || exit 1
+    [ -f "$d/.labels" ] || exit 0
+    grep -F -- "$search" "$d/.labels" || true
+    ;;
+  *) printf 'mock gh: unsupported query %s %s %s\n' "$sub" "$verb" "$json" >&2; exit 2 ;;
 esac
 exit 0
 SH
@@ -105,6 +156,8 @@ SH
 # Mock gh-axi: only the three writes fm-dispatch-pickup.sh makes are accepted.
 # FM_MOCK_GHAXI_NOOP makes every write exit 0 while changing nothing, which is
 # how a forge CLI that reports success without applying the change is simulated.
+# FM_MOCK_GHAXI_NOOP_COMMENT is the same fixture narrowed to the comment write,
+# so a case can reach the comment step with the label writes still working.
 set -u
 [ "${FM_MOCK_GHAXI_FAIL:-0}" = 1 ] && exit 1
 sub=${1:-}; shift || true
@@ -127,6 +180,12 @@ f="$FM_MOCK_GH_DIR/${repo%%/*}--${repo#*/}/$number.issue"
 case "$verb" in
   edit)
     [ "${FM_MOCK_GHAXI_NOOP:-0}" = 1 ] && exit 0
+    # Real gh resolves a label name to an id and fails the whole edit when the
+    # repository does not carry that label, so an unknown label is an error
+    # here too rather than a label this mock invents.
+    for l in ${add[@]+"${add[@]}"}; do
+      [ -f "${f%/*}/.labels" ] && grep -q -x -F "$l" "${f%/*}/.labels" || exit 1
+    done
     for l in ${remove[@]+"${remove[@]}"}; do
       grep -v -x -F "label=$l" "$f" > "$f.tmp" && mv "$f.tmp" "$f"
     done
@@ -138,8 +197,12 @@ case "$verb" in
     [ "${FM_MOCK_GHAXI_FAIL_COMMENT:-0}" = 1 ] && exit 1
     [ -f "$body_file" ] || exit 1
     [ "${FM_MOCK_GHAXI_NOOP:-0}" = 1 ] && exit 0
-    tr '\n' ' ' < "$body_file" >> "${f%.issue}.comments"
-    printf '\n' >> "${f%.issue}.comments"
+    [ "${FM_MOCK_GHAXI_NOOP_COMMENT:-0}" = 1 ] && exit 0
+    d="${f%.issue}.comments.d"
+    mkdir -p "$d"
+    n=0
+    for c in "$d"/*.body; do [ -e "$c" ] || continue; n=$((n + 1)); done
+    cp "$body_file" "$d/$(printf '%03d' "$((n + 1))").body"
     ;;
   close)
     [ "$reason" = completed ] || exit 1
@@ -157,15 +220,30 @@ SH
 
 REPO_SLUG=fmtest-owner/fmtest-repo
 
+# The claim comment a pickup on the OTHER machine leaves behind, in the shape
+# this machine's own pickup writes it. Its backticks are literal markdown in a
+# comment body, never a substitution.
+# shellcheck disable=SC2016
+OTHER_MACHINE_CLAIM='Picked up by firstmate as task `fm-elsewhere` on machine `other-machine`.'
+
 # make_home <name>: a home with state/, projects/, a mock forge, and one clone
 # whose origin points at REPO_SLUG. Echoes the home path.
 make_home() {
   local name=$1 home
   home="$TMP_ROOT/$name"
   mkdir -p "$home/state" "$home/projects" "$home/mock/${REPO_SLUG%%/*}--${REPO_SLUG#*/}"
+  # The ordinary repository: it has the four fm labels plus one unrelated one,
+  # so a write-side label is only missing in the case that stages it missing.
+  printf '%s\n' fm:dispatched fm:building fm:built fm:blocked bug \
+    > "$home/mock/${REPO_SLUG%%/*}--${REPO_SLUG#*/}/.labels"
   make_mocks "$home/bin"
   add_clone "$home" fmtest-repo "https://github.com/$REPO_SLUG.git"
   printf '%s\n' "$home"
+}
+
+# repo_dir <home>: the mock forge directory for REPO_SLUG in that home.
+repo_dir() {
+  printf '%s/mock/%s--%s\n' "$1" "${REPO_SLUG%%/*}" "${REPO_SLUG#*/}"
 }
 
 # add_clone <home> <dir-name> <origin-url>: a git repository under the home's
@@ -180,7 +258,7 @@ add_clone() {
 seed_issue() {
   local home=$1 number=$2 title=$3 dir f label
   shift 3
-  dir="$home/mock/${REPO_SLUG%%/*}--${REPO_SLUG#*/}"
+  dir=$(repo_dir "$home")
   mkdir -p "$dir"
   f="$dir/$number.issue"
   {
@@ -188,15 +266,32 @@ seed_issue() {
     printf 'title=%s\n' "$title"
     for label in "$@"; do printf 'label=%s\n' "$label"; done
   } > "$f"
-  : > "${f%.issue}.comments"
+  rm -rf -- "${f%.issue}.comments.d"
+}
+
+# seed_comment <home> <number> <body>: a comment already on the issue, the way a
+# pickup on another machine would have left one.
+seed_comment() {
+  local home=$1 number=$2 body=$3 d c n=0
+  d="$(repo_dir "$home")/$number.comments.d"
+  mkdir -p "$d"
+  for c in "$d"/*.body; do [ -e "$c" ] || continue; n=$((n + 1)); done
+  printf '%s\n' "$body" > "$d/$(printf '%03d' "$((n + 1))").body"
 }
 
 issue_field() { # <home> <number> <key>
-  sed -n "s/^$3=//p" "$1/mock/${REPO_SLUG%%/*}--${REPO_SLUG#*/}/$2.issue"
+  sed -n "s/^$3=//p" "$(repo_dir "$1")/$2.issue"
 }
 
-issue_comments() { # <home> <number>
-  cat "$1/mock/${REPO_SLUG%%/*}--${REPO_SLUG#*/}/$2.comments" 2>/dev/null
+issue_comments() { # <home> <number>; one flattened line per comment
+  local d c
+  d="$(repo_dir "$1")/$2.comments.d"
+  [ -d "$d" ] || return 0
+  for c in "$d"/*.body; do
+    [ -e "$c" ] || continue
+    tr '\n' ' ' < "$c"
+    printf '\n'
+  done
 }
 
 issue_url_for() { # <number>
@@ -290,6 +385,63 @@ test_a_claim_that_never_became_a_task_is_reported_not_offered_again() {
   assert_contains "$report" "marked building with no task $REPO_SLUG#11" "an issue claimed but never spawned was not reported as stuck"
   assert_not_contains "$report" "ready to pick up" "an issue already marked building was offered for pickup again"
   pass "a claim that never became a task is reported as stuck, not offered for pickup again"
+}
+
+test_only_this_machines_stuck_claims_are_reported() {
+  local home out report
+  # Both machines poll the same repositories, so "marked building with no task
+  # record HERE" covers two opposite situations: this home crashed between the
+  # relabel and the spawn, or the other machine is building it right now. The
+  # skill's remedy for a stuck issue is to spawn against its spec, so reporting
+  # the other machine's build would produce exactly the duplicate build this
+  # transport exists to prevent.
+  home=$(make_home whose-claim)
+
+  # Another machine's claim: silent.
+  seed_issue "$home" 12 'Built on the other machine' fm:building
+  seed_comment "$home" 12 "$OTHER_MACHINE_CLAIM"
+
+  # This machine's own claim that never became a task: the real crash window,
+  # still reported. The claim runs for real, so the marker under test is the
+  # one this machine actually writes rather than one the fixture invented.
+  seed_issue "$home" 13 'Claimed here and then crashed' fm:dispatched
+  out="$home/out.txt"
+  run_pickup "$home" "$out" claim fm-crashed "$(issue_url_for 13)"
+  expect_code 0 "$RUN_STATUS" "claim exit"
+
+  # No claim comment at all, from a hand-labelled issue: also still reported.
+  seed_issue "$home" 14 'Labelled by hand, never claimed' fm:building
+
+  run_pickup "$home" "$out" check
+  expect_code 0 "$RUN_STATUS" "check exit"
+  report=$(cat "$out")
+  assert_not_contains "$report" "$REPO_SLUG#12" "an issue another machine is building was reported as stuck, which sends an operator to build it twice"
+  assert_contains "$report" "marked building with no task $REPO_SLUG#13" "this machine's own crashed claim went unreported"
+  assert_contains "$report" "marked building with no task $REPO_SLUG#14" "an issue with no claim comment at all went unreported"
+  pass "only this machine's stuck claims are reported, never the other machine's build"
+}
+
+test_a_truncated_building_list_says_it_was_cut() {
+  local home out report n
+  # The same invariant the dispatched pass already holds: a sweep that hits the
+  # query cap says so rather than presenting a truncated list as the whole of
+  # what is stuck. Every issue here is claimed by another machine, so the cut
+  # notice is the only finding and cannot be crowded out of the line cap.
+  home=$(make_home building-cut)
+  n=1
+  while [ "$n" -le 50 ]; do
+    seed_issue "$home" "$((200 + n))" "Elsewhere $n" fm:building
+    seed_comment "$home" "$((200 + n))" "$OTHER_MACHINE_CLAIM"
+    n=$((n + 1))
+  done
+  out="$home/out.txt"
+  run_pickup "$home" "$out" check
+  expect_code 0 "$RUN_STATUS" "check exit"
+  report=$(cat "$out")
+  assert_contains "$report" "$REPO_SLUG has at least 50 issues marked building, so this list is cut" \
+    "a stuck-issue list that hit the query cap was presented as the complete set"
+  assert_not_contains "$report" 'marked building with no task' "issues another machine is building were reported as stuck"
+  pass "a stuck-issue list that hits the query cap says it was cut"
 }
 
 test_two_concurrent_pickups_of_one_issue_produce_one_claim() {
@@ -466,6 +618,72 @@ test_a_claim_whose_comment_fails_says_the_relabel_landed() {
   pass "a claim whose comment fails reports that the relabel already landed"
 }
 
+test_a_claim_comment_that_does_not_post_is_refused() {
+  local home out
+  # The comment is the durable record the other machine reads, so a forge CLI
+  # that exits 0 without posting must not pass as a claim. The relabel still
+  # landed, and the refusal has to say so rather than reading as "nothing
+  # happened", which would invite a second claim.
+  home=$(make_home noop-claim-comment)
+  seed_issue "$home" 43 'Claim comment vanishes' fm:dispatched
+  out="$home/out.txt"
+  RUN_STATUS=0
+  env FM_HOME="$home" FM_MOCK_GH_DIR="$home/mock" PATH="$home/bin:$PATH" \
+    FM_MOCK_GHAXI_NOOP_COMMENT=1 FM_DISPATCH_PICKUP_INTERVAL=0 \
+    "$PICKUP" claim fm-vanish "$(issue_url_for 43)" >"$out" 2>&1 || RUN_STATUS=$?
+  [ "$RUN_STATUS" -ne 0 ] || fail "claim reported success after a comment that never posted"
+  assert_contains "$(cat "$out")" 'may not have posted' "the refusal does not say the comment may not have posted"
+  assert_contains "$(cat "$out")" 'run bind' "the refusal does not tell the caller how to recover"
+  assert_contains "$(issue_field "$home" 43 label)" 'fm:building' "the relabel did not land before the comment was attempted"
+  [ -z "$(issue_comments "$home" 43)" ] || fail "the issue carries a comment the write was supposed to have dropped"
+  pass "a claim comment that reports success without posting is refused, not trusted"
+}
+
+test_an_outcome_comment_that_does_not_post_never_closes_the_issue() {
+  local home out url labels
+  # The worst shape of this bug: a closed issue with no outcome on it. The
+  # captain would never see the issue again and the record of what happened
+  # would exist nowhere, so the comment is confirmed before the label and the
+  # close, not after.
+  home=$(make_home noop-report-comment)
+  seed_issue "$home" 44 'Outcome comment vanishes' fm:building
+  url=$(issue_url_for 44)
+  write_task "$home" fm-silent "$url"
+  out="$home/out.txt"
+  RUN_STATUS=0
+  env FM_HOME="$home" FM_MOCK_GH_DIR="$home/mock" PATH="$home/bin:$PATH" \
+    FM_MOCK_GHAXI_NOOP_COMMENT=1 FM_DISPATCH_PICKUP_INTERVAL=0 \
+    "$PICKUP" report fm-silent --built --message 'Landed as https://github.com/o/r/pull/9' \
+    >"$out" 2>&1 || RUN_STATUS=$?
+  [ "$RUN_STATUS" -ne 0 ] || fail "a report reported success after an outcome comment that never posted"
+  assert_contains "$(cat "$out")" 'may not have posted' "the refusal does not say the comment may not have posted"
+  [ "$(issue_field "$home" 44 state)" = OPEN ] || fail "the issue was closed even though its outcome comment never posted"
+  labels=$(issue_field "$home" 44 label)
+  assert_not_contains "$labels" 'fm:built' "the issue was labelled fm:built even though its outcome comment never posted"
+  assert_contains "$labels" 'fm:building' "the issue left fm:building even though nothing was reported on it"
+  pass "an outcome comment that never posts stops the report before the label and the close"
+}
+
+test_a_missing_write_label_is_named_by_the_refusal() {
+  local home out
+  # A hand-created issue can carry fm:dispatched on a repository where nobody
+  # created the three write-side labels. GitHub resolves a label name to an id
+  # and fails the whole edit, and every retry fails the same way, so the
+  # refusal has to name the prerequisite instead of reading like an outage.
+  home=$(make_home missing-label)
+  seed_issue "$home" 45 'Nowhere to move it to' fm:dispatched
+  printf '%s\n' fm:dispatched > "$(repo_dir "$home")/.labels"
+  out="$home/out.txt"
+  run_pickup "$home" "$out" claim fm-nolabel "$(issue_url_for 45)"
+  [ "$RUN_STATUS" -ne 0 ] || fail "claim succeeded against a repository with no fm:building label"
+  assert_contains "$(cat "$out")" "the label fm:building does not exist in $REPO_SLUG" \
+    "the refusal does not name the missing label and the repository it is missing from"
+  assert_contains "$(cat "$out")" 'must be created in that repository first' \
+    "the refusal does not say the label has to be created there"
+  assert_contains "$(issue_field "$home" 45 label)" 'fm:dispatched' "the refused claim still relabelled the issue"
+  pass "a relabel that fails on a missing label names the label and the repository"
+}
+
 # --- reading, and failing to read -------------------------------------------
 
 test_unreachable_github_is_reported_not_an_empty_list() {
@@ -506,6 +724,33 @@ test_missing_gh_is_reported_not_silence() {
   expect_code 0 "$RUN_STATUS" "check exit"
   assert_contains "$(cat "$out")" 'gh is not on PATH' "a missing forge CLI read as nothing dispatched"
   pass "a missing forge CLI is reported, not read as nothing dispatched"
+}
+
+test_issues_disabled_is_silent_but_a_failed_list_stays_loud() {
+  local home out
+  # A repository with GitHub Issues turned off cannot host a dispatched issue
+  # at all. That is a registered posture like a clone with no GitHub origin, so
+  # it must be silent rather than a false "unreachable" finding re-nagged
+  # forever. The second half is what keeps that from swallowing a real outage:
+  # a listing that fails while the repository itself still answers is loud.
+  home=$(make_home issues-off)
+  : > "$(repo_dir "$home")/.issues-disabled"
+  out="$home/out.txt"
+  run_pickup "$home" "$out" check
+  expect_code 0 "$RUN_STATUS" "check exit"
+  [ ! -s "$out" ] || fail "a repository with Issues turned off produced a finding: $(cat "$out")"
+
+  home=$(make_home list-fails)
+  seed_issue "$home" 55 'Waiting behind an outage' fm:dispatched
+  out="$home/out.txt"
+  RUN_STATUS=0
+  env FM_HOME="$home" FM_MOCK_GH_DIR="$home/mock" PATH="$home/bin:$PATH" \
+    FM_MOCK_GH_FAIL_LIST=1 FM_CHECK_TIMEOUT=30 FM_DISPATCH_PICKUP_INTERVAL=0 \
+    "$PICKUP" check >"$out" 2>&1 || RUN_STATUS=$?
+  expect_code 0 "$RUN_STATUS" "check exit"
+  assert_contains "$(cat "$out")" "could not read $REPO_SLUG" \
+    "a listing that failed on a repository that still answers was swallowed as a posture"
+  pass "a repository with Issues turned off is silent, and a failed listing is still loud"
 }
 
 test_nothing_dispatched_is_silent() {
@@ -708,6 +953,8 @@ test_armed_check_wakes_the_watcher_with_the_dispatched_report() {
 
 test_a_second_poll_over_the_same_issue_creates_nothing
 test_a_claim_that_never_became_a_task_is_reported_not_offered_again
+test_only_this_machines_stuck_claims_are_reported
+test_a_truncated_building_list_says_it_was_cut
 test_two_concurrent_pickups_of_one_issue_produce_one_claim
 test_claim_relabels_before_it_returns_and_names_the_task
 test_built_outcome_comments_labels_and_closes
@@ -718,7 +965,11 @@ test_claim_refuses_an_issue_that_is_not_dispatched
 test_claim_refuses_a_task_id_that_already_exists
 test_a_write_that_does_not_land_is_refused
 test_a_claim_whose_comment_fails_says_the_relabel_landed
+test_a_claim_comment_that_does_not_post_is_refused
+test_an_outcome_comment_that_does_not_post_never_closes_the_issue
+test_a_missing_write_label_is_named_by_the_refusal
 test_unreachable_github_is_reported_not_an_empty_list
+test_issues_disabled_is_silent_but_a_failed_list_stays_loud
 test_missing_gh_is_reported_not_silence
 test_nothing_dispatched_is_silent
 test_a_clone_without_a_github_origin_is_skipped_silently

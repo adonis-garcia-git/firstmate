@@ -437,12 +437,16 @@ Every state is one label plus the issue's own open or closed:
 
 [`bin/fm-dispatch-pickup.sh`](../bin/fm-dispatch-pickup.sh) owns this home's side of that exchange, and its `--help` owns the exact commands, flags, and bounds.
 It polls every GitHub-backed clone under `projects/` for open issues carrying those labels, and it reports rather than acting on its own.
-A clone with no GitHub origin, such as a `local-only` project, is skipped in silence; a repository that cannot be read is reported by name, because "nothing was dispatched" and "I could not look" must never render the same.
+A clone with no GitHub origin, such as a `local-only` project, is skipped in silence, and so is a repository whose GitHub Issues are turned off, because both are registered postures rather than faults.
+A repository that cannot be read is reported by name, because "nothing was dispatched" and "I could not look" must never render the same.
+Issues being off is told apart from an outage by asking GitHub for the repository's `hasIssuesEnabled` field rather than by matching an error message, so only a definite "off" is silent and anything unreadable stays loud.
 
 One issue produces at most one build.
 The task record carries the issue URL as `issue=<url>`, the same shape as the existing `pr=` field, and picking up refuses when any task record in this home already claims that issue.
 The relabel to `fm:building` happens before the worker is spawned, never after, so an interruption in that window leaves an issue visibly stuck with no task - which the poll reports by name - rather than an issue still marked `fm:dispatched` that the next poll builds a second time.
+Both machines poll the same repositories, so the claim comment names the machine that claimed the issue and the poll reports a stuck issue only when the claim is this machine's or there is no claim at all; an issue the other machine is building is left alone rather than offered up for a second build.
 Every relabel, comment, and close is read back and asserted, so a forge CLI that reports success without applying the change is refused rather than trusted.
+A comment is confirmed by requiring the newest comment to have changed and to carry the body that was posted, and it is confirmed before the label change and the close, so an outcome never closes an issue whose comment is missing.
 Reads use `gh` with machine-readable output because the result decides whether a worker is spawned; writes use `gh-axi`, matching [`bin/fm-pr-merge.sh`](../bin/fm-pr-merge.sh).
 
 Arm the check once per home with `bin/fm-dispatch-pickup.sh arm`.
@@ -451,7 +455,10 @@ That writes `state/dispatch-pickup.check.sh` and binds its bytes with `bin/fm-ch
 The check prints nothing when nothing is waiting, and `state/.dispatch-pickup` records the findings the last report was made from so one waiting issue is reported once instead of on every poll.
 A changed finding set is always reported again, and an unchanged one is reported again once the re-nag interval has passed, so work nobody picked up cannot go quiet forever.
 
-The labels are ordinary repository labels and this home never creates them; a repository that does not have them yet simply reports nothing until an issue carries one.
+The labels are ordinary repository labels and this home never creates them; on the read path a repository that does not have them yet simply reports nothing until an issue carries one.
+The write path needs them to exist, because GitHub resolves a label name to an id and fails the whole edit on a name it does not know: picking work up adds `fm:building`, and reporting an outcome adds `fm:built` or `fm:blocked`.
+So create those three once per repository this home is expected to build for, for example `gh label create fm:building -R <owner>/<repo>` and the same for `fm:built` and `fm:blocked`.
+A relabel that fails because one of them is missing names that label and says it has to be created in that repository first, rather than reading like a forge or network fault.
 Nothing here creates an issue, writes into a project working tree, merges anything, or closes an issue on failure.
 
 ## Relay (.env)

@@ -41,6 +41,7 @@ Never reorder these, and never hand-edit the labels to "clean up" a half-finishe
 3. Choose the task id, then `claim` it.
    A refusal here is the idempotency guard doing its job: another task already holds that issue, the issue is not waiting to be picked up, or the id is already in use.
    Investigate the refusal; never work around it.
+   The one refusal that is a setup problem rather than a guard is a missing label, which names the label and the repository: create it there, then claim again.
 4. Write the brief and spawn the worker exactly as for any other task.
 5. `bind` the spawned task to the issue.
    This is what makes a later poll, a restart, or a second machine refuse to build it again.
@@ -49,10 +50,15 @@ Never reorder these, and never hand-edit the labels to "clean up" a half-finishe
 ## An issue marked building with no task
 
 The poll reports these because nothing else will: the poll only offers `fm:dispatched` issues, so a half-finished claim never comes back on its own.
-Reconcile it in whichever direction the evidence supports.
+It reports only a claim that belongs to this machine, or an issue carrying no claim comment at all, so an issue the other machine is building is left alone rather than reported here.
+Start by reading the issue's claim comment, because everything below turns on whose claim it is: `gh-axi issue view <n> -R <owner>/<repo> --full`.
+Then reconcile it in whichever direction the evidence supports.
 
+- The claim comment names another machine: leave it alone, and do not relabel, comment, or spawn.
+  That machine is building it and will report the outcome into this same issue.
+  Spawning here would build one spec twice, which is the single outcome this whole transport exists to prevent.
 - The worker exists but was never bound: `bind` it now.
-- No worker exists and the work is still wanted: spawn it against that issue's spec and `bind`.
+- The claim comment names this machine, or there is no claim comment at all, no worker exists, and the work is still wanted: spawn it against that issue's spec and `bind`.
 - The work is not wanted, or cannot proceed: report it blocked with the reason, which leaves it open for the captain.
 
 ## Reporting the outcome
