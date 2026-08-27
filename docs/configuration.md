@@ -444,14 +444,11 @@ Issues being off is told apart from an outage by asking GitHub for the repositor
 One issue produces at most one build.
 The task record carries the issue URL as `issue=<url>`, the same shape as the existing `pr=` field, and picking up refuses when any task record in this home already claims that issue.
 The relabel to `fm:building` happens before the worker is spawned, never after, so an interruption in that window leaves an issue visibly stuck with no task - which the poll reports by name - rather than an issue still marked `fm:dispatched` that the next poll builds a second time.
-Every home polls the same repositories, so the claim comment names the home that claimed the issue and the poll reports a stuck issue only when the claim is this home's or there is no claim at all; an issue another home is building is left alone rather than offered up for a second build.
-It names the home rather than the machine because the task records the claim is weighed against are this home's alone, and two homes can share one host, such as a primary home and a secondmate home covering one project.
-That name is the hostname plus a short random suffix, seeded the first time it is needed and then kept in `state/.dispatch-machine`, so a host that is later renamed still recognizes the claims it posted under its old name instead of going quiet about them, and two homes on one host are two names.
-A home that was armed before the name became home-scoped is re-seeded automatically on its next run, and the record keeps the one name it replaced so claims already posted under that older name are still recognized as this home's.
-The claim comments arrive with the label listing the poll already makes, so telling one home's claim from another's costs no extra request and one busy repository cannot use up the sweep budget that every repository after it needs.
-`bind` is a writer as well as a recorder: it is the documented recovery for a claim whose comment did not land, so an issue it binds that carries no claim comment gets one posted and verified before anything is recorded and before `bind` reports success.
-That closes the only supported route to a `fm:building` issue with no claim comment, which another home would otherwise read as unclaimed and build a second time.
-`bind` also refuses outright when the claim comment names another home, saying which one, because that is a build already in flight and two homes recording one issue would each report an outcome onto it.
+An open `fm:building` issue with no task record in this home is reported as anomalous, unconditionally, and never acted on automatically.
+The poll does not try to work out whose build it is: it reads no comments and distinguishes no machine.
+That has a real cost to be honest about - when two machines poll the same repository, each reports the other's build in progress, on every re-nag, until it closes.
+It is accepted deliberately, because a report can never cause a duplicate build, while every mechanism tried for staying quiet about the other machine's build could instead go silent about an issue that is genuinely stuck, and nothing else in the system surfaces that state.
+`bind` is a recorder and writes nothing to the forge: it records `issue=<url>` after refusing an issue that is not labeled `fm:building` and refusing one another task record already claims.
 Every relabel, comment, and close is read back and asserted, so a forge CLI that reports success without applying the change is refused rather than trusted.
 A comment is confirmed by requiring the newest comment to have changed and to carry the body that was posted, and it is confirmed before the label change and the close, so an outcome never closes an issue whose comment is missing.
 Reads use `gh` with machine-readable output because the result decides whether a worker is spawned; writes use `gh-axi`, matching [`bin/fm-pr-merge.sh`](../bin/fm-pr-merge.sh).

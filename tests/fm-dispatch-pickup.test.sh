@@ -59,17 +59,6 @@ set -u
 [ "${FM_MOCK_GH_FAIL_READ:-0}" = 1 ] && exit 1
 repo_dir() { printf '%s/%s--%s\n' "$FM_MOCK_GH_DIR" "${1%%/*}" "${1#*/}"; }
 labels_of() { sed -n 's/^label=//p' "$1"; }
-# Every comment body on one issue, flattened into the single space-joined line
-# the queries that ask for them produce.
-comments_blob() { # <issue-file>
-  local d="${1%.issue}.comments.d" c out='' one
-  for c in "$d"/*.body; do
-    [ -e "$c" ] || continue
-    one=$(tr '\n\r\t' '   ' < "$c")
-    if [ -z "$out" ]; then out=$one; else out="$out $one"; fi
-  done
-  printf '%s' "$out"
-}
 sub=${1:-}; shift || true
 case "$sub" in
   issue|repo|label) ;;
@@ -93,7 +82,7 @@ while [ "$#" -gt 0 ]; do
 done
 d=$(repo_dir "$repo")
 case "$sub:$verb:$json" in
-  issue:list:number,title|issue:list:number,title,comments)
+  issue:list:number,title)
     # A repository this mock forge does not host is an error, as it is for real
     # gh. Answering "no issues" instead would let a build that polled the wrong
     # project - or a project that is not on GitHub at all - look clean.
@@ -113,11 +102,7 @@ case "$sub:$verb:$json" in
       # title's whitespace reaches the script and its second line of defence is
       # exercised rather than assumed.
       t=$(sed -n 's/^title=//p' "$f" | head -n 1)
-      if [ "$json" = number,title ]; then
-        printf '%s\t%s\n' "$n" "$t"
-      else
-        printf '%s\t%s\t%s\n' "$n" "$t" "$(comments_blob "$f")"
-      fi
+      printf '%s\t%s\n' "$n" "$t"
     done
     ;;
   issue:view:state,labels)
@@ -144,12 +129,6 @@ case "$sub:$verb:$json" in
       *'[-1].body'*)
         if [ -n "$newest" ]; then cat "$newest"; else printf 'null\n'; fi
         ;;
-      *'join('*)
-        # The query joins every body into one flattened line, so a comment's own
-        # newlines can never be read as a comment boundary.
-        comments_blob "$f"
-        printf '\n'
-        ;;
       *) printf 'mock gh: unsupported comments query %s\n' "$jq" >&2; exit 2 ;;
     esac
     ;;
@@ -174,7 +153,10 @@ SH
 # how a forge CLI that reports success without applying the change is simulated.
 # FM_MOCK_GHAXI_NOOP_COMMENT is the same fixture narrowed to the comment write,
 # so a case can reach the comment step with the label writes still working.
+# FM_MOCK_GHAXI_CALLS names a file this appends one line to per invocation, so a
+# case can assert that a command performed no forge write at all.
 set -u
+[ -z "${FM_MOCK_GHAXI_CALLS:-}" ] || printf '%s\n' "$*" >> "$FM_MOCK_GHAXI_CALLS"
 [ "${FM_MOCK_GHAXI_FAIL:-0}" = 1 ] && exit 1
 sub=${1:-}; shift || true
 [ "$sub" = issue ] || { printf 'mock gh-axi: unsupported command %s\n' "$sub" >&2; exit 2; }
@@ -229,16 +211,7 @@ case "$verb" in
 esac
 exit 0
 SH
-  # The claim marker is seeded from the hostname, so the hostname is a fixture
-  # here rather than whatever this host happens to be called: a case can stage a
-  # rename, and no case depends on the name of the machine running the suite.
-  cat > "$bin/hostname" <<'SH'
-#!/usr/bin/env bash
-set -u
-printf '%s\n' "${FM_MOCK_HOSTNAME:-mock-host}"
-SH
-
-  chmod 0755 "$bin/gh" "$bin/gh-axi" "$bin/hostname"
+  chmod 0755 "$bin/gh" "$bin/gh-axi"
 }
 
 # --- fixtures ---------------------------------------------------------------
@@ -248,11 +221,12 @@ REPO_SLUG=fmtest-owner/fmtest-repo
 # issues cost the repositories swept after it.
 OTHER_SLUG=fmtest-owner/fmtest-other
 
-# The claim comment a pickup in ANOTHER home leaves behind, in the shape this
-# home's own pickup writes it. Its backticks are literal markdown in a comment
-# body, never a substitution.
+# A comment claiming the issue for somewhere else, in the shape an earlier design
+# used as an ownership marker. The poll reads no comments at all now, so this is
+# here to prove that: an issue carrying it is still reported. Its backticks are
+# literal markdown in a comment body, never a substitution.
 # shellcheck disable=SC2016
-OTHER_HOME_CLAIM='Picked up by firstmate as task `fm-elsewhere` on machine `other-machine`.'
+FOREIGN_CLAIM_TEXT='Picked up by firstmate as task `fm-elsewhere` on machine `other-machine`.'
 
 # make_home <name>: a home with state/, projects/, a mock forge, and one clone
 # whose origin points at REPO_SLUG. Echoes the home path.
@@ -382,24 +356,6 @@ run_pickup() {
     "$PICKUP" "$@" >"$out" 2>&1 || RUN_STATUS=$?
 }
 
-# run_home <home> <forge-home> <hostname> <out> -- <args...>: the same, for the
-# cases about more than one home. The home that owns the state and the home whose
-# mock forge is read are separate arguments, so two homes can poll one forge, and
-# the hostname is explicit, so two homes can share a host or sit on different
-# ones. Sets RUN_STATUS.
-run_home() {
-  local home=$1 forge=$2 host=$3 out=$4
-  shift 4
-  RUN_STATUS=0
-  env FM_HOME="$home" \
-    FM_MOCK_GH_DIR="$forge/mock" \
-    PATH="$home/bin:$PATH" \
-    FM_MOCK_HOSTNAME="$host" \
-    FM_CHECK_TIMEOUT=30 \
-    FM_DISPATCH_PICKUP_INTERVAL=0 \
-    "$PICKUP" "$@" >"$out" 2>&1 || RUN_STATUS=$?
-}
-
 # --- the two properties this script exists for ------------------------------
 
 test_a_second_poll_over_the_same_issue_creates_nothing() {
@@ -460,197 +416,60 @@ test_a_claim_that_never_became_a_task_is_reported_not_offered_again() {
   pass "a claim that never became a task is reported as stuck, not offered for pickup again"
 }
 
-test_only_this_machines_stuck_claims_are_reported() {
+test_every_unclaimed_building_issue_is_reported_as_anomalous() {
   local home out report
-  # Both machines poll the same repositories, so "marked building with no task
-  # record HERE" covers two opposite situations: this home crashed between the
-  # relabel and the spawn, or the other machine is building it right now. The
-  # skill's remedy for a stuck issue is to spawn against its spec, so reporting
-  # the other machine's build would produce exactly the duplicate build this
-  # transport exists to prevent.
-  home=$(make_home whose-claim)
+  # The poll does not ask whose build it is. It reads no comments and
+  # distinguishes no machine: an open fm:building issue with no task record HERE
+  # is anomalous and gets named, whatever is written on it. That is the whole
+  # policy, and the three shapes below are the ones a marker-matching design
+  # would have treated differently from each other.
+  home=$(make_home anomalous)
 
-  # Another machine's claim: silent.
-  seed_issue "$home" 12 'Built on the other machine' fm:building
-  seed_comment "$home" 12 "$OTHER_HOME_CLAIM"
+  # A comment that claims the issue for somewhere else. An ownership marker read
+  # from comment text is arbitrary third-party content, so it buys silence about
+  # a genuinely stuck issue and nothing else; it is ignored.
+  seed_issue "$home" 12 'Carries a foreign claim comment' fm:building
+  seed_comment "$home" 12 "$FOREIGN_CLAIM_TEXT"
 
-  # This machine's own claim that never became a task: the real crash window,
-  # still reported. The claim runs for real, so the marker under test is the
-  # one this machine actually writes rather than one the fixture invented.
+  # This home's own claim that never became a task: the real crash window. The
+  # claim runs for real rather than being staged, so the comment under test is
+  # the one this home actually writes.
   seed_issue "$home" 13 'Claimed here and then crashed' fm:dispatched
   out="$home/out.txt"
   run_pickup "$home" "$out" claim fm-crashed "$(issue_url_for 13)"
   expect_code 0 "$RUN_STATUS" "claim exit"
 
-  # No claim comment at all, from a hand-labelled issue: also still reported.
+  # And a hand-labelled issue carrying no comments at all.
   seed_issue "$home" 14 'Labelled by hand, never claimed' fm:building
 
   run_pickup "$home" "$out" check
   expect_code 0 "$RUN_STATUS" "check exit"
   report=$(cat "$out")
-  assert_not_contains "$report" "$REPO_SLUG#12" "an issue another machine is building was reported as stuck, which sends an operator to build it twice"
-  assert_contains "$report" "marked building with no task $REPO_SLUG#13" "this machine's own crashed claim went unreported"
-  assert_contains "$report" "marked building with no task $REPO_SLUG#14" "an issue with no claim comment at all went unreported"
-  pass "only this machine's stuck claims are reported, never the other machine's build"
-}
-
-test_a_hostname_change_does_not_silence_this_machines_own_claim() {
-  local home out url report
-  # The claim marker identifies the machine, and a hostname is not a stable
-  # identity: an unconfigured Mac takes its name from DHCP or Bonjour, and a
-  # collision renames it. If the marker were read live, this home would come
-  # back under its new name, fail to recognize the claim it posted under the old
-  # one, and treat its OWN crashed claim as the other machine's build - silently
-  # and permanently, since the poll only offers dispatched issues.
-  home=$(make_home renamed-machine)
-  seed_issue "$home" 15 'Claimed before the rename' fm:dispatched
-  url=$(issue_url_for 15)
-  out="$home/out.txt"
-
-  RUN_STATUS=0
-  env FM_HOME="$home" FM_MOCK_GH_DIR="$home/mock" PATH="$home/bin:$PATH" \
-    FM_MOCK_HOSTNAME=studio FM_DISPATCH_PICKUP_INTERVAL=0 \
-    "$PICKUP" claim fm-renamed "$url" >"$out" 2>&1 || RUN_STATUS=$?
-  expect_code 0 "$RUN_STATUS" "claim exit"
-  # shellcheck disable=SC2016  # The backticks are literal markdown in a comment body.
-  assert_contains "$(issue_comments "$home" 15)" 'on machine `studio-' "the claim comment does not name the host the claim was made from"
-
-  # The spawn never happened, so this is the crash window. The machine is then
-  # renamed under it.
-  RUN_STATUS=0
-  env FM_HOME="$home" FM_MOCK_GH_DIR="$home/mock" PATH="$home/bin:$PATH" \
-    FM_MOCK_HOSTNAME=studio-2 FM_CHECK_TIMEOUT=30 FM_DISPATCH_PICKUP_INTERVAL=0 \
-    "$PICKUP" check >"$out" 2>&1 || RUN_STATUS=$?
-  expect_code 0 "$RUN_STATUS" "check exit"
-  report=$(cat "$out")
-  assert_contains "$report" "marked building with no task $REPO_SLUG#15" \
-    "a renamed machine stopped recognizing its own crashed claim and went silent about it"
-  pass "a hostname change does not silence this machine's own stuck claim"
-}
-
-test_two_homes_on_one_host_do_not_read_each_other_as_stuck() {
-  local primary second out url report
-  # The claim marker exists to answer "is this stuck issue MY crashed claim or
-  # somebody's live build", and the record it is weighed against is one home's
-  # state directory. Two firstmate homes can share one host - a primary and a
-  # secondmate home over the same project - so a marker naming only the machine
-  # makes each home read the other's live build as its own crashed claim, and
-  # the skill then sends an operator to spawn the duplicate build. Both homes
-  # here run on the same hostname and poll the same forge.
-  primary=$(make_home one-host-primary)
-  second=$(make_home one-host-second)
-  seed_issue "$primary" 17 'Live build in the primary home' fm:dispatched
-  seed_issue "$primary" 18 'Claimed in the primary home, then crashed' fm:dispatched
-  out="$primary/out.txt"
-
-  # #17 is a live build here: claimed, spawned, bound.
-  url=$(issue_url_for 17)
-  run_home "$primary" "$primary" studio "$out" claim fm-live "$url"
-  expect_code 0 "$RUN_STATUS" "primary claim exit"
-  write_task "$primary" fm-live
-  run_home "$primary" "$primary" studio "$out" bind fm-live "$url"
-  expect_code 0 "$RUN_STATUS" "primary bind exit"
-
-  # #18 is the primary home's own crash window: claimed, never spawned.
-  run_home "$primary" "$primary" studio "$out" claim fm-crashed "$(issue_url_for 18)"
-  expect_code 0 "$RUN_STATUS" "primary crashed claim exit"
-
-  # The second home on the same host must own neither of them.
-  out="$second/out.txt"
-  run_home "$second" "$primary" studio "$out" check
-  expect_code 0 "$RUN_STATUS" "second home check exit"
-  report=$(cat "$out")
-  assert_not_contains "$report" "$REPO_SLUG#17" \
-    "a second home on the same host read another home's live build as its own crashed claim"
-  assert_not_contains "$report" "$REPO_SLUG#18" \
-    "a second home on the same host read another home's crashed claim as its own"
-
-  # And the home that made the claim still surfaces its own crash window, which
-  # is the whole reason the detector exists.
-  out="$primary/out.txt"
-  run_home "$primary" "$primary" studio "$out" check
-  expect_code 0 "$RUN_STATUS" "primary check exit"
-  report=$(cat "$out")
-  assert_contains "$report" "marked building with no task $REPO_SLUG#18" \
-    "the home that made the claim stopped recognizing its own crashed claim"
-  assert_not_contains "$report" "$REPO_SLUG#17" "a live build with a task record was reported as stuck"
-  pass "two homes on one host do not read each other's claims as their own"
-}
-
-test_two_homes_on_different_hosts_stay_silent_for_each_other() {
-  local primary second out url report
-  # The other half of the same rule: making the marker home-scoped must not make
-  # every home think every claim is its own. A home on a different host still
-  # leaves another host's build alone.
-  primary=$(make_home two-hosts-primary)
-  second=$(make_home two-hosts-second)
-  seed_issue "$primary" 19 'Live build on the other host' fm:dispatched
-  url=$(issue_url_for 19)
-  out="$primary/out.txt"
-  run_home "$primary" "$primary" studio "$out" claim fm-remote "$url"
-  expect_code 0 "$RUN_STATUS" "primary claim exit"
-  write_task "$primary" fm-remote
-  run_home "$primary" "$primary" studio "$out" bind fm-remote "$url"
-  expect_code 0 "$RUN_STATUS" "primary bind exit"
-
-  out="$second/out.txt"
-  run_home "$second" "$primary" laptop "$out" check
-  expect_code 0 "$RUN_STATUS" "second home check exit"
-  report=$(cat "$out")
-  assert_not_contains "$report" "$REPO_SLUG#19" \
-    "a home on another host reported a build in flight elsewhere as stuck, which is the duplicate build this prevents"
-  pass "two homes on different hosts stay silent about each other's builds"
-}
-
-test_a_claim_made_before_the_home_name_became_home_scoped_is_still_this_homes() {
-  local home out report comments
-  # state/.dispatch-machine is this home's persisted public name. A home armed
-  # before the name became home-scoped holds the older machine-scoped format, so
-  # it is staged here in exactly that format. Re-seeding it must not orphan the
-  # claims already posted under the old name: those would read as another home's
-  # live build and the crash window would go permanently silent.
-  home=$(make_home pre-migration)
-  printf 'studio\n' > "$home/state/.dispatch-machine"
-  seed_issue "$home" 20 'Claimed before the name changed' fm:building
-  # shellcheck disable=SC2016  # The backticks are literal markdown in a comment body.
-  seed_comment "$home" 20 'Picked up by firstmate as task `fm-old` on machine `studio`.'
-  seed_issue "$home" 21 'Dispatched after the name changed' fm:dispatched
-  out="$home/out.txt"
-
-  run_home "$home" "$home" studio "$out" check
-  expect_code 0 "$RUN_STATUS" "check exit"
-  report=$(cat "$out")
-  assert_contains "$report" "marked building with no task $REPO_SLUG#20" \
-    "a claim posted under this home's older name stopped being recognized as its own"
-
-  # And the migration really happened: a claim made now carries the home-scoped
-  # name rather than the bare machine name the old record held.
-  run_home "$home" "$home" studio "$out" claim fm-after "$(issue_url_for 21)"
-  expect_code 0 "$RUN_STATUS" "claim exit"
-  comments=$(issue_comments "$home" 21)
-  # shellcheck disable=SC2016  # The backticks are literal markdown in a comment body.
-  assert_contains "$comments" 'on machine `studio-' "the home was not re-seeded with a home-scoped name"
-  # shellcheck disable=SC2016  # The backticks are literal markdown in a comment body.
-  assert_not_contains "$comments" 'on machine `studio`.' "the home kept posting under the old machine-scoped name"
-  pass "a claim made under this home's older name is still recognized after the re-seed"
+  assert_contains "$report" "marked building with no task $REPO_SLUG#12" \
+    "an issue was silenced by a claim comment naming somewhere else, which is how a stuck issue goes quiet forever"
+  assert_contains "$report" "marked building with no task $REPO_SLUG#13" "this home's own crashed claim went unreported"
+  assert_contains "$report" "marked building with no task $REPO_SLUG#14" "an issue with no comments at all went unreported"
+  pass "every unclaimed building issue is reported as anomalous, whatever it carries"
 }
 
 test_many_building_issues_do_not_starve_the_next_repository() {
   local home out report calls n
-  # The whose-claim question must not cost a forge round trip per issue: the
-  # sweep budget is shared by every repository, so one repository whose issues
-  # the other machine is building would use it up and every repository after it
-  # would never be polled at all - the same repositories, every poll, forever.
-  # The count is the proof; silence alone would also hold while that happens.
+  # The sweep budget is shared by every repository, so a probe that scales with
+  # issue count lets one busy repository use it up and every repository after it
+  # is never polled - the same repositories, every poll, forever. Nothing in the
+  # sweep costs a call per issue now, and the count is what proves it; silence
+  # would also hold while exactly that starvation was happening.
+  # Titles are kept short on purpose: every one of these is now reported, and the
+  # whole report is one capped line, so the second repository's finding has to
+  # still fit inside it for its absence to mean it was never swept.
   home=$(make_home no-starve)
   add_repo "$home" "$OTHER_SLUG" zz-other-repo
   n=1
-  while [ "$n" -le 30 ]; do
-    seed_issue "$home" "$((300 + n))" "Elsewhere $n" fm:building
-    seed_comment "$home" "$((300 + n))" "$OTHER_HOME_CLAIM"
+  while [ "$n" -le 12 ]; do
+    seed_issue "$home" "$((300 + n))" "B$n" fm:building
     n=$((n + 1))
   done
-  seed_issue_in "$home" "$OTHER_SLUG" 9 'Waiting in the second repository' fm:dispatched
+  seed_issue_in "$home" "$OTHER_SLUG" 9 'Waiting' fm:dispatched
 
   out="$home/out.txt"
   calls="$home/calls.txt"
@@ -662,11 +481,11 @@ test_many_building_issues_do_not_starve_the_next_repository() {
   expect_code 0 "$RUN_STATUS" "check exit"
   report=$(cat "$out")
   assert_contains "$report" "ready to pick up $OTHER_SLUG#9" \
-    "a repository full of other-machine builds starved the next repository out of the sweep"
+    "a repository full of building issues starved the next repository out of the sweep"
   n=$(wc -l < "$calls" | tr -d '[:space:]')
   # Two label listings per repository is the whole cost of a clean sweep, so
-  # anything approaching one call per issue is the per-issue probe coming back.
-  [ "$n" -le 8 ] || fail "the sweep made $n forge calls for 30 building issues, so it still probes per issue"
+  # anything approaching one call per issue is a per-issue probe.
+  [ "$n" -le 8 ] || fail "the sweep made $n forge calls for 12 building issues, so it probes per issue"
   pass "many building issues cost no extra forge calls and do not starve the next repository"
 }
 
@@ -674,13 +493,13 @@ test_a_truncated_building_list_says_it_was_cut() {
   local home out report n
   # The same invariant the dispatched pass already holds: a sweep that hits the
   # query cap says so rather than presenting a truncated list as the whole of
-  # what is stuck. Every issue here is claimed by another machine, so the cut
+  # what is stuck. Every issue here has a task record behind it, so the cut
   # notice is the only finding and cannot be crowded out of the line cap.
   home=$(make_home building-cut)
   n=1
   while [ "$n" -le 50 ]; do
-    seed_issue "$home" "$((200 + n))" "Elsewhere $n" fm:building
-    seed_comment "$home" "$((200 + n))" "$OTHER_HOME_CLAIM"
+    seed_issue "$home" "$((200 + n))" "Building here $n" fm:building
+    write_task "$home" "fm-c$n" "$(issue_url_for "$((200 + n))")"
     n=$((n + 1))
   done
   out="$home/out.txt"
@@ -689,7 +508,7 @@ test_a_truncated_building_list_says_it_was_cut() {
   report=$(cat "$out")
   assert_contains "$report" "$REPO_SLUG has at least 50 issues marked building, so this list is cut" \
     "a stuck-issue list that hit the query cap was presented as the complete set"
-  assert_not_contains "$report" 'marked building with no task' "issues another machine is building were reported as stuck"
+  assert_not_contains "$report" 'marked building with no task' "an issue with a task record behind it was reported as anomalous"
   pass "a stuck-issue list that hits the query cap says it was cut"
 }
 
@@ -809,68 +628,28 @@ test_bind_refuses_an_issue_that_was_never_claimed() {
   pass "bind refuses an issue that was never claimed"
 }
 
-test_bind_refuses_an_issue_another_home_claimed() {
-  local home out url
-  # The marker is the only thing that can answer this: a task record in another
-  # home is not visible from here, so the local claimant scan says nothing about
-  # a build somebody else is running. Binding it anyway would put issue=<url> in
-  # two homes, and each would later report an outcome onto one issue - the
-  # second re-commenting and re-labelling what the first already closed.
-  home=$(make_home bind-foreign)
-  seed_issue "$home" 36 'Another home is building this' fm:building
-  seed_comment "$home" 36 "$OTHER_HOME_CLAIM"
-  url=$(issue_url_for 36)
-  write_task "$home" fm-intruder
-  out="$home/out.txt"
-  run_pickup "$home" "$out" bind fm-intruder "$url"
-  [ "$RUN_STATUS" -ne 0 ] || fail "bind adopted an issue another home had already claimed"
-  assert_contains "$(cat "$out")" 'other-machine' "the refusal does not name the home holding the claim"
-  assert_no_grep "issue=$url" "$home/state/fm-intruder.meta" "the refused bind still recorded the issue on the task"
-  pass "bind refuses an issue whose claim comment names another home"
-}
-
-test_bind_restores_a_claim_comment_the_issue_is_missing() {
-  local home out url
-  # bind is the documented recovery for a claim whose comment did not land, so
-  # it is also the one supported route to a fm:building issue carrying no claim
-  # comment. Left unmarked, the other machine's poll reads a live build as
-  # unclaimed and its skill sends an operator to build the same spec again, so
-  # bind posts the marker itself.
-  home=$(make_home bind-marks)
-  seed_issue "$home" 34 'Claimed, but the comment never landed' fm:building
+test_bind_writes_nothing_to_the_forge() {
+  local home out url writes
+  # bind records and nothing else. It once posted a claim comment to keep an
+  # ownership marker on the issue; that whole mechanism is gone, so bind must be
+  # a pure recorder again - safe to re-run, and incapable of touching an issue
+  # another machine is building.
+  home=$(make_home bind-silent)
+  seed_issue "$home" 34 'Claimed, awaiting its record' fm:building
   url=$(issue_url_for 34)
-  write_task "$home" fm-unmarked
+  write_task "$home" fm-recorded
   out="$home/out.txt"
-  run_pickup "$home" "$out" bind fm-unmarked "$url"
-  expect_code 0 "$RUN_STATUS" "bind exit"
-  assert_contains "$(issue_comments "$home" 34)" 'Picked up by firstmate' "bind left the issue with no claim comment on it"
-  assert_contains "$(issue_comments "$home" 34)" 'fm-unmarked' "the restored claim comment does not name the task"
-  assert_grep "issue=$url" "$home/state/fm-unmarked.meta" "bind did not record the issue on the task record"
-
-  # And the marker it posts is the one the sweep matches on, which is the whole
-  # point of posting it: a marker the poll cannot read is not a marker. This
-  # home's own claim is still reported, so the check runs against a task record
-  # that was removed to stage the crash window.
-  rm -f "$home/state/fm-unmarked.meta"
-  run_pickup "$home" "$out" check
-  assert_contains "$(cat "$out")" "marked building with no task $REPO_SLUG#34" \
-    "the marker bind posted is not in the shape the sweep matches on"
-
-  # A marker that cannot be confirmed fails the bind rather than being reported
-  # as bound, for the same reason every other write here is read back.
-  home=$(make_home bind-marks-noop)
-  seed_issue "$home" 35 'Marker will not post' fm:building
-  url=$(issue_url_for 35)
-  write_task "$home" fm-noconfirm
-  out="$home/out.txt"
+  writes="$home/writes.txt"
+  : > "$writes"
   RUN_STATUS=0
   env FM_HOME="$home" FM_MOCK_GH_DIR="$home/mock" PATH="$home/bin:$PATH" \
-    FM_MOCK_GHAXI_NOOP_COMMENT=1 FM_DISPATCH_PICKUP_INTERVAL=0 \
-    "$PICKUP" bind fm-noconfirm "$url" >"$out" 2>&1 || RUN_STATUS=$?
-  [ "$RUN_STATUS" -ne 0 ] || fail "bind reported success after a claim comment that never posted"
-  assert_contains "$(cat "$out")" 'may not have posted' "the refusal does not say the comment may not have posted"
-  assert_no_grep "issue=$url" "$home/state/fm-noconfirm.meta" "the refused bind still recorded the issue on the task"
-  pass "bind posts and verifies a claim comment the issue is missing, or binds nothing"
+    FM_MOCK_GHAXI_CALLS="$writes" FM_DISPATCH_PICKUP_INTERVAL=0 \
+    "$PICKUP" bind fm-recorded "$url" >"$out" 2>&1 || RUN_STATUS=$?
+  expect_code 0 "$RUN_STATUS" "bind exit"
+  assert_grep "issue=$url" "$home/state/fm-recorded.meta" "bind did not record the issue on the task record"
+  [ ! -s "$writes" ] || fail "bind made $(wc -l < "$writes" | tr -d '[:space:]') forge write calls: $(cat "$writes")"
+  [ -z "$(issue_comments "$home" 34)" ] || fail "bind left a comment on the issue: $(issue_comments "$home" 34)"
+  pass "bind records the issue and writes nothing to the forge"
 }
 
 test_claim_refuses_an_issue_that_is_not_dispatched() {
@@ -1266,11 +1045,7 @@ test_armed_check_wakes_the_watcher_with_the_dispatched_report() {
 
 test_a_second_poll_over_the_same_issue_creates_nothing
 test_a_claim_that_never_became_a_task_is_reported_not_offered_again
-test_only_this_machines_stuck_claims_are_reported
-test_a_hostname_change_does_not_silence_this_machines_own_claim
-test_two_homes_on_one_host_do_not_read_each_other_as_stuck
-test_two_homes_on_different_hosts_stay_silent_for_each_other
-test_a_claim_made_before_the_home_name_became_home_scoped_is_still_this_homes
+test_every_unclaimed_building_issue_is_reported_as_anomalous
 test_many_building_issues_do_not_starve_the_next_repository
 test_a_truncated_building_list_says_it_was_cut
 test_two_concurrent_pickups_of_one_issue_produce_one_claim
@@ -1279,8 +1054,7 @@ test_built_outcome_comments_labels_and_closes
 test_blocked_outcome_leaves_the_issue_open
 test_report_refuses_a_task_that_carries_no_issue
 test_bind_refuses_an_issue_that_was_never_claimed
-test_bind_refuses_an_issue_another_home_claimed
-test_bind_restores_a_claim_comment_the_issue_is_missing
+test_bind_writes_nothing_to_the_forge
 test_claim_refuses_an_issue_that_is_not_dispatched
 test_claim_refuses_a_task_id_that_already_exists
 test_a_write_that_does_not_land_is_refused

@@ -7,7 +7,7 @@
 #   fm-dispatch-pickup.sh arm
 #   fm-dispatch-pickup.sh disarm
 #   fm-dispatch-pickup.sh claim <task-id> <issue-url>
-#   fm-dispatch-pickup.sh bind <task-id> <issue-url>   (records, and posts a missing claim comment)
+#   fm-dispatch-pickup.sh bind <task-id> <issue-url>
 #   fm-dispatch-pickup.sh report <task-id> --built|--blocked <message source>
 #   fm-dispatch-pickup.sh --help
 #
@@ -34,26 +34,21 @@
 # next poll picks up and builds a SECOND time. Do not "tidy" this into the more
 # natural-looking order.
 #
-# WHOSE CLAIM IS IT. Every home polls the same repositories, so an issue marked
-# building with no task record HERE is either this home's crashed claim or
-# another home's build in progress. The claim comment names the HOME that
-# claimed it, and `check` reports only claims that are this home's or absent
-# entirely. Reporting another home's claim would send an operator to spawn a
-# second build of work already in flight, which is the one outcome this whole
-# transport exists to prevent.
+# WHOSE CLAIM IS IT: THIS DOES NOT ASK. An open fm:building issue with no task
+# record in THIS home is reported as anomalous, unconditionally. It is either
+# this home's crashed claim between the relabel and the spawn, or a build
+# another machine is running right now, and this script deliberately does not
+# try to tell those apart.
 #
-# The HOME, not the machine, because the record the marker is weighed against is
-# this home's state directory and nothing else. Two homes can share one host - a
-# primary and a secondmate home, over one project - and a marker that named only
-# the box would make each read the other's live build as its own crashed claim.
-# So the name is the hostname plus a short random suffix, seeded once and then
-# persisted in state/.dispatch-machine; see the home identity section below for
-# why neither half can be recomputed and how an older name is carried forward.
-#
-# Every marker on the issue arrives with the label listing the sweep already
-# makes, so telling the two apart costs no extra forge call. A per-issue probe
-# would put one round trip per issue inside the budget the whole sweep shares,
-# and one busy repository would starve every repository swept after it.
+# The honest cost: when two machines poll one repository, each reports the
+# other's in-progress build, on every re-nag, until it closes. That is accepted.
+# The alternative was a marker in the claim comment naming the claiming machine,
+# and it was tried and removed: every version of it turned a wrong match into
+# SILENCE about a genuinely stuck issue, which nothing else in the system
+# surfaces. A report that turns out to be somebody else's live build costs an
+# operator one glance. A silence costs the one recoverable state this transport
+# has. So the report is unconditional, and nothing is ever auto-built from it -
+# see the skill, which routes this state to firstmate and never to a spawn.
 #
 # IDEMPOTENCY. The issue URL is the key, and the task record carries it as
 # `issue=<url>`, the same shape as the existing `pr=` field. `claim` refuses
@@ -61,15 +56,6 @@
 # claim, a re-poll, or a crash-and-retry cannot produce two builds. `bind`
 # refuses the same way, and additionally refuses an issue that is not currently
 # labeled building, so a task cannot be bound to an issue nobody claimed.
-#
-# `bind` WRITES, it does not only record. It is the documented recovery for a
-# claim whose comment did not land, so an issue it binds that carries no claim
-# marker gets one posted and verified before anything is recorded and before
-# `bind` reports success. Otherwise the one supported route to a marker-less
-# building issue would leave another home reading a live build as unclaimed, and
-# the whole whose-claim rule above would have a hole in it. It also refuses
-# outright when the marker names ANOTHER home, because that is somebody else's
-# build in flight and two homes recording one issue means two reports on it.
 #
 # UNREACHABLE DEGRADES LOUDLY. "Nothing was dispatched" and "I could not reach
 # GitHub" never produce the same result: a repository that cannot be read is a
@@ -141,7 +127,6 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 RECORD="$STATE/.dispatch-pickup"
-HOME_ID_RECORD="$STATE/.dispatch-machine"
 CHECK_ID=dispatch-pickup
 CHECK_SHIM="$STATE/$CHECK_ID.check.sh"
 CHECK_TRUST="$STATE/$CHECK_ID.check-trust"
@@ -184,8 +169,8 @@ Usage:
                                            relabel fm:dispatched -> fm:building and comment naming the task.
                                            Run this BEFORE spawning the worker, never after.
   fm-dispatch-pickup.sh bind <task-id> <issue-url>
-                                           record issue=<url> on the spawned task, and post the claim
-                                           comment when the issue carries none. Run this after the spawn.
+                                           record issue=<url> on the spawned task. Writes nothing to
+                                           the forge. Run this after the spawn.
   fm-dispatch-pickup.sh report <task-id> --built   (--message <text> | --message-file <path>)
                                            comment the outcome, label fm:built, close the issue.
   fm-dispatch-pickup.sh report <task-id> --blocked (--message <text> | --message-file <path>)
@@ -288,164 +273,16 @@ record_epoch_now() {
 
 real_epoch() { date +%s; }
 
-# --- home identity ----------------------------------------------------------
+# --- claim comment ----------------------------------------------------------
 
-# The name this HOME signs its claim comments with, and the granularity that
-# matters: the claimant scan the marker exists to disambiguate reads this home's
-# state directory and nothing else, so a marker that named only the machine
-# would make two homes on one host read each other's live builds as this home's
-# own crashed claim - exactly the duplicate build the marker was added to stop.
-#
-# It is the hostname plus a short random suffix. Hostname-derived so a human
-# reading the issue can tell which box it is, suffixed so two homes on that box
-# are two names, and never the FM_HOME path, because the comment is posted into a
-# public issue and an absolute path inside this home is not something to publish.
-# It is reduced to characters that survive a round trip through a comment body,
-# so the marker this writes is the marker the sweep can match.
-#
-# It is seeded ONCE and then persisted, because neither half is stable enough to
-# recompute: a live hostname read changes when an unconfigured Mac takes a new
-# name from DHCP or Bonjour, and the suffix is random. A name that changed under
-# a claim already posted would make this home read its OWN crashed claim as
-# another home's build and go permanently silent about the one state nothing
-# else surfaces.
-HOME_ID_SCHEMA=fm-dispatch-home-v1
-
-home_id_sanitize() { # <raw>
-  printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '-'
-}
-
-home_id_suffix() {
-  local raw=''
-  raw=$(LC_ALL=C tr -dc 'a-z0-9' < /dev/urandom 2>/dev/null | head -c 6)
-  case "$raw" in
-    ??????) printf '%s\n' "$raw"; return 0 ;;
-  esac
-  printf '%04x%02x\n' "$RANDOM" "$((RANDOM % 256))"
-}
-
-home_id_seed() {
-  local name
-  name=$(hostname -s 2>/dev/null || uname -n 2>/dev/null || true)
-  name=${name%%.*}
-  name=$(home_id_sanitize "$name")
-  [ -n "$name" ] || name=unknown
-  printf '%s-%s\n' "$name" "$(home_id_suffix)"
-}
-
-HOME_ID=
-HOME_ID_PREVIOUS=
-
-# The record carries the name in use and the ONE name it replaced. The previous
-# name is what makes the re-seed below safe: issues this home claimed under its
-# older name still carry that older marker, and without keeping it those claims
-# would read as another home's live build and go quiet forever.
-home_id_record_write() {
-  local tmp
-  [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 1
-  tmp=$(mktemp "$HOME_ID_RECORD.XXXXXX" 2>/dev/null) || return 1
-  chmod 0600 "$tmp" 2>/dev/null || { rm -f -- "$tmp"; return 1; }
-  {
-    printf '%s\n' "$HOME_ID_SCHEMA"
-    printf 'id=%s\n' "$HOME_ID"
-    printf 'previous=%s\n' "$HOME_ID_PREVIOUS"
-  } > "$tmp" || { rm -f -- "$tmp"; return 1; }
-  mv -f -- "$tmp" "$HOME_ID_RECORD" || { rm -f -- "$tmp"; return 1; }
-  return 0
-}
-
-# Fills HOME_ID and HOME_ID_PREVIOUS from the record, or reports that one has to
-# be seeded. A record written before this home's name became home-scoped holds a
-# bare machine name and no schema line; that name is carried out as the previous
-# name so the re-seed keeps recognizing the claims posted under it.
-home_id_record_read() {
-  local line first=1 legacy=''
-  HOME_ID=
-  HOME_ID_PREVIOUS=
-  [ -f "$HOME_ID_RECORD" ] && [ ! -L "$HOME_ID_RECORD" ] || return 1
-  while IFS= read -r line || [ -n "$line" ]; do
-    if [ "$first" = 1 ]; then
-      first=0
-      if [ "$line" != "$HOME_ID_SCHEMA" ]; then
-        legacy=$(home_id_sanitize "$line")
-        break
-      fi
-      continue
-    fi
-    case "$line" in
-      id=*) HOME_ID=$(home_id_sanitize "${line#id=}") ;;
-      previous=*) HOME_ID_PREVIOUS=$(home_id_sanitize "${line#previous=}") ;;
-    esac
-  done < "$HOME_ID_RECORD"
-  if [ -n "$legacy" ]; then
-    HOME_ID=
-    HOME_ID_PREVIOUS=$legacy
-    return 1
-  fi
-  [ -n "$HOME_ID" ] || return 1
-  return 0
-}
-
-CLAIM_MARKER_MINE=
-CLAIM_MARKER_PREVIOUS=
-
-# A record that cannot be written is not fatal: the seed is still used for this
-# run, so a home that cannot persist behaves as it did before.
-home_id_ensure() {
-  [ -z "$HOME_ID" ] || return 0
-  if ! home_id_record_read; then
-    HOME_ID=$(home_id_seed)
-    home_id_record_write || true
-  fi
-  CLAIM_MARKER_MINE=$(claim_marker_pattern "$HOME_ID")
-  CLAIM_MARKER_PREVIOUS=
-  [ -z "$HOME_ID_PREVIOUS" ] \
-    || CLAIM_MARKER_PREVIOUS=$(claim_marker_pattern "$HOME_ID_PREVIOUS")
-}
-
+# The claim comment names the task and nothing else. It is a durable note for a
+# human reading the issue, never an ownership signal this script reads back: an
+# earlier design matched a machine marker in it to tell this home's crashed claim
+# from another machine's live build, and that is deliberately gone. See the
+# WHOSE CLAIM IS IT note in the header for what replaced it and why.
 claim_comment_body() { # <task-id>
   # shellcheck disable=SC2016  # The backticks are literal markdown in a comment body.
-  printf 'Picked up by firstmate as task `%s` on machine `%s`.\n' "$1" "$HOME_ID"
-}
-
-# The one shape a claim marker has, in the writer and in every reader. A marker
-# the sweep cannot match is not a marker, so the body written above and the
-# patterns below are kept side by side and must never drift apart. The wording is
-# also a wire format: an issue claimed by a home running an older build of this
-# script carries exactly these words, and a reworded marker would read to this
-# sweep as no marker at all.
-# shellcheck disable=SC2016  # The backticks are literal markdown the marker carries.
-CLAIM_MARKER_ANY='Picked up by firstmate as task `[^`]*` on machine `[^`]*`\.'
-
-claim_marker_pattern() { # <home-id>
-  local escaped
-  escaped=$(printf '%s' "$1" | sed 's/[].[^$\\*]/\\&/g')
-  # shellcheck disable=SC2016  # The backticks are literal markdown the marker carries.
-  printf 'Picked up by firstmate as task `[^`]*` on machine `%s`\\.\n' "$escaped"
-}
-
-claim_marker_present() { # <comment-text>
-  printf '%s\n' "$1" | grep -q -e "$CLAIM_MARKER_ANY"
-}
-
-claim_marker_is_mine() { # <comment-text>
-  if printf '%s\n' "$1" | grep -q -e "$CLAIM_MARKER_MINE"; then
-    return 0
-  fi
-  [ -n "$CLAIM_MARKER_PREVIOUS" ] || return 1
-  printf '%s\n' "$1" | grep -q -e "$CLAIM_MARKER_PREVIOUS"
-}
-
-# The homes named by the claim markers in a comment blob, for saying whose claim
-# a refusal is about rather than only that somebody else holds it.
-claim_marker_holders() { # <comment-text>
-  # shellcheck disable=SC2016  # The backticks are literal markdown the marker carries.
-  printf '%s\n' "$1" \
-    | grep -o -e "$CLAIM_MARKER_ANY" \
-    | sed -n 's/.*on machine `\([^`]*\)`\.$/\1/p' \
-    | sort -u \
-    | tr '\n' ' ' \
-    | sed 's/ *$//'
+  printf 'Picked up by firstmate as task `%s`.\n' "$1"
 }
 
 # --- issue identity ---------------------------------------------------------
@@ -626,15 +463,6 @@ newest_comment_id() { # <repo> <number>
   gh_read issue view "$2" -R "$1" --json comments --jq '.comments[-1].id'
 }
 
-# Every comment on one issue as a single flattened blob, for asking whether a
-# claim marker is on it. Used by bind, which acts on one issue it was handed; the
-# sweep never calls this, because a per-issue probe there would scale with the
-# number of issues inside a budget shared by every repository.
-issue_comment_text() { # <repo> <number>
-  gh_read issue view "$2" -R "$1" --json comments \
-    --jq '[.comments[].body] | join(" ") | gsub("[[:cntrl:]]"; " ")'
-}
-
 # --- check ------------------------------------------------------------------
 
 FINDINGS=
@@ -725,21 +553,8 @@ list_labeled() { # <repo> <label>
     --json number,title --jq '.[] | "\(.number)\t\(.title | gsub("[[:cntrl:]]"; " "))"'
 }
 
-# The same query with every comment body carried along, as
-# "<number><tab><title><tab><comments>". The sweep needs the claim markers to
-# tell its own crashed claim from another home's build, and asking per issue
-# would put one forge round trip per issue inside the budget the whole sweep
-# shares - enough for one busy repository to starve every repository after it.
-# Fetching them with the list that is already made costs no extra round trip and
-# leaves the whose-claim question a local match over data already in hand.
-list_labeled_with_comments() { # <repo> <label>
-  gh_read issue list -R "$1" --state open --label "$2" --limit "$LIST_LIMIT" \
-    --json number,title,comments \
-    --jq '.[] | "\(.number)\t\(.title | gsub("[[:cntrl:]]"; " "))\t\([.comments[].body] | join(" ") | gsub("[[:cntrl:]]"; " "))"'
-}
-
 sweep_repo() { # <repo>
-  local repo=$1 raw number title count claimed url comments status
+  local repo=$1 raw number title count claimed url status
   # An unreadable repository is a finding, never an empty list. "Nothing was
   # dispatched" and "I could not look" must never render the same.
   if ! raw=$(list_labeled "$repo" "$LABEL_DISPATCHED"); then
@@ -773,12 +588,12 @@ EOF
   fi
 
   budget_allows "$repo" || return 0
-  if ! raw=$(list_labeled_with_comments "$repo" "$LABEL_BUILDING"); then
+  if ! raw=$(list_labeled "$repo" "$LABEL_BUILDING"); then
     emit "could not read $repo: the building issues could not be listed"
     return 0
   fi
   count=0
-  while IFS=$'\t' read -r number title comments; do
+  while IFS=$'\t' read -r number title; do
     [ -n "$number" ] || continue
     case "$number" in
       *[!0-9]*) continue ;;
@@ -787,18 +602,12 @@ EOF
     url=$(issue_url "${repo%%/*}" "${repo#*/}" "$number")
     claimed=$(issue_claimants "$url")
     [ -z "$claimed" ] || continue
-    # No task record here claims it, which means either this home crashed
-    # between the relabel and the spawn or another home is building it right
-    # now. The claim marker on the issue tells those apart, and it came back
-    # with the list, so this costs nothing.
-    if claim_marker_present "$comments" && ! claim_marker_is_mine "$comments"; then
-      # Another home claimed it and is building it. Reporting it here would
-      # send an operator to spawn a second build of work already in flight.
-      continue
-    fi
-    # The recoverable half of the relabel-before-spawn ordering: the issue was
-    # claimed and the task never appeared. Nothing will pick it up again on its
-    # own, because the poll only offers dispatched issues, so it is named here.
+    # No task record here claims it, so it is anomalous and reported, without
+    # asking whose it is. It could be this home's crashed claim between the
+    # relabel and the spawn, or a build another machine is running right now,
+    # and nothing readable on the issue tells those apart safely. Reporting both
+    # is the deliberate trade: a report can never cause a duplicate build, and
+    # every mechanism tried for staying quiet about the second case could.
     emit "marked building with no task ${repo}#${number} \"$(short_title "$title")\""
   done <<EOF
 $raw
@@ -863,7 +672,6 @@ record_write() { # <findings> <reported-epoch>
 action_check() {
   local slug line now reported_epoch elapsed
 
-  home_id_ensure
   record_read
   now=$(record_epoch_now)
   if [ "$INTERVAL" -ne 0 ] && [ "$RECORD_EPOCH" -gt 0 ] \
@@ -1033,7 +841,6 @@ action_claim() { # <task-id> <issue-url>
   fm_task_id_creation_valid "$id" || die "not a usable task id: $id"
   fm_dispatch_issue_url_parse "$raw" || die "not a GitHub issue URL: $raw"
   require_gh_tools
-  home_id_ensure
   repo="$FM_DISPATCH_OWNER/$FM_DISPATCH_REPO"
 
   claim_lock_acquire
@@ -1060,7 +867,7 @@ action_claim() { # <task-id> <issue-url>
     rm -f -- "$body"
     # The relabel already landed, so a retry of claim would correctly refuse.
     # Say exactly what is true so the caller reconciles rather than re-claims.
-    die "relabeled $FM_DISPATCH_URL to $LABEL_BUILDING but could not comment, and the comment may not have posted; spawn task $id and run bind, which posts the missing claim comment itself, or reconcile the issue"
+    die "relabeled $FM_DISPATCH_URL to $LABEL_BUILDING but could not comment, and the comment may not have posted; spawn task $id and run bind, or comment on the issue by hand so the record is there"
   fi
   rm -f -- "$body"
   claim_lock_release
@@ -1069,11 +876,10 @@ action_claim() { # <task-id> <issue-url>
 }
 
 action_bind() { # <task-id> <issue-url>
-  local id=$1 raw=$2 repo meta existing claimed lock tmp line comments body
+  local id=$1 raw=$2 repo meta existing claimed lock tmp line
   fm_pr_task_id_valid "$id" || die "not a usable task id: $id"
   fm_dispatch_issue_url_parse "$raw" || die "not a GitHub issue URL: $raw"
   require_gh_tools
-  home_id_ensure
   repo="$FM_DISPATCH_OWNER/$FM_DISPATCH_REPO"
   meta="$STATE/$id.meta"
   [ -f "$meta" ] && [ ! -L "$meta" ] || die "no task record for $id"
@@ -1094,29 +900,6 @@ action_bind() { # <task-id> <issue-url>
   issue_read "$repo" "$FM_DISPATCH_NUMBER" || die "cannot read $repo#$FM_DISPATCH_NUMBER"
   issue_has_label "$LABEL_BUILDING" \
     || die "$FM_DISPATCH_URL is not labeled $LABEL_BUILDING, so it was never claimed"
-
-  # Whose claim it is decides this, and the marker is the only thing that can
-  # say: a task record in another home is not visible from here. A marker naming
-  # another home is that home's build in flight, and binding it would put
-  # issue=<url> in two homes, each of which would later report an outcome onto
-  # one issue. bind is also the documented recovery for a claim whose comment did
-  # not land, so a missing marker is restored rather than bound around. Both run
-  # before the record is written and before the already-bound shortcut below, so
-  # a rerun of bind heals a missing marker instead of skipping straight past it.
-  comments=$(issue_comment_text "$repo" "$FM_DISPATCH_NUMBER") \
-    || die "cannot read the comments on $FM_DISPATCH_URL, so it cannot be confirmed as claimed"
-  if claim_marker_present "$comments"; then
-    claim_marker_is_mine "$comments" \
-      || die "$FM_DISPATCH_URL is claimed on the issue by $(claim_marker_holders "$comments"), which is not this home, so nothing was bound"
-  else
-    body=$(mktemp "${TMPDIR:-/tmp}/fm-dispatch-claim.XXXXXX") || die 'cannot stage the claim comment'
-    claim_comment_body "$id" > "$body"
-    if ! comment_issue "$repo" "$FM_DISPATCH_NUMBER" "$body"; then
-      rm -f -- "$body"
-      die "$FM_DISPATCH_URL carries no claim comment and one could not be posted, and it may not have posted; without it another home reads the issue as unclaimed, so nothing was bound"
-    fi
-    rm -f -- "$body"
-  fi
 
   if [ "$existing" = "$FM_DISPATCH_URL" ]; then
     claim_lock_release
