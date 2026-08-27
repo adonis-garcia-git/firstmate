@@ -448,8 +448,9 @@ An open `fm:building` issue with no task record in this home is reported as anom
 The poll does not try to work out whose build it is: it reads no comments and distinguishes no machine.
 That has a real cost to be honest about - when two machines poll the same repository, each reports the other's build in progress, on every re-nag, until it closes.
 It is accepted deliberately, because a report can never cause a duplicate build, while every mechanism tried for staying quiet about the other machine's build could instead go silent about an issue that is genuinely stuck, and nothing else in the system surfaces that state.
-Those anomalies are reported per repository as a count plus a few named examples rather than one line each, and every repository's waiting issues and read failures are printed ahead of any of them.
-The report is one capped line, so a repository whose issues another machine is building must never crowd out the work that is waiting to be picked up here.
+The report is one line, so it is built as three bounded classes printed in order: first anything that says the report is not the whole truth, such as a repository that could not be read or a list cut at the query cap, then the issues waiting to be picked up, then the building anomalies.
+Each class names a couple of items and then says how many more it did not name, so no class is variable-length and none can crowd another off the end of the line.
+That is also what lets the poll compare the line it printed when deciding whether a finding is news: a class either names everything it holds or ends in a count that moves, so any change reaches the line.
 `bind` is a recorder and writes nothing to the forge: it records `issue=<url>` after refusing an issue that is not labeled `fm:building` and refusing one another task record already claims.
 Every relabel, comment, and close is read back and asserted, so a forge CLI that reports success without applying the change is refused rather than trusted.
 A comment is confirmed by requiring the newest comment to have changed and to carry the body that was posted, and it is confirmed before the label change and the close, so an outcome never closes an issue whose comment is missing.

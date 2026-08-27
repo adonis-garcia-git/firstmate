@@ -34,7 +34,8 @@ Never reorder these, and never hand-edit the labels to "clean up" a half-finishe
 
 ## Picking one up
 
-1. Read the poll's line: it names each repository and issue number waiting, then any repository that could not be read, then a per-repository count of the issues marked building with no task behind them.
+1. Read the poll's line: it leads with anything that makes the report incomplete, such as a repository that could not be read, then the issues waiting to be picked up, then a per-repository count of the issues marked building with no task behind them.
+   Each of those three parts names a couple of items and then says how many more it did not name, so a count that moved is a real change even when the named examples did not.
    A repository that could not be read is not a repository with nothing waiting; treat it as a forge or credential problem, not as silence.
 2. Read the spec: `gh-axi issue view <n> -R <owner>/<repo> --full`.
    The issue body is the captain's spec and is treated exactly as a spec pasted into chat: resolve the project, classify ship or scout, and resolve the delivery mode and merge posture at intake under `AGENTS.md` section 7.
