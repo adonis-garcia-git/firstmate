@@ -44,26 +44,28 @@ Never reorder these, and never hand-edit the labels to "clean up" a half-finishe
    The one refusal that is a setup problem rather than a guard is a missing label, which names the label and the repository: create it there, then claim again.
 4. Write the brief and spawn the worker exactly as for any other task.
 5. `bind` the spawned task to the issue.
-   This is what makes a later poll, a restart, or a second machine refuse to build it again.
-   `bind` writes as well as records: an issue that carries no claim comment gets one posted and verified before `bind` reports success, so the recovery path from a claim whose comment failed still leaves the issue marked as this machine's.
+   This is what makes a later poll, a restart, or another home refuse to build it again.
+   `bind` writes as well as records: an issue that carries no claim comment gets one posted and verified before `bind` reports success, so the recovery path from a claim whose comment failed still leaves the issue marked as this home's.
    A `bind` that cannot confirm that comment fails and binds nothing; treat it as a forge problem and retry rather than proceeding with an unmarked build.
+   A `bind` refused because the claim comment names another home is not a forge problem: that home is building it, so stop and reconcile rather than retrying.
 6. Record the work in the backlog as usual, with the issue URL in the task note so the local record points at the durable one.
 
 ## An issue marked building with no task
 
 The poll reports these because nothing else will: the poll only offers `fm:dispatched` issues, so a half-finished claim never comes back on its own.
-It reports only a claim that belongs to this machine, or an issue carrying no claim comment at all, so an issue the other machine is building is left alone rather than reported here.
+It reports only a claim that belongs to this home, or an issue carrying no claim comment at all, so an issue another home is building is left alone rather than reported here.
 Start by reading the issue's claim comment, because everything below turns on whose claim it is: `gh-axi issue view <n> -R <owner>/<repo> --full`.
 Then reconcile it in whichever direction the evidence supports.
 
-- The claim comment names another machine: leave it alone, and do not relabel, comment, or spawn.
-  That machine is building it and will report the outcome into this same issue.
+- The claim comment names another home: leave it alone, and do not relabel, comment, or spawn.
+  That home is building it and will report the outcome into this same issue.
+  The name is the hostname plus a per-home suffix, so a name that matches this host but not this home is still another home's claim, and `bind` refuses it by name.
   Spawning here would build one spec twice, which is the single outcome this whole transport exists to prevent.
 - The worker exists but was never bound: `bind` it now.
-- The claim comment names this machine, no worker exists, and the work is still wanted: spawn it against that issue's spec and `bind`.
+- The claim comment names this home, no worker exists, and the work is still wanted: spawn it against that issue's spec and `bind`.
 - There is no claim comment at all: this is an ANOMALY, not a pickup.
-  Both `claim` and `bind` post and verify that comment, so a `fm:building` issue without one should not exist, and the machine that is building it cannot be established from the issue.
-  Report it to firstmate with the issue URL and what was found, and do not spawn against it: the one thing that state might mean is that another machine is building it right now.
+  Both `claim` and `bind` post and verify that comment, so a `fm:building` issue without one should not exist, and the home that is building it cannot be established from the issue.
+  Report it to firstmate with the issue URL and what was found, and do not spawn against it: the one thing that state might mean is that another home is building it right now.
 - The work is not wanted, or cannot proceed: report it blocked with the reason, which leaves it open for the captain.
 
 ## Reporting the outcome

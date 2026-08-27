@@ -114,7 +114,7 @@ state/               runtime records and signals; gitignored
   x-watch.check.sh   generated Relay poll shim; present only when opted in (section 14)
   tool-updates.check.sh  generated watched-tool update poll shim and its .check-trust binding; present only after bin/fm-tool-update-check.sh arm; its report record .tool-updates is what keeps one pending update from being reported on every poll
   dispatch-pickup.check.sh  generated cross-machine dispatched-issue poll shim and its .check-trust binding; present only after bin/fm-dispatch-pickup.sh arm; its report record .dispatch-pickup is what keeps one waiting issue from being reported on every poll
-  .dispatch-machine  this home's stable public name in dispatched-issue claim comments; seeded from the hostname on first use by bin/fm-dispatch-pickup.sh so a later rename cannot silence its own claims
+  .dispatch-machine  this home's stable public name in dispatched-issue claim comments, plus the one name it replaced; seeded by bin/fm-dispatch-pickup.sh as the hostname and a per-home suffix, so two homes on one host never read each other's builds as their own
   pending-replies/   parent-owned secondmate pending-reply records (correlation id, delivery vs reply, recovery, escalation); fm-pending-reply-lib.sh
   pending-acks/      durable acknowledgment records for token-marked orders sent via fm-send --ack; cleared on ack or teardown, escalated once by the watcher when unacknowledged; fm-steer-ack-lib.sh
   pending-completions/  durable completion-alarm records for tasks whose reconciled current state is terminal for the supervisor; cleared when the task resumes or tears down, escalated once per episode by the watcher past the alarm window; fm-completion-alarm-lib.sh
