@@ -470,7 +470,10 @@ issue_has_label() { # <label>
 # anything; unknown is treated as unreadable and stays loud.
 repo_issues_enabled() { # <repo>
   local raw
-  raw=$(gh_read repo view -R "$1" --json hasIssuesEnabled --jq '.hasIssuesEnabled') || return 2
+  # `repo view` is the one gh subcommand here that takes the repository
+  # positionally: it has no -R, and passing one fails the probe outright, which
+  # would report every Issues-off repository as unreadable forever.
+  raw=$(gh_read repo view "$1" --json hasIssuesEnabled --jq '.hasIssuesEnabled') || return 2
   case "$raw" in
     true) return 0 ;;
     false) return 1 ;;

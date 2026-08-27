@@ -68,10 +68,19 @@ verb=${1:-}; shift || true
 repo=; json=; label=; number=; jq=; search=
 case "$sub:$verb" in
   issue:view) number=$1; shift ;;
+  # Real gh takes the repository POSITIONALLY on `repo view` and rejects -R
+  # there ("unknown shorthand flag: 'R'", exit 1), unlike every other
+  # subcommand this mock answers. A mock that accepted -R everywhere would let
+  # a probe that can never work against the real CLI look green here.
+  repo:view) case "${1:-}" in -*) ;; *) repo=$1; shift ;; esac ;;
 esac
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    -R) repo=$2; shift 2 ;;
+    -R)
+      if [ "$sub:$verb" = repo:view ]; then
+        printf "unknown shorthand flag: 'R' in -R\n" >&2; exit 1
+      fi
+      repo=$2; shift 2 ;;
     --json) json=$2; shift 2 ;;
     --label) label=$2; shift 2 ;;
     --jq) jq=$2; shift 2 ;;
