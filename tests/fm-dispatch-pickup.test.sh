@@ -1299,8 +1299,12 @@ test_arm_registers_the_check_and_disarm_removes_it() {
   FM_HOME="$home" "$PICKUP" arm >/dev/null || fail "arm failed"
   assert_present "$home/state/dispatch-pickup.check.sh" "arm did not write the check shim"
   assert_present "$home/state/dispatch-pickup.check-trust" "arm did not write the trust binding"
-  [ "$(stat -f %Lp "$home/state/dispatch-pickup.check.sh" 2>/dev/null \
-    || stat -c %a "$home/state/dispatch-pickup.check.sh")" = 700 ] \
+  # GNU form first, BSD second: on GNU coreutils `-f` is *filesystem* stat, so
+  # the BSD form there consumes the format as a path, prints "  File: ..." on
+  # stdout and exits 0, and the fallback never runs. BSD stat rejects `-c`
+  # cleanly, so this order resolves the mode on either host.
+  [ "$(stat -c %a "$home/state/dispatch-pickup.check.sh" 2>/dev/null \
+    || stat -f %Lp "$home/state/dispatch-pickup.check.sh")" = 700 ] \
     || fail "the check shim is not mode 0700"
   FM_HOME="$home" "$PICKUP" disarm >/dev/null || fail "disarm failed"
   assert_absent "$home/state/dispatch-pickup.check.sh" "disarm left the check shim"
