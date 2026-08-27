@@ -14,8 +14,8 @@
 #   2. The relabel to fm:building happens BEFORE the worker is spawned. A crash
 #      in that window must leave an issue visibly stuck rather than one the next
 #      poll builds again, so test_a_claim_that_never_became_a_task_is_reported_
-#      not_offered_again asserts both halves: the issue is named as stuck AND it
-#      is not offered for pickup.
+#      not_offered_again asserts both halves: the issue is counted as stuck AND
+#      it is not counted as ready to pick up.
 #
 # Every case runs against a mock forge (fake gh and gh-axi over a directory of
 # issue files) rather than GitHub, so no case reads or writes a real repository.
@@ -424,8 +424,9 @@ test_a_second_poll_over_the_same_issue_creates_nothing() {
 test_a_claim_that_never_became_a_task_is_reported_not_offered_again() {
   local home out report
   # Exactly the crash window the relabel-before-spawn order creates: the issue
-  # is fm:building and no task record claims it. It must be named as stuck, and
-  # it must NOT be offered for pickup, or the next poll would build it twice.
+  # is fm:building and no task record claims it. It must be counted as stuck,
+  # and it must NOT be counted as ready to pick up, or the next poll would
+  # build it twice.
   home=$(make_home stuck-building)
   seed_issue "$home" 11 'Half-claimed work' fm:building
   out="$home/out.txt"
@@ -441,7 +442,7 @@ test_every_unclaimed_building_issue_is_reported_as_anomalous() {
   local home out report
   # The poll does not ask whose build it is. It reads no comments and
   # distinguishes no machine: an open fm:building issue with no task record HERE
-  # is anomalous and gets named, whatever is written on it. That is the whole
+  # is anomalous and gets counted, whatever is written on it. That is the whole
   # policy, and the three shapes below are the ones a marker-matching design
   # would have treated differently from each other.
   home=$(make_home anomalous)
@@ -590,10 +591,10 @@ test_a_read_failure_survives_a_full_slate_of_waiting_pickups() {
   local home out report n
   # The loud degradation must reach the report even when there is plenty of
   # actionable work ahead of it. Ten waiting pickups with real titles is more
-  # than a one-line report can name, so if pickups were printed first and named
-  # without a bound they would fill the line and the unreachable repository
-  # would never be mentioned - "nothing dispatched" and "I could not look"
-  # rendering the same, which the transport forbids.
+  # more than a one-line report could ever have named, which is what used to
+  # fill the line and push the unreachable repository off the end - "nothing
+  # dispatched" and "I could not look" rendering the same, which the transport
+  # forbids. Counts leave no room for that, and this holds them to it.
   home=$(make_home read-failure-behind-pickups)
   add_repo "$home" "$OTHER_SLUG" zz-other-repo
   n=1
@@ -642,10 +643,10 @@ test_a_new_read_failure_is_reported_even_when_the_pickups_are_unchanged() {
 
 test_every_class_is_counted_and_the_line_is_not_cut() {
   local home out report n r
-  # Every class bounded and counted is what makes the printed-line comparison
-  # safe, and the proof is that a report with all three classes well past their
-  # bounds still fits: each one names a couple of items and then says how many
-  # more it did not name, so nothing variable-length is left to overflow the cap.
+  # The report carries one count per class and nothing variable-length, so the
+  # proof is that a report with every class well past any plausible bound still
+  # fits on one line: the width comes from the fixed clauses, not from how many
+  # issues or repositories are behind them.
   home=$(make_home every-class-counted)
   n=1
   while [ "$n" -le 3 ]; do
@@ -680,9 +681,9 @@ test_every_class_is_counted_and_the_line_is_not_cut() {
 test_a_truncated_building_list_says_it_was_cut() {
   local home out report n
   # The same invariant the dispatched pass already holds: a sweep that hits the
-  # query cap says so rather than presenting a truncated list as the whole of
-  # what is stuck. Every issue here has a task record behind it, so the cut
-  # notice is the only finding and cannot be crowded out of the line cap.
+  # query cap says so rather than presenting a truncated count as the whole of
+  # what is stuck. Every issue here has a task record behind it, so the anomaly
+  # count stays at zero and the cut notice is the only thing the poll adds.
   home=$(make_home building-cut)
   n=1
   while [ "$n" -le 50 ]; do
@@ -979,7 +980,7 @@ test_unreachable_github_is_reported_not_an_empty_list() {
   report=$(cat "$out")
   [ -n "$report" ] || fail "an unreachable forge produced the same silence as nothing dispatched"
   assert_contains "$report" 'repositories that could not be read: 1' "the report does not count the repository that could not be read"
-  pass "an unreachable forge is reported by name, never as an empty list"
+  pass "an unreachable forge is counted in the report, never rendered as an empty list"
 }
 
 test_missing_gh_is_reported_not_silence() {

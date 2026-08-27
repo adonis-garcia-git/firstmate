@@ -113,7 +113,7 @@ state/               runtime records and signals; gitignored
   .pr-check-migration-scan-v1  private marker proving the non-executing scan disabled every unsafe legacy check; .pr-check-migration-v1 separately records completed private repairs
   x-watch.check.sh   generated Relay poll shim; present only when opted in (section 14)
   tool-updates.check.sh  generated watched-tool update poll shim and its .check-trust binding; present only after bin/fm-tool-update-check.sh arm; its report record .tool-updates is what keeps one pending update from being reported on every poll
-  dispatch-pickup.check.sh  generated cross-machine dispatched-issue poll shim and its .check-trust binding; present only after bin/fm-dispatch-pickup.sh arm; its report record .dispatch-pickup is what keeps one waiting issue from being reported on every poll
+  dispatch-pickup.check.sh  generated cross-machine dispatched-issue poll shim and its .check-trust binding; present only after bin/fm-dispatch-pickup.sh arm; its report record .dispatch-pickup holds the counts line last printed, so an unchanged set of counts is not reported again on every poll
   pending-replies/   parent-owned secondmate pending-reply records (correlation id, delivery vs reply, recovery, escalation); fm-pending-reply-lib.sh
   pending-acks/      durable acknowledgment records for token-marked orders sent via fm-send --ack; cleared on ack or teardown, escalated once by the watcher when unacknowledged; fm-steer-ack-lib.sh
   pending-completions/  durable completion-alarm records for tasks whose reconciled current state is terminal for the supervisor; cleared when the task resumes or tears down, escalated once per episode by the watcher past the alarm window; fm-completion-alarm-lib.sh

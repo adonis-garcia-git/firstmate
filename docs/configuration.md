@@ -438,12 +438,12 @@ Every state is one label plus the issue's own open or closed:
 [`bin/fm-dispatch-pickup.sh`](../bin/fm-dispatch-pickup.sh) owns this home's side of that exchange, and its `--help` owns the exact commands, flags, and bounds.
 It polls every GitHub-backed clone under `projects/` for open issues carrying those labels, and it reports rather than acting on its own.
 A clone with no GitHub origin, such as a `local-only` project, is skipped in silence, and so is a repository whose GitHub Issues are turned off, because both are registered postures rather than faults.
-A repository that cannot be read is reported by name, because "nothing was dispatched" and "I could not look" must never render the same.
+A repository that cannot be read is counted in the report rather than dropped, because "nothing was dispatched" and "I could not look" must never render the same.
 Issues being off is told apart from an outage by asking GitHub for the repository's `hasIssuesEnabled` field rather than by matching an error message, so only a definite "off" is silent and anything unreadable stays loud.
 
 One issue produces at most one build.
 The task record carries the issue URL as `issue=<url>`, the same shape as the existing `pr=` field, and picking up refuses when any task record in this home already claims that issue.
-The relabel to `fm:building` happens before the worker is spawned, never after, so an interruption in that window leaves an issue visibly stuck with no task - which the poll reports by name - rather than an issue still marked `fm:dispatched` that the next poll builds a second time.
+The relabel to `fm:building` happens before the worker is spawned, never after, so an interruption in that window leaves an issue visibly stuck with no task - which the poll counts - rather than an issue still marked `fm:dispatched` that the next poll builds a second time.
 An open `fm:building` issue with no task record in this home is reported as anomalous, unconditionally, and never acted on automatically.
 The poll does not try to work out whose build it is: it reads no comments and distinguishes no machine.
 That has a real cost to be honest about - when two machines poll the same repository, each reports the other's build in progress, on every re-nag, until it closes.

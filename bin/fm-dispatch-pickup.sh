@@ -143,8 +143,10 @@ LABEL_BUILDING='fm:building'
 LABEL_BUILT='fm:built'
 LABEL_BLOCKED='fm:blocked'
 
-# Wider than the digest default because one finding names a repository, an issue
-# number, and a title, and several repositories can report in the same sweep.
+# A backstop bound on the wake record, not a budget the report spends. The
+# report is a fixed set of count clauses (see the report section below), whose
+# widest form with every clause present runs well under half of this; the
+# constant is kept only so a clause added later cannot end the line mid-word.
 MAX_LINE=1000
 # How many issues one label query returns. A sweep that hits the cap says so
 # rather than presenting a truncated list as the whole of what is waiting.
@@ -164,7 +166,8 @@ LIST_LIMIT=50
 usage() {
   cat <<'EOF'
 Usage:
-  fm-dispatch-pickup.sh [check]            report dispatched work waiting here (silent when nothing waits)
+  fm-dispatch-pickup.sh [check]            report how much dispatched work waits here, as counts
+                                           (silent when nothing waits; names no issue or repository)
   fm-dispatch-pickup.sh arm                write and register state/dispatch-pickup.check.sh
   fm-dispatch-pickup.sh disarm             remove the check shim, its trust binding, and the record
   fm-dispatch-pickup.sh claim <task-id> <issue-url>
