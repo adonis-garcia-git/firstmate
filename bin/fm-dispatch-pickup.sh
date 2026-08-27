@@ -29,8 +29,8 @@
 #
 # THE ONE ORDERING THAT MATTERS. `claim` relabels dispatched -> building BEFORE
 # the worker is spawned, never after. A crash in that window leaves an issue
-# marked building with no task, which `check` reports by name and an operator
-# can act on. The other order leaves an issue still marked dispatched that the
+# marked building with no task, which `check` reports and an operator can act
+# on. The other order leaves an issue still marked dispatched that the
 # next poll picks up and builds a SECOND time. Do not "tidy" this into the more
 # natural-looking order.
 #
@@ -49,6 +49,14 @@
 # operator one glance. A silence costs the one recoverable state this transport
 # has. So the report is unconditional, and nothing is ever auto-built from it -
 # see the skill, which routes this state to firstmate and never to a spawn.
+#
+# Reported per REPOSITORY as a count plus a few named examples, not one line per
+# issue. Every one of them ends at the same "tell firstmate" outcome, so naming
+# them all buys nothing, and the whole report is one capped line that the
+# pickups have the stronger claim on. Which is also the ordering: every
+# repository's pickups and read failures are printed before any anomaly summary,
+# so a repository full of builds another machine is running can never push work
+# waiting to be picked up off the end of the line.
 #
 # IDEMPOTENCY. The issue URL is the key, and the task record carries it as
 # `issue=<url>`, the same shape as the existing `pr=` field. `claim` refuses
@@ -147,6 +155,10 @@ LIST_LIMIT=50
 # Titles are cosmetic in the report, so they are cut per issue to keep one
 # waiting issue from consuming the whole line cap.
 MAX_TITLE=80
+# How many of a repository's building anomalies the summary names. The count is
+# always reported; the names are there to make the summary actionable without
+# another query.
+MAX_ANOMALY_NAMES=3
 
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
@@ -504,6 +516,7 @@ newest_comment_id() { # <repo> <number>
 # --- check ------------------------------------------------------------------
 
 FINDINGS=
+ANOMALIES=
 INCOMPLETE_REPORTED=0
 
 # Each finding is flattened to a single line, because the whole report must stay
@@ -515,6 +528,35 @@ emit() {
     FINDINGS=$text
   else
     FINDINGS="$FINDINGS; $text"
+  fi
+}
+
+# The building anomalies go in a second channel that is appended after every
+# repository's findings, because the whole report is cut to one line and the
+# classes are not equally urgent. A pickup is work waiting to start and a read
+# failure is the loud degradation; an anomaly is a state somebody only has to
+# look at. Emitted in one stream, one repository's anomalies would push a later
+# repository's pickup off the end of the line, and the poll would look like it
+# reported while the dispatched work waited forever.
+emit_anomaly() {
+  local text
+  text=$(printf '%s' "$1" | tr '\t\r\n' '   ')
+  if [ -z "$ANOMALIES" ]; then
+    ANOMALIES=$text
+  else
+    ANOMALIES="$ANOMALIES; $text"
+  fi
+}
+
+# The findings in the order they are printed: everything urgent, then the
+# anomaly summaries.
+report_body() {
+  if [ -z "$ANOMALIES" ]; then
+    printf '%s' "$FINDINGS"
+  elif [ -z "$FINDINGS" ]; then
+    printf '%s' "$ANOMALIES"
+  else
+    printf '%s; %s' "$FINDINGS" "$ANOMALIES"
   fi
 }
 
@@ -592,7 +634,7 @@ list_labeled() { # <repo> <label>
 }
 
 sweep_repo() { # <repo>
-  local repo=$1 raw number title count url status
+  local repo=$1 raw number title count url status anomalies names noun
   # An unreadable repository is a finding, never an empty list. "Nothing was
   # dispatched" and "I could not look" must never render the same.
   if ! raw=$(list_labeled "$repo" "$LABEL_DISPATCHED"); then
@@ -631,6 +673,8 @@ EOF
     return 0
   fi
   count=0
+  anomalies=0
+  names=
   while IFS=$'\t' read -r number title; do
     [ -n "$number" ] || continue
     case "$number" in
@@ -645,12 +689,35 @@ EOF
     # and nothing readable on the issue tells those apart safely. Reporting both
     # is the deliberate trade: a report can never cause a duplicate build, and
     # every mechanism tried for staying quiet about the second case could.
-    emit "marked building with no task ${repo}#${number} \"$(short_title "$title")\""
+    #
+    # Summarized rather than enumerated: every one of these routes to the same
+    # "tell firstmate and let a person decide" outcome, so naming them all buys
+    # nothing and costs the line the pickups need. The COUNT is what carries the
+    # news, so it is always in the text even when the named examples are not.
+    anomalies=$((anomalies + 1))
+    [ "$anomalies" -le "$MAX_ANOMALY_NAMES" ] || continue
+    if [ -z "$names" ]; then
+      names="#${number} \"$(short_title "$title")\""
+    else
+      names="$names, #${number} \"$(short_title "$title")\""
+    fi
   done <<EOF
 $raw
 EOF
+  if [ "$anomalies" -gt 0 ]; then
+    if [ "$anomalies" -eq 1 ]; then
+      noun='1 issue'
+    else
+      noun="$anomalies issues"
+    fi
+    if [ "$anomalies" -gt "$MAX_ANOMALY_NAMES" ]; then
+      emit_anomaly "$repo has $noun marked building with no task here, including $names"
+    else
+      emit_anomaly "$repo has $noun marked building with no task here: $names"
+    fi
+  fi
   if [ "$count" -ge "$LIST_LIMIT" ]; then
-    emit "$repo has at least $LIST_LIMIT issues marked building, so this list is cut"
+    emit_anomaly "$repo has at least $LIST_LIMIT issues marked building, so this list is cut"
   fi
   return 0
 }
@@ -707,7 +774,7 @@ record_write() { # <findings> <reported-epoch>
 }
 
 action_check() {
-  local slug line now reported_epoch elapsed
+  local slug line body now reported_epoch elapsed
 
   record_read
   now=$(record_epoch_now)
@@ -737,11 +804,12 @@ action_check() {
   fi
 
   line=
-  if [ -n "$FINDINGS" ]; then
+  body=$(report_body)
+  if [ -n "$body" ]; then
     # Capped through the shared cut so an over-long report carries the same
     # visible truncation marker the digests use, instead of ending mid-finding
     # as if that were all of it.
-    fm_cap_line_var "dispatched work: $FINDINGS" "$MAX_LINE"
+    fm_cap_line_var "dispatched work: $body" "$MAX_LINE"
     line=$FM_LINE_CAP_LINE
   fi
 
@@ -749,13 +817,22 @@ action_check() {
   # so work nobody picked up cannot go quiet forever. A changed set is always
   # news. Report before recording, so a record that cannot be written costs a
   # repeated report rather than a lost one.
+  #
+  # What is compared is the line that was PRINTED, not the findings behind it.
+  # Comparing the uncapped findings makes a change nobody can see count as news,
+  # so an over-long report re-prints byte-identical text and reads as fresh. The
+  # classes that can change all reach the printed line: pickups and read failures
+  # are named individually and come first, and an anomaly summary always carries
+  # its count, so more or fewer anomalies always change the text even when the
+  # named examples do not. A change that lands past the cut is invisible here and
+  # waits for the re-nag, which is the same cadence any unchanged set gets.
   reported_epoch=$RECORD_REPORTED_EPOCH
   if [ -n "$line" ]; then
     elapsed=-1
     if [ "$RECORD_REPORTED_EPOCH" -gt 0 ] && [ "$now" -ge "$RECORD_REPORTED_EPOCH" ]; then
       elapsed=$((now - RECORD_REPORTED_EPOCH))
     fi
-    if [ "$FINDINGS" != "$RECORD_REPORTED" ] \
+    if [ "$line" != "$RECORD_REPORTED" ] \
       || [ "$elapsed" -lt 0 ] \
       || { [ "$RENAG" -ne 0 ] && [ "$elapsed" -ge "$RENAG" ]; }; then
       printf '%s\n' "$line"
@@ -764,7 +841,7 @@ action_check() {
   else
     reported_epoch=0
   fi
-  record_write "$FINDINGS" "$reported_epoch" || true
+  record_write "$line" "$reported_epoch" || true
   return 0
 }
 

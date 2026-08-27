@@ -433,7 +433,7 @@ test_a_claim_that_never_became_a_task_is_reported_not_offered_again() {
   run_pickup "$home" "$out" check
   expect_code 0 "$RUN_STATUS" "check exit"
   report=$(cat "$out")
-  assert_contains "$report" "marked building with no task $REPO_SLUG#11" "an issue claimed but never spawned was not reported as stuck"
+  assert_contains "$report" "$REPO_SLUG has 1 issue marked building with no task here: #11" "an issue claimed but never spawned was not reported as stuck"
   assert_not_contains "$report" "ready to pick up" "an issue already marked building was offered for pickup again"
   pass "a claim that never became a task is reported as stuck, not offered for pickup again"
 }
@@ -467,10 +467,12 @@ test_every_unclaimed_building_issue_is_reported_as_anomalous() {
   run_pickup "$home" "$out" check
   expect_code 0 "$RUN_STATUS" "check exit"
   report=$(cat "$out")
-  assert_contains "$report" "marked building with no task $REPO_SLUG#12" \
+  assert_contains "$report" "$REPO_SLUG has 3 issues marked building with no task here" \
+    "the three unclaimed building issues were not all counted as anomalous"
+  assert_contains "$report" '#12' \
     "an issue was silenced by a claim comment naming somewhere else, which is how a stuck issue goes quiet forever"
-  assert_contains "$report" "marked building with no task $REPO_SLUG#13" "this home's own crashed claim went unreported"
-  assert_contains "$report" "marked building with no task $REPO_SLUG#14" "an issue with no comments at all went unreported"
+  assert_contains "$report" '#13' "this home's own crashed claim went unreported"
+  assert_contains "$report" '#14' "an issue with no comments at all went unreported"
   pass "every unclaimed building issue is reported as anomalous, whatever it carries"
 }
 
@@ -500,7 +502,7 @@ sweep_local_work() {
 }
 
 test_the_claimant_scan_does_not_grow_with_the_issue_count() {
-  local few many delta
+  local few many delta control
   # The sweep asks "does any task record here already claim this issue" for every
   # issue it lists. Answering that by re-walking the records once per issue is
   # work that grows with issues TIMES records, and it is local work, so the sweep
@@ -515,6 +517,24 @@ test_the_claimant_scan_does_not_grow_with_the_issue_count() {
   # vacuous on a fast machine. Both runs hold the SAME 20 task records and differ
   # only in how many issues are listed, so anything that does not scale with the
   # issue count cancels out of the difference.
+  # The positive control comes first. Both sweep counts are ZERO in working code,
+  # so without proving the counter can register anything at all this case would
+  # pass just as happily against a shim that is never reached - a PATH change, an
+  # absolute path in the script, or a rewrite of the scan in pure shell. claim
+  # still runs the per-issue claimant scan on purpose, so it is the one command
+  # that must leave a mark.
+  control=$(make_home scan-control)
+  seed_issue "$control" 71 'Instrument check' fm:dispatched
+  write_task "$control" fm-control-a "$(issue_url_for 970)"
+  : > "$TMP_ROOT/scan-control.calls"
+  RUN_STATUS=0
+  env FM_HOME="$control" FM_MOCK_GH_DIR="$control/mock" PATH="$control/bin:$PATH" \
+    FM_MOCK_GREP_CALLS="$TMP_ROOT/scan-control.calls" FM_DISPATCH_PICKUP_INTERVAL=0 \
+    "$PICKUP" claim fm-control "$(issue_url_for 71)" >"$control/out.txt" 2>&1 || RUN_STATUS=$?
+  expect_code 0 "$RUN_STATUS" "control claim exit"
+  [ -s "$TMP_ROOT/scan-control.calls" ] \
+    || fail "the claimant-scan counter recorded nothing for a command that scans records, so the two counts below would prove nothing"
+
   sweep_local_work scan-few 5 20 "$TMP_ROOT/scan-few.calls"
   sweep_local_work scan-many 25 20 "$TMP_ROOT/scan-many.calls"
   few=$(wc -l < "$TMP_ROOT/scan-few.calls" | tr -d '[:space:]')
@@ -531,17 +551,19 @@ test_many_building_issues_do_not_starve_the_next_repository() {
   # is never polled - the same repositories, every poll, forever. Nothing in the
   # sweep costs a call per issue now, and the count is what proves it; silence
   # would also hold while exactly that starvation was happening.
-  # Titles are kept short on purpose: every one of these is now reported, and the
-  # whole report is one capped line, so the second repository's finding has to
-  # still fit inside it for its absence to mean it was never swept.
+  # Titles are the length a captain actually writes, and there are enough issues
+  # that naming each one would fill the capped report line by itself. That is the
+  # realistic shape: a repository whose issues another machine is building is the
+  # documented steady state, and the pickup waiting in the NEXT repository is the
+  # whole point of the poll.
   home=$(make_home no-starve)
   add_repo "$home" "$OTHER_SLUG" zz-other-repo
   n=1
   while [ "$n" -le 12 ]; do
-    seed_issue "$home" "$((300 + n))" "B$n" fm:building
+    seed_issue "$home" "$((300 + n))" "Add rate limiting to the ingestion endpoint, pass $n" fm:building
     n=$((n + 1))
   done
-  seed_issue_in "$home" "$OTHER_SLUG" 9 'Waiting' fm:dispatched
+  seed_issue_in "$home" "$OTHER_SLUG" 9 'Rework the settings page empty state' fm:dispatched
 
   out="$home/out.txt"
   calls="$home/calls.txt"
@@ -553,7 +575,9 @@ test_many_building_issues_do_not_starve_the_next_repository() {
   expect_code 0 "$RUN_STATUS" "check exit"
   report=$(cat "$out")
   assert_contains "$report" "ready to pick up $OTHER_SLUG#9" \
-    "a repository full of building issues starved the next repository out of the sweep"
+    "a repository full of building issues crowded the next repository's waiting work out of the report"
+  assert_contains "$report" "$REPO_SLUG has 12 issues marked building with no task here" \
+    "the building issues were not reported at all, so this proves nothing about their not crowding the pickup out"
   n=$(wc -l < "$calls" | tr -d '[:space:]')
   # Two label listings per repository is the whole cost of a clean sweep, so
   # anything approaching one call per issue is a per-issue probe.
@@ -580,7 +604,7 @@ test_a_truncated_building_list_says_it_was_cut() {
   report=$(cat "$out")
   assert_contains "$report" "$REPO_SLUG has at least 50 issues marked building, so this list is cut" \
     "a stuck-issue list that hit the query cap was presented as the complete set"
-  assert_not_contains "$report" 'marked building with no task' "an issue with a task record behind it was reported as anomalous"
+  assert_not_contains "$report" 'with no task here' "an issue with a task record behind it was reported as anomalous"
   pass "a stuck-issue list that hits the query cap says it was cut"
 }
 
@@ -959,7 +983,7 @@ test_several_findings_and_an_odd_title_stay_one_line() {
   report=$(cat "$out")
   assert_contains "$report" "$REPO_SLUG#71" "the first waiting issue is missing from the one-line report"
   assert_contains "$report" "$REPO_SLUG#72" "the second waiting issue is missing from the one-line report"
-  assert_contains "$report" "$REPO_SLUG#73" "the stuck issue is missing from the one-line report"
+  assert_contains "$report" "$REPO_SLUG has 1 issue marked building with no task here: #73" "the stuck issue is missing from the one-line report"
   case "$report" in
     *"$(printf '\t')"*) fail "a tab from an issue title survived into the wake record" ;;
   esac
@@ -983,6 +1007,59 @@ test_findings_are_reported_once_until_they_change() {
   run_pickup "$home" "$out" check
   assert_contains "$(cat "$out")" "$REPO_SLUG#82" "a new waiting issue was suppressed as an unchanged finding"
   pass "findings are reported once until the finding set changes"
+}
+
+test_a_changed_anomaly_count_is_reported_even_when_the_examples_do_not_change() {
+  local home out first
+  # The report-once gate compares the line it PRINTED, so anything the printed
+  # line does not carry cannot be news. The building anomalies are summarized
+  # rather than enumerated, and the first named examples stay the same as more
+  # issues pile up, so the COUNT is what has to carry the change. Without it a
+  # repository going from two stuck issues to nine would print byte-identical
+  # text and be suppressed until the re-nag.
+  home=$(make_home anomaly-count)
+  seed_issue "$home" 84 'Add rate limiting to the ingestion endpoint' fm:building
+  seed_issue "$home" 85 'Rework the settings page empty state' fm:building
+  out="$home/out.txt"
+  run_pickup "$home" "$out" check
+  first=$(cat "$out")
+  assert_contains "$first" "$REPO_SLUG has 2 issues marked building with no task here" "the first poll did not count the anomalies"
+
+  run_pickup "$home" "$out" check
+  [ ! -s "$out" ] || fail "an unchanged anomaly set was reported twice in a row: $(cat "$out")"
+
+  # A third issue, sorted after the two already named, so the named examples are
+  # unchanged and only the count moves.
+  seed_issue "$home" 86 'Cache the project registry read' fm:building
+  run_pickup "$home" "$out" check
+  assert_contains "$(cat "$out")" "$REPO_SLUG has 3 issues marked building with no task here" \
+    "a third stuck issue was suppressed, because the summary said nothing that changed"
+  pass "a changed anomaly count is reported even when the named examples do not change"
+}
+
+test_a_change_that_lands_past_the_cut_does_not_reprint_the_same_line() {
+  local home out first n
+  # The report is one capped line, and the gate compares the line that was
+  # PRINTED. So a change nobody can see is not news: re-printing byte-identical
+  # text would read as a fresh report and teach an operator to ignore the wake.
+  # It is not lost either - the re-nag still resurfaces it on the ordinary
+  # cadence, the same as any set that has not changed.
+  home=$(make_home past-the-cut)
+  n=1
+  while [ "$n" -le 20 ]; do
+    seed_issue "$home" "$((600 + n))" "Rework the ingestion endpoint so it rate limits per tenant, part $n" fm:dispatched
+    n=$((n + 1))
+  done
+  out="$home/out.txt"
+  run_pickup "$home" "$out" check
+  first=$(cat "$out")
+  assert_contains "$first" 'truncated' "the fixture did not overflow the report line, so this case proves nothing"
+
+  # Numbered last, so it lands after the cut and cannot reach the printed line.
+  seed_issue "$home" 621 'Rework the ingestion endpoint so it rate limits per tenant, part 21' fm:dispatched
+  run_pickup "$home" "$out" check
+  [ ! -s "$out" ] || fail "a change nobody could see re-printed the same truncated line: $(cat "$out")"
+  pass "a change that lands past the cut does not reprint an identical line"
 }
 
 test_an_unchanged_finding_set_is_reported_again_after_the_renag() {
@@ -1142,6 +1219,8 @@ test_nothing_dispatched_is_silent
 test_a_clone_without_a_github_origin_is_skipped_silently
 test_several_findings_and_an_odd_title_stay_one_line
 test_findings_are_reported_once_until_they_change
+test_a_changed_anomaly_count_is_reported_even_when_the_examples_do_not_change
+test_a_change_that_lands_past_the_cut_does_not_reprint_the_same_line
 test_an_unchanged_finding_set_is_reported_again_after_the_renag
 test_probes_are_skipped_between_intervals
 test_an_oversized_budget_is_cut_to_fit_and_reported

@@ -28,13 +28,13 @@ Everything the other machine needs goes into the issue.
 
 **Claim before you spawn, bind after.**
 `claim` relabels the issue to `fm:building` before any worker exists, on purpose.
-An interruption there leaves an issue visibly stuck with no task, which the poll reports by name.
+An interruption there leaves an issue visibly stuck with no task, which the poll reports.
 Doing it the other way round leaves an issue still labeled `fm:dispatched` that the next poll builds a second time.
 Never reorder these, and never hand-edit the labels to "clean up" a half-finished pickup.
 
 ## Picking one up
 
-1. Read the poll's line: it names each repository and issue number waiting, each issue already claimed with no task behind it, and any repository that could not be read.
+1. Read the poll's line: it names each repository and issue number waiting, then any repository that could not be read, then a per-repository count of the issues marked building with no task behind them.
    A repository that could not be read is not a repository with nothing waiting; treat it as a forge or credential problem, not as silence.
 2. Read the spec: `gh-axi issue view <n> -R <owner>/<repo> --full`.
    The issue body is the captain's spec and is treated exactly as a spec pasted into chat: resolve the project, classify ship or scout, and resolve the delivery mode and merge posture at intake under `AGENTS.md` section 7.
@@ -52,6 +52,8 @@ Never reorder these, and never hand-edit the labels to "clean up" a half-finishe
 
 An `fm:building` issue with no task record here is an ANOMALY, not a pickup.
 The poll reports it because nothing else will: the poll only offers `fm:dispatched` issues, so a half-finished claim never comes back on its own.
+It reports them per repository as a count and a few named examples, because they all end at the same place, so the count is the news and a summary naming two of nine is not a truncated list.
+List them yourself with `gh-axi issue list -R <owner>/<repo> --label fm:building` when you need the rest.
 
 **Never spawn against it.**
 The poll cannot tell this machine's half-finished claim from a build another machine is running right now, and it deliberately does not try, so spawning from this state is how one spec gets built twice.
@@ -65,7 +67,7 @@ There is exactly one case that resolves itself here, and it is the one where a w
   That covers a build another machine is running, which is the common case whenever both machines poll one repository, and it covers work that is no longer wanted or cannot proceed.
   Do not spawn, do not `bind` a task that is not already building this issue, and do not hand-edit the labels.
   `report` needs a task record carrying `issue=<url>` and refuses without one, so with no worker there is no supported way to mark the issue from here, and inventing one is what a person is being asked to decide about.
-  Expect the poll to keep naming the issue until it closes; that repetition is a known and accepted cost of never going quiet about a genuinely stuck issue.
+  Expect the poll to keep counting the issue until it closes; that repetition is a known and accepted cost of never going quiet about a genuinely stuck issue.
 
 ## Reporting the outcome
 
