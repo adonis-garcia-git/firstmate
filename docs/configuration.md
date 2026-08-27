@@ -419,6 +419,41 @@ The sweep must finish inside `FM_CHECK_TIMEOUT` (default 30), because a run the 
 So a budget larger than that timeout allows is cut down to what fits instead of being refused, and the cut is reported in the report line.
 A budget that is not a whole number from 1 to 120 is still refused outright.
 
+## Cross-machine work dispatch (state/dispatch-pickup.check.sh)
+
+The captain specs work on one machine and it gets built on another.
+The transport is an ordinary GitHub issue on the repository the work targets: the authoring machine opens it with the spec as the body and the label `fm:dispatched`, and the building machine picks it up on its own schedule.
+Nothing pushes, nothing listens, and neither machine assumes the other is awake, so a machine can dispatch and then power off.
+
+The issue is the record rather than a notification, so there is no parallel state file that can disagree with it.
+Every state is one label plus the issue's own open or closed:
+
+| Label | Meaning | Set by |
+|---|---|---|
+| `fm:dispatched` | waiting to be picked up | the authoring machine, at creation |
+| `fm:building` | a task exists and is working | the building machine, on pickup |
+| `fm:built` (issue closed) | landed, or ready for the captain | the building machine, on completion |
+| `fm:blocked` (issue stays open) | needs the captain, and is not abandoned | the building machine, on failure |
+
+[`bin/fm-dispatch-pickup.sh`](../bin/fm-dispatch-pickup.sh) owns this home's side of that exchange, and its `--help` owns the exact commands, flags, and bounds.
+It polls every GitHub-backed clone under `projects/` for open issues carrying those labels, and it reports rather than acting on its own.
+A clone with no GitHub origin, such as a `local-only` project, is skipped in silence; a repository that cannot be read is reported by name, because "nothing was dispatched" and "I could not look" must never render the same.
+
+One issue produces at most one build.
+The task record carries the issue URL as `issue=<url>`, the same shape as the existing `pr=` field, and picking up refuses when any task record in this home already claims that issue.
+The relabel to `fm:building` happens before the worker is spawned, never after, so an interruption in that window leaves an issue visibly stuck with no task - which the poll reports by name - rather than an issue still marked `fm:dispatched` that the next poll builds a second time.
+Every relabel, comment, and close is read back and asserted, so a forge CLI that reports success without applying the change is refused rather than trusted.
+Reads use `gh` with machine-readable output because the result decides whether a worker is spawned; writes use `gh-axi`, matching [`bin/fm-pr-merge.sh`](../bin/fm-pr-merge.sh).
+
+Arm the check once per home with `bin/fm-dispatch-pickup.sh arm`.
+That writes `state/dispatch-pickup.check.sh` and binds its bytes with `bin/fm-check-register.sh`, so the existing watcher polls it on its normal cadence and turns its one line into a `check:` wake; no separate schedule, daemon, or open port is involved.
+`bin/fm-dispatch-pickup.sh disarm` removes the shim, its trust binding, and the report record.
+The check prints nothing when nothing is waiting, and `state/.dispatch-pickup` records the findings the last report was made from so one waiting issue is reported once instead of on every poll.
+A changed finding set is always reported again, and an unchanged one is reported again once the re-nag interval has passed, so work nobody picked up cannot go quiet forever.
+
+The labels are ordinary repository labels and this home never creates them; a repository that does not have them yet simply reports nothing until an issue carries one.
+Nothing here creates an issue, writes into a project working tree, merges anything, or closes an issue on failure.
+
 ## Relay (.env)
 
 Relay lets a firstmate instance answer public mentions and act on normal reversible mention requests through firstmate's normal lifecycle.
