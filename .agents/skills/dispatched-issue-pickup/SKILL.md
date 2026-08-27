@@ -56,13 +56,16 @@ The poll reports it because nothing else will: the poll only offers `fm:dispatch
 **Never spawn against it.**
 The poll cannot tell this machine's half-finished claim from a build another machine is running right now, and it deliberately does not try, so spawning from this state is how one spec gets built twice.
 Report it to firstmate with the issue URL and what was found, and let a person decide.
-Two of these are ordinary and neither needs a spawn.
+
+There is exactly one case that resolves itself here, and it is the one where a worker already exists.
 
 - The worker already exists here but was never bound: `bind` it now, and nothing else.
-- Another machine is building it, which is the common case whenever both machines poll the same repository: leave it alone.
-  That machine will report the outcome into this same issue.
-  Expect the poll to keep naming it until then; that repetition is a known and accepted cost of never going quiet about a genuinely stuck issue.
-- The work is not wanted, or cannot proceed, and this machine owns it: report it blocked with the reason, which leaves it open for the captain.
+  From then on it is an ordinary bound task, so `report --built` or `report --blocked` works on it as usual.
+- Anything else: report it to firstmate with the issue URL and stop.
+  That covers a build another machine is running, which is the common case whenever both machines poll one repository, and it covers work that is no longer wanted or cannot proceed.
+  Do not spawn, do not `bind` a task that is not already building this issue, and do not hand-edit the labels.
+  `report` needs a task record carrying `issue=<url>` and refuses without one, so with no worker there is no supported way to mark the issue from here, and inventing one is what a person is being asked to decide about.
+  Expect the poll to keep naming the issue until it closes; that repetition is a known and accepted cost of never going quiet about a genuinely stuck issue.
 
 ## Reporting the outcome
 

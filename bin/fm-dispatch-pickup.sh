@@ -347,6 +347,44 @@ issue_claimants() { # <issue-url>
   done
 }
 
+# Every issue URL any task record in this home claims, read in ONE pass over the
+# records and held newline-delimited so asking about one issue is a local match.
+#
+# The sweep asks that question for every issue it lists, and answering it by
+# re-walking the records each time is work that grows with issues times records.
+# That cost is invisible to the sweep budget, which bounds forge probes and is
+# only consulted between them, so a home with many tasks and a full building list
+# could spend the whole watcher timeout here - and a check the watcher kills
+# prints nothing AND writes no record, so the cadence gate never engages and the
+# next poll does it again, forever. Reading each record once is the boundary that
+# removes the multiplication rather than another guard around it.
+#
+# Newline delimiters cannot be forged by a recorded value, because a value is one
+# line of a record, which makes this match as exact as the per-record scan was.
+CLAIMED_URLS=
+
+claimed_urls_load() {
+  local meta line
+  CLAIMED_URLS=$'\n'
+  [ -d "$STATE" ] || return 0
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        issue=?*) CLAIMED_URLS="$CLAIMED_URLS${line#issue=}"$'\n' ;;
+      esac
+    done < "$meta"
+  done
+  return 0
+}
+
+issue_url_claimed() { # <issue-url>
+  case "$CLAIMED_URLS" in
+    *$'\n'"$1"$'\n'*) return 0 ;;
+  esac
+  return 1
+}
+
 meta_issue() { # <meta-path>; prints the recorded issue URL, if any
   local meta=$1 line value=''
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
@@ -554,7 +592,7 @@ list_labeled() { # <repo> <label>
 }
 
 sweep_repo() { # <repo>
-  local repo=$1 raw number title count claimed url status
+  local repo=$1 raw number title count url status
   # An unreadable repository is a finding, never an empty list. "Nothing was
   # dispatched" and "I could not look" must never render the same.
   if ! raw=$(list_labeled "$repo" "$LABEL_DISPATCHED"); then
@@ -600,8 +638,7 @@ EOF
     esac
     count=$((count + 1))
     url=$(issue_url "${repo%%/*}" "${repo#*/}" "$number")
-    claimed=$(issue_claimants "$url")
-    [ -z "$claimed" ] || continue
+    ! issue_url_claimed "$url" || continue
     # No task record here claims it, so it is anomalous and reported, without
     # asking whose it is. It could be this home's crashed claim between the
     # relabel and the spawn, or a build another machine is running right now,
@@ -681,6 +718,7 @@ action_check() {
 
   BUDGETED=1
   DEADLINE=$(($(real_epoch) + BUDGET_SECS))
+  claimed_urls_load
 
   if [ -n "$BUDGET_CUT_FROM" ]; then
     emit "sweep budget ${BUDGET_CUT_FROM}s cut to ${BUDGET_SECS}s to stay inside the watcher check timeout of ${CHECK_TIMEOUT}s"

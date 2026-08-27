@@ -93,15 +93,26 @@ case "$sub:$verb:$json" in
     # repository itself still answers, which is an outage and not a posture.
     [ -e "$d/.issues-disabled" ] && exit 1
     [ "${FM_MOCK_GH_FAIL_LIST:-0}" = 1 ] && exit 1
+    # Filtered in pure shell rather than with grep and sed per issue, because a
+    # case measures the script's own per-issue work by counting the commands it
+    # shells out to, and a mock that forked per issue would drown that signal.
     for f in "$d"/*.issue; do
       [ -e "$f" ] || continue
-      grep -q '^state=OPEN$' "$f" || continue
-      labels_of "$f" | grep -q -x -F "$label" || continue
-      n=$(basename "$f" .issue)
-      # Deliberately NOT applying the query's own control-character strip, so a
-      # title's whitespace reaches the script and its second line of defence is
-      # exercised rather than assumed.
-      t=$(sed -n 's/^title=//p' "$f" | head -n 1)
+      state=; t=; matched=0
+      while IFS= read -r ln || [ -n "$ln" ]; do
+        case "$ln" in
+          state=*) [ -n "$state" ] || state=${ln#state=} ;;
+          # Deliberately NOT applying the query's own control-character strip, so
+          # a title's whitespace reaches the script and its second line of
+          # defence is exercised rather than assumed.
+          title=*) [ -n "$t" ] || t=${ln#title=} ;;
+          label=*) if [ "${ln#label=}" = "$label" ]; then matched=1; fi ;;
+        esac
+      done < "$f"
+      [ "$state" = OPEN ] || continue
+      [ "$matched" = 1 ] || continue
+      n=${f##*/}
+      n=${n%.issue}
       printf '%s\t%s\n' "$n" "$t"
     done
     ;;
@@ -211,7 +222,18 @@ case "$verb" in
 esac
 exit 0
 SH
-  chmod 0755 "$bin/gh" "$bin/gh-axi"
+  # A counting shim for the command the claimant scan shells out to. It logs one
+  # line per invocation and then becomes the real tool, so a case can measure the
+  # SHAPE of the local work a sweep performs instead of how long this machine
+  # took to do it. The real path is resolved now, while the shim is not yet on
+  # PATH, so the shim cannot find itself.
+  cat > "$bin/grep" <<SH
+#!/usr/bin/env bash
+[ -z "\${FM_MOCK_GREP_CALLS:-}" ] || printf '%s\n' "\$*" >> "\$FM_MOCK_GREP_CALLS"
+exec $(command -v grep) "\$@"
+SH
+
+  chmod 0755 "$bin/gh" "$bin/gh-axi" "$bin/grep"
 }
 
 # --- fixtures ---------------------------------------------------------------
@@ -450,6 +472,56 @@ test_every_unclaimed_building_issue_is_reported_as_anomalous() {
   assert_contains "$report" "marked building with no task $REPO_SLUG#13" "this home's own crashed claim went unreported"
   assert_contains "$report" "marked building with no task $REPO_SLUG#14" "an issue with no comments at all went unreported"
   pass "every unclaimed building issue is reported as anomalous, whatever it carries"
+}
+
+# sweep_local_work <name> <issues> <records> <calls-file>: a home holding the
+# given number of open fm:building issues and the given number of task records,
+# swept once with the claimant-scan counter armed. Echoes nothing; the count
+# lands in the calls file.
+sweep_local_work() {
+  local name=$1 issues=$2 records=$3 calls=$4 home n
+  home=$(make_home "$name")
+  n=1
+  while [ "$n" -le "$issues" ]; do
+    seed_issue "$home" "$((400 + n))" "B$n" fm:building
+    n=$((n + 1))
+  done
+  n=1
+  while [ "$n" -le "$records" ]; do
+    write_task "$home" "fm-r$n" "$(issue_url_for "$((900 + n))")"
+    n=$((n + 1))
+  done
+  : > "$calls"
+  RUN_STATUS=0
+  env FM_HOME="$home" FM_MOCK_GH_DIR="$home/mock" PATH="$home/bin:$PATH" \
+    FM_MOCK_GREP_CALLS="$calls" FM_CHECK_TIMEOUT=30 FM_DISPATCH_PICKUP_INTERVAL=0 \
+    "$PICKUP" check >"$home/out.txt" 2>&1 || RUN_STATUS=$?
+  expect_code 0 "$RUN_STATUS" "check exit for $name"
+}
+
+test_the_claimant_scan_does_not_grow_with_the_issue_count() {
+  local few many delta
+  # The sweep asks "does any task record here already claim this issue" for every
+  # issue it lists. Answering that by re-walking the records once per issue is
+  # work that grows with issues TIMES records, and it is local work, so the sweep
+  # budget never sees it: the budget bounds forge probes and is only consulted
+  # between them. A home with a full building list and a few hundred tasks would
+  # spend the whole watcher timeout there - and a check the watcher kills prints
+  # nothing AND writes no record, so the cadence gate never engages and the next
+  # poll repeats it, forever.
+  #
+  # Measured by counting the commands the scan shells out to rather than by
+  # elapsed time, so this fails on the shape of the work and cannot go quietly
+  # vacuous on a fast machine. Both runs hold the SAME 20 task records and differ
+  # only in how many issues are listed, so anything that does not scale with the
+  # issue count cancels out of the difference.
+  sweep_local_work scan-few 5 20 "$TMP_ROOT/scan-few.calls"
+  sweep_local_work scan-many 25 20 "$TMP_ROOT/scan-many.calls"
+  few=$(wc -l < "$TMP_ROOT/scan-few.calls" | tr -d '[:space:]')
+  many=$(wc -l < "$TMP_ROOT/scan-many.calls" | tr -d '[:space:]')
+  delta=$((many - few))
+  [ "$delta" -le 5 ] || fail "20 more issues cost $delta more claimant-scan commands against the same 20 task records ($few then $many), so the scan still runs per issue"
+  pass "the claimant scan does not grow with the number of issues swept"
 }
 
 test_many_building_issues_do_not_starve_the_next_repository() {
@@ -1046,6 +1118,7 @@ test_armed_check_wakes_the_watcher_with_the_dispatched_report() {
 test_a_second_poll_over_the_same_issue_creates_nothing
 test_a_claim_that_never_became_a_task_is_reported_not_offered_again
 test_every_unclaimed_building_issue_is_reported_as_anomalous
+test_the_claimant_scan_does_not_grow_with_the_issue_count
 test_many_building_issues_do_not_starve_the_next_repository
 test_a_truncated_building_list_says_it_was_cut
 test_two_concurrent_pickups_of_one_issue_produce_one_claim
