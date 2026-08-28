@@ -419,6 +419,56 @@ The sweep must finish inside `FM_CHECK_TIMEOUT` (default 30), because a run the 
 So a budget larger than that timeout allows is cut down to what fits instead of being refused, and the cut is reported in the report line.
 A budget that is not a whole number from 1 to 120 is still refused outright.
 
+## Cross-machine work dispatch (state/dispatch-pickup.check.sh)
+
+The captain specs work on one machine and it gets built on another.
+The transport is an ordinary GitHub issue on the repository the work targets: the authoring machine opens it with the spec as the body and the label `fm:dispatched`, and the building machine picks it up on its own schedule.
+Nothing pushes, nothing listens, and neither machine assumes the other is awake, so a machine can dispatch and then power off.
+
+The issue is the record rather than a notification, so there is no parallel state file that can disagree with it.
+Every state is one label plus the issue's own open or closed:
+
+| Label | Meaning | Set by |
+|---|---|---|
+| `fm:dispatched` | waiting to be picked up | the authoring machine, at creation |
+| `fm:building` | a task exists and is working | the building machine, on pickup |
+| `fm:built` (issue closed) | landed, or ready for the captain | the building machine, on completion |
+| `fm:blocked` (issue stays open) | needs the captain, and is not abandoned | the building machine, on failure |
+
+[`bin/fm-dispatch-pickup.sh`](../bin/fm-dispatch-pickup.sh) owns this home's side of that exchange, and its `--help` owns the exact commands, flags, and bounds.
+It polls every GitHub-backed clone under `projects/` for open issues carrying those labels, and it reports rather than acting on its own.
+A clone with no GitHub origin, such as a `local-only` project, is skipped in silence, and so is a repository whose GitHub Issues are turned off, because both are registered postures rather than faults.
+A repository that cannot be read is counted in the report rather than dropped, because "nothing was dispatched" and "I could not look" must never render the same.
+Issues being off is told apart from an outage by asking GitHub for the repository's `hasIssuesEnabled` field rather than by matching an error message, so only a definite "off" is silent and anything unreadable stays loud.
+
+One issue produces at most one build.
+The task record carries the issue URL as `issue=<url>`, the same shape as the existing `pr=` field, and picking up refuses when any task record in this home already claims that issue.
+The relabel to `fm:building` happens before the worker is spawned, never after, so an interruption in that window leaves an issue visibly stuck with no task - which the poll counts - rather than an issue still marked `fm:dispatched` that the next poll builds a second time.
+An open `fm:building` issue with no task record in this home is reported as anomalous, unconditionally, and never acted on automatically.
+The poll does not try to work out whose build it is: it reads no comments and distinguishes no machine.
+That has a real cost to be honest about - when two machines poll the same repository, each reports the other's build in progress, on every re-nag, until it closes.
+It is accepted deliberately, because a report can never cause a duplicate build, while every mechanism tried for staying quiet about the other machine's build could instead go silent about an issue that is genuinely stuck, and nothing else in the system surfaces that state.
+The report is one line of counts in a fixed shape, and it names nothing: no issue number, no title, no repository.
+It leads with anything saying the report is not the whole truth, such as how many repositories could not be read or that a list hit the query cap, then how many issues are ready to pick up, then how many are marked building with no task here, and it ends with the labels and the directory to go looking in.
+Naming findings meant one kind could crowd out another, and bounding each kind to a few names moved that problem rather than removing it, so the names are gone and the counts are what carry the news.
+The poll compares the line it printed when deciding whether to report again, so a change is news exactly when a count changes; a change that leaves every count identical, such as one waiting issue being picked up while another arrives, waits for the re-nag like any unchanged set.
+`bind` is a recorder and writes nothing to the forge: it records `issue=<url>` after refusing an issue that is not labeled `fm:building` and refusing one another task record already claims.
+Every relabel, comment, and close is read back and asserted, so a forge CLI that reports success without applying the change is refused rather than trusted.
+A comment is confirmed by requiring the newest comment to have changed and to carry the body that was posted, and it is confirmed before the label change and the close, so an outcome never closes an issue whose comment is missing.
+Reads use `gh` with machine-readable output because the result decides whether a worker is spawned; writes use `gh-axi`, matching [`bin/fm-pr-merge.sh`](../bin/fm-pr-merge.sh).
+
+Arm the check once per home with `bin/fm-dispatch-pickup.sh arm`.
+That writes `state/dispatch-pickup.check.sh` and binds its bytes with `bin/fm-check-register.sh`, so the existing watcher polls it on its normal cadence and turns its one line into a `check:` wake; no separate schedule, daemon, or open port is involved.
+`bin/fm-dispatch-pickup.sh disarm` removes the shim, its trust binding, and the report record.
+The check prints nothing when nothing is waiting, and `state/.dispatch-pickup` records the findings the last report was made from so one waiting issue is reported once instead of on every poll.
+A changed finding set is always reported again, and an unchanged one is reported again once the re-nag interval has passed, so work nobody picked up cannot go quiet forever.
+
+The labels are ordinary repository labels and this home never creates them; on the read path a repository that does not have them yet simply reports nothing until an issue carries one.
+The write path needs them to exist, because GitHub resolves a label name to an id and fails the whole edit on a name it does not know: picking work up adds `fm:building`, and reporting an outcome adds `fm:built` or `fm:blocked`.
+So create those three once per repository this home is expected to build for, for example `gh label create fm:building -R <owner>/<repo>` and the same for `fm:built` and `fm:blocked`.
+A relabel that fails because one of them is missing names that label and says it has to be created in that repository first, rather than reading like a forge or network fault.
+Nothing here creates an issue, writes into a project working tree, merges anything, or closes an issue on failure.
+
 ## Relay (.env)
 
 Relay lets a firstmate instance answer public mentions and act on normal reversible mention requests through firstmate's normal lifecycle.
@@ -677,6 +727,12 @@ FM_TOOL_UPDATE_INTERVAL=900   # seconds between watched-tool probe sweeps; 0 pro
 FM_TOOL_UPDATE_PROBE_SECS=5   # 1..30 seconds allowed for one version or git probe
 FM_TOOL_UPDATE_BUDGET_SECS=20   # 1..120 seconds allowed for a whole watched-tool sweep; cut to fit FM_CHECK_TIMEOUT, and the cut is reported
 FM_TOOL_UPDATE_NOW=     # test override for the watched-tool sweep clock; the sweep budget still uses real time
+FM_DISPATCH_PICKUP_INTERVAL=900   # seconds between dispatched-issue probe sweeps; 0 probes on every run, other values must be 60..86400
+FM_DISPATCH_PICKUP_RENAG=21600   # seconds before an unchanged set of dispatch findings is reported again; 0 disables the re-nag, other values must be 300..604800
+FM_DISPATCH_PICKUP_PROBE_SECS=8   # 1..30 seconds allowed for one forge call inside a sweep; a call is cut further to whatever the sweep budget has left
+FM_DISPATCH_PICKUP_BUDGET_SECS=20   # 1..120 seconds allowed for a whole dispatched-issue sweep; cut to fit FM_CHECK_TIMEOUT, and the cut is reported
+FM_DISPATCH_PICKUP_WRITE_SECS=30   # 1..300 seconds allowed for one forge call made by claim, bind, or report; those commands have no sweep budget
+FM_DISPATCH_PICKUP_NOW=   # test override for the dispatch report-once and re-nag clock; the sweep budget still uses real time
 FM_PROCEVENT_MAX_OUTPUT_BYTES=1048576   # bound on one captured process-to-event result
 FM_PROCEVENT_CLAIM_ROOT=                # machine-wide source claim root; default $XDG_STATE_HOME/firstmate/procevent-claims
 FM_WHEN_OUTPUT_TAIL_BYTES=8192          # bound on the command-output tail inside one condition->action outcome document

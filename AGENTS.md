@@ -113,6 +113,7 @@ state/               runtime records and signals; gitignored
   .pr-check-migration-scan-v1  private marker proving the non-executing scan disabled every unsafe legacy check; .pr-check-migration-v1 separately records completed private repairs
   x-watch.check.sh   generated Relay poll shim; present only when opted in (section 14)
   tool-updates.check.sh  generated watched-tool update poll shim and its .check-trust binding; present only after bin/fm-tool-update-check.sh arm; its report record .tool-updates is what keeps one pending update from being reported on every poll
+  dispatch-pickup.check.sh  generated cross-machine dispatched-issue poll shim and its .check-trust binding; present only after bin/fm-dispatch-pickup.sh arm; its report record .dispatch-pickup holds the counts line last printed, so an unchanged set of counts is not reported again on every poll
   pending-replies/   parent-owned secondmate pending-reply records (correlation id, delivery vs reply, recovery, escalation); fm-pending-reply-lib.sh
   pending-acks/      durable acknowledgment records for token-marked orders sent via fm-send --ack; cleared on ack or teardown, escalated once by the watcher when unacknowledged; fm-steer-ack-lib.sh
   pending-completions/  durable completion-alarm records for tasks whose reconciled current state is terminal for the supervisor; cleared when the task resumes or tears down, escalated once per episode by the watcher past the alarm window; fm-completion-alarm-lib.sh
@@ -415,7 +416,7 @@ Handle actionable wakes as follows:
 
 1. For `signal:`, read the listed event lines first, then reconcile current state only where action depends on it.
 2. For `stale:`, inspect the recorded endpoint and load `stuck-crewmate-recovery` for a stopped, looping, confused, or unresponsive worker; a deep-inspection reason also requires current-state and validation-log inspection.
-3. For `check:`, act on the named poll result, including merges, recorded PRs found merged or closed externally, Relay events, process-to-event source results, captain inbox notes, and the once-daily `decision-digest` of waiting captain decisions, whose ranked top unblockers you relay to the captain as concise outcome-focused prose; a handled inbox note is also acknowledged with `bin/fm-inbox.sh drain --ack <id>`, or it stays counted as still waiting for firstmate.
+3. For `check:`, act on the named poll result, including merges, recorded PRs found merged or closed externally, Relay events, process-to-event source results, captain inbox notes, work another machine dispatched as a GitHub issue, and the once-daily `decision-digest` of waiting captain decisions, whose ranked top unblockers you relay to the captain as concise outcome-focused prose; a handled inbox note is also acknowledged with `bin/fm-inbox.sh drain --ack <id>`, or it stays counted as still waiting for firstmate.
 4. For `heartbeat:`, review the whole fleet from the structured fleet view, reconcile suspicious tasks and PR state, update the backlog, and never report an unchanged fleet as progress.
 
 When any wake reports a merged PR for a project cloned in this home, refresh that clone through the guarded fleet-sync path.
@@ -549,6 +550,7 @@ These skills are not captain-invocable; load them only at their precise triggers
   Cloning or registering a project is add intake and uses the same trigger.
 - `stuck-crewmate-recovery` - load when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer.
 - `secondmate-provisioning` - load before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited local material into, or retiring a secondmate home, and before editing `data/secondmates.md`.
+- `dispatched-issue-pickup` - load on a `check:` wake whose poll result names dispatched work, before picking up a GitHub issue another machine dispatched, and before reporting a picked-up task's outcome.
 - `captain-hold-lifecycle` - load before treating an investigation or visual review as complete, before ending a visual review that exposed a captain decision, when recording or routing the captain's answer, and on any `RECORD DIVERGENCE` line from the wake drain.
 - `process-event-sources` - load before arming a long-polling source, before registering a deterministic condition->action watch (do X as soon as Y is true), and on any `procevent <adapter> <source-id> <sequence>` check wake.
   Never run a registered source's blocking command yourself in a conversational turn.
