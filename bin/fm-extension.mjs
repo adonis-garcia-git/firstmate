@@ -685,8 +685,14 @@ async function installPackage(home, sourceInfo) {
         || sourceAfterCopy.manifestDigest !== sourceInfo.manifestDigest) {
       fail("integrity-mismatch", "package changed while it was copied into the managed store");
     }
+    // Darwin refuses to rename a write-protected directory (EACCES), so the
+    // staged root is lifted to 0700 for the rename alone and the destination
+    // is restored to 0555 before the final validation, which still asserts
+    // the installed read-only modes on every entry.
+    await chmod(temporary, 0o700);
     try {
       await rename(temporary, destination);
+      await chmod(destination, 0o555);
       return { packageInfo: await validatePackage(destination, { installed: true }) };
     } catch (error) {
       if (!error || !["EEXIST", "ENOTEMPTY"].includes(error.code)) throw error;
