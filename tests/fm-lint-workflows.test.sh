@@ -166,8 +166,21 @@ EOF
 YAML
 }
 
+# True when the exact pinned actionlint resolves on PATH. Tests that execute
+# the real workflow lint skip when it does not, mirroring fm-lint.test.sh's
+# pinned ShellCheck gate, so hosts without the pinned tool stay hermetic while
+# CI (which installs the pin) keeps full coverage.
+pinned_actionlint_ready() {
+  command -v actionlint >/dev/null 2>&1 || return 1
+  [ "$(actionlint -version | awk 'NR==1 {print; exit}')" = "$REQUIRED" ]
+}
+
 test_current_workflows_pass() {
   local out rc
+  if ! pinned_actionlint_ready; then
+    pass "SKIP (actionlint $REQUIRED not resolved): current-workflow parse check"
+    return
+  fi
   rc=0
   out=$("$LINT_WF" 2>&1) || rc=$?
   [ "$rc" -eq 0 ] || fail "current workflows must parse, got $rc"$'\n'"$out"
@@ -178,6 +191,10 @@ test_current_workflows_pass() {
 
 test_col0_heredoc_fails_with_clear_error() {
   local tmp out rc
+  if ! pinned_actionlint_ready; then
+    pass "SKIP (actionlint $REQUIRED not resolved): column-0 heredoc check"
+    return
+  fi
   tmp=$(fm_test_tmproot fm-lint-wf-col0)
   mkdir -p "$tmp/.github/workflows"
   write_col0_heredoc_workflow "$tmp/.github/workflows/ci.yml"
@@ -193,6 +210,10 @@ test_col0_heredoc_fails_with_clear_error() {
 
 test_valid_fixture_passes() {
   local tmp out rc
+  if ! pinned_actionlint_ready; then
+    pass "SKIP (actionlint $REQUIRED not resolved): valid fixture check"
+    return
+  fi
   tmp=$(fm_test_tmproot fm-lint-wf-ok)
   mkdir -p "$tmp/.github/workflows"
   write_valid_workflow "$tmp/.github/workflows/ci.yml"
@@ -218,6 +239,10 @@ test_empty_workflows_dir_fails() {
 
 test_explicit_broken_path_fails() {
   local tmp broken out rc
+  if ! pinned_actionlint_ready; then
+    pass "SKIP (actionlint $REQUIRED not resolved): explicit broken path check"
+    return
+  fi
   tmp=$(fm_test_tmproot fm-lint-wf-path)
   broken="$tmp/broken.yml"
   write_col0_heredoc_workflow "$broken"
@@ -231,6 +256,10 @@ test_explicit_broken_path_fails() {
 
 test_non_mapping_root_fails() {
   local tmp out rc
+  if ! pinned_actionlint_ready; then
+    pass "SKIP (actionlint $REQUIRED not resolved): non-mapping root check"
+    return
+  fi
   tmp=$(fm_test_tmproot fm-lint-wf-scalar)
   mkdir -p "$tmp/.github/workflows"
   printf 'just-a-string\n' > "$tmp/.github/workflows/ci.yml"
@@ -464,6 +493,10 @@ test_installer_rejects_unsupported_platform() {
 # workflow root is the fixture, not this worktree.
 test_fm_lint_default_path_catches_broken_ci_yml() {
   local tmp fakebin log diff_file out rc
+  if ! pinned_actionlint_ready; then
+    pass "SKIP (actionlint $REQUIRED not resolved): default-path broken ci.yml check"
+    return
+  fi
   tmp=$(fm_test_tmproot fm-lint-wf-default)
   mkdir -p "$tmp/bin" "$tmp/.github/workflows"
   cp "$LINT" "$tmp/bin/fm-lint.sh"
