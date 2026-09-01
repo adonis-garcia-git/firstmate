@@ -559,7 +559,9 @@ test_briefs_teach_the_ack_reply() {
 test_teardown_clears_task_records() {
   local case_dir fb rc
   case_dir="$TMP_ROOT/teardown-case"
-  mkdir -p "$case_dir/state" "$case_dir/config"
+  # FM_DATA_OVERRIDE is pinned because teardown's backlog transition
+  # (bin/fm-backlog-transition-lib.sh) must resolve a data directory.
+  mkdir -p "$case_dir/state" "$case_dir/config" "$case_dir/data"
   fb=$(fm_fakebin "$case_dir")
   fm_fake_exit0 "$fb" treehouse tmux gh-axi gh
   git init -q "$case_dir/project"
@@ -576,7 +578,8 @@ test_teardown_clears_task_records() {
   arm_record "$case_dir/state" other-task 89abcdef "unrelated order"
   set +e
   FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
-    FM_CONFIG_OVERRIDE="$case_dir/config" PATH="$fb:$PATH" \
+    FM_CONFIG_OVERRIDE="$case_dir/config" FM_DATA_OVERRIDE="$case_dir/data" \
+    PATH="$fb:$PATH" \
     "$TEARDOWN" task-x1 > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e

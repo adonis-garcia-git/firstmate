@@ -302,12 +302,8 @@ test_remoteless_unresolvable_primary_base_refuses() {
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
   mkdir -p "$CASE_DIR/not-a-repo"
 
-  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
-    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
-    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
-    FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" FM_FAKE_PANE_PATH="$POOL_DIR" \
-    PATH="$FAKEBIN_DIR:$PATH" \
-    "$SPAWN" "$id" "$CASE_DIR/not-a-repo" --mode no-mistakes --yolo off 2>&1)
+  out=$(fm_test_run_spawn "$HOME_DIR" "$POOL_DIR" "$FAKEBIN_DIR" \
+    "$id" "$CASE_DIR/not-a-repo" --mode no-mistakes --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn succeeded despite an unreadable primary copy"
   assert_contains "$out" "$POOL_DIR" "the unreadable-primary refusal did not name the pooled worktree"
