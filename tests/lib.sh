@@ -156,6 +156,11 @@ fm_test_cleanup() {
 fm_test_tmproot() {
   local prefix=${1:-fm-test} root
   root=$(mktemp -d "${TMPDIR:-/tmp}/${prefix}.XXXXXX") || return 1
+  # Canonicalize so fixture paths survive identity checks that compare the
+  # physical path (macOS TMPDIR lives behind the /var -> /private/var symlink,
+  # and the process-event claim state-root binding refuses a symlinked
+  # spelling).
+  root=$(cd -P -- "$root" && pwd -P) || return 1
   if ! printf '%s\n%s\n' "$$" "$FM_TEST_OWNER_IDENTITY" > "$root/.fm-test-fixture" ||
     ! printf '%s\n' "$root" >> "$FM_TEST_CLEANUP_REGISTRY"; then
     rm -rf "$root"
