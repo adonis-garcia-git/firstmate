@@ -665,6 +665,34 @@ case "$package_root" in "$H_GOOD"/data/extensions/packages/*) ;; *) fail "bindin
   || fail "managed package root is not read-only"
 pass "bind computes a content-addressed package, negotiates v1, and publishes an inspectable binding"
 
+# An install interrupted between publication and sealing leaves the managed
+# package root writable; the next install of the same bytes must reseal it.
+P_HEAL="$PACKAGES/heal"
+make_package "$P_HEAL" org.example.heal ext-heal
+H_HEAL="$HOMES/heal"; new_home "$H_HEAL"
+heal_bind=$(bind_package "$H_HEAL" "$P_HEAL" ext-heal)
+heal_binding_digest=$(printf '%s\n' "$heal_bind" | sed -n 's/^binding-digest: //p')
+heal_root=$(binding_value "$H_HEAL" org.example.heal package_root)
+FM_HOME="$H_HEAL" "$HOST" retire-binding org.example.heal --if-binding-digest "$heal_binding_digest" >/dev/null
+chmod 0700 "$heal_root"
+out=$(bind_package "$H_HEAL" "$P_HEAL" ext-heal)
+assert_contains "$out" "verified: process-event-adapter/1" "rebind did not reseal an unsealed managed package root"
+[ "$(stat -c '%a' "$heal_root" 2>/dev/null || stat -f '%Lp' "$heal_root")" = 555 ] \
+  || fail "resealed managed package root is not read-only"
+pass "an unsealed managed package root left by an interrupted install reseals on the next bind"
+
+H_TAMPER="$HOMES/heal-tamper"; new_home "$H_TAMPER"
+tamper_bind=$(bind_package "$H_TAMPER" "$P_HEAL" ext-heal)
+tamper_binding_digest=$(printf '%s\n' "$tamper_bind" | sed -n 's/^binding-digest: //p')
+tamper_root=$(binding_value "$H_TAMPER" org.example.heal package_root)
+FM_HOME="$H_TAMPER" "$HOST" retire-binding org.example.heal --if-binding-digest "$tamper_binding_digest" >/dev/null
+chmod 0700 "$tamper_root"
+chmod 0644 "$tamper_root/helper.txt"
+printf 'tampered helper\n' > "$tamper_root/helper.txt"
+chmod 0444 "$tamper_root/helper.txt"
+expect_failure "different bytes" bind_package "$H_TAMPER" "$P_HEAL" ext-heal
+pass "an unsealed managed package root with different bytes refuses to reseal"
+
 P_CONCURRENT_ONE="$PACKAGES/concurrent-one"
 P_CONCURRENT_TWO="$PACKAGES/concurrent-two"
 concurrent_marker="$TMP_ROOT/concurrent.entered"

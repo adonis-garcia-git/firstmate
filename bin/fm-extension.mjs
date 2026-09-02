@@ -649,14 +649,25 @@ async function removeManagedTree(root) {
   await rm(root, { recursive: true, force: true });
 }
 
+async function sealAndValidateInstalled(destination, sourceInfo, mismatchMessage) {
+  const info = await maybeLstat(destination);
+  if (info && info.isDirectory() && !info.isSymbolicLink() && modeOf(info) !== 0o555) {
+    const unsealed = await validatePackage(destination, { installed: false });
+    if (unsealed.tree.digest !== sourceInfo.tree.digest) fail("integrity-mismatch", mismatchMessage);
+    await chmod(destination, 0o555);
+  }
+  const installed = await validatePackage(destination, { installed: true });
+  if (installed.tree.digest !== sourceInfo.tree.digest) fail("integrity-mismatch", mismatchMessage);
+  return installed;
+}
+
 async function installPackage(home, sourceInfo) {
   const digestHex = sourceInfo.tree.digest.slice("sha256:".length);
   const parent = await ensureHomePrivatePath(home, ["data", "extensions", "packages", sourceInfo.manifest.id, sourceInfo.manifest.version]);
   const destination = path.join(parent, digestHex);
   const existing = await maybeLstat(destination);
   if (existing) {
-    const installed = await validatePackage(destination, { installed: true });
-    if (installed.tree.digest !== sourceInfo.tree.digest) fail("integrity-mismatch", "existing content-addressed package directory has different bytes");
+    const installed = await sealAndValidateInstalled(destination, sourceInfo, "existing content-addressed package directory has different bytes");
     return { packageInfo: installed };
   }
 
@@ -692,15 +703,14 @@ async function installPackage(home, sourceInfo) {
     await chmod(temporary, 0o700);
     try {
       await rename(temporary, destination);
-      await chmod(destination, 0o555);
-      return { packageInfo: await validatePackage(destination, { installed: true }) };
     } catch (error) {
       if (!error || !["EEXIST", "ENOTEMPTY"].includes(error.code)) throw error;
       await removeManagedTree(temporary);
-      const winner = await validatePackage(destination, { installed: true });
-      if (winner.tree.digest !== sourceInfo.tree.digest) fail("integrity-mismatch", "concurrent package install produced a different tree");
+      const winner = await sealAndValidateInstalled(destination, sourceInfo, "concurrent package install produced a different tree");
       return { packageInfo: winner };
     }
+    const sealed = await sealAndValidateInstalled(destination, sourceInfo, "package changed while it was copied into the managed store");
+    return { packageInfo: sealed };
   } catch (error) {
     await removeManagedTree(temporary).catch(() => {});
     throw error;
