@@ -17,6 +17,7 @@ Rewriting the description without carrying that section over fails the check on 
 When that event verdict fails, the job waits briefly for the live PR body's attestation to bind the event's head and then re-judges the live body with the same pinned action, so a compliant rewrite landing within that wait clears the run in place.
 Either preserve the section when you edit the body, or push the branch through the gate again so no-mistakes rewrites it.
 The same staleness hits a `synchronize` run when commits reach the branch ahead of the gate's body rewrite - for example review-fix or CI auto-fix commits the pipeline itself pushes onto an already-attested PR - because that event still carries the body bound to the previous head; the wait-and-re-judge fallback exists precisely so the gate's own push-then-rewrite cadence heals in place.
+That heal-in-place depends on the gate restamping the attestation onto each repair head it pushes, which no-mistakes does from v1.60.2 - an older gate leaves its own CI auto-fix pushes bound to the pre-repair head, so every repair cycle widens the gap and the check stays red until a `no-mistakes rerun` rebinds the body to the pipeline-pushed head.
 When the rewrite lands after the wait budget instead, re-run the latest failed check job - it re-judges the live body and passes once the attestation binds the current head.
 If no compliant rewrite exists at all, recover by driving the branch through the gate again so the pipeline rewrites the body and rebinds the attestation to the current head.
 When the stale-attested tip is already the pipeline-pushed head there are no new commits for `git push no-mistakes` to forward, so re-run the pipeline on that head with `no-mistakes rerun` instead.
@@ -28,7 +29,7 @@ GitHub Actions and Dependabot are exempt so their automation keeps working, but 
 
 1. Fork the repo, then clone the parent repo or set your local `origin` back to the parent (`git@github.com:kunchenguid/firstmate.git`).
 2. Create a branch and make your changes.
-3. Initialize the gate with your fork as the push target: `no-mistakes init --fork-url git@github.com:<you>/firstmate.git` (contributing to firstmate requires **no-mistakes v1.46.0+** for structured attestation; without a fork, plain `no-mistakes init` still works for maintainers with push access).
+3. Initialize the gate with your fork as the push target: `no-mistakes init --fork-url git@github.com:<you>/firstmate.git` (contributing to firstmate requires **no-mistakes v1.60.2+** - v1.46.0 introduced the structured attestation the check parses, and v1.60.2 restamps it onto the pipeline's own CI-repair pushes so the head-bound check can heal in place; without a fork, plain `no-mistakes init` still works for maintainers with push access).
 4. Commit your changes.
 5. Push through the gate instead of pushing to `origin`:
 

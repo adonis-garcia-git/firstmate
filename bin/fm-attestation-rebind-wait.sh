@@ -102,6 +102,7 @@ done
   echo "error: the PR body attestation did not rebind to $EVENT_HEAD_SHA within the wait budget."
   echo "If the no-mistakes gate has since rewritten the PR body, re-run this failed job - it re-judges the live body."
   echo "Otherwise drive the branch through the gate again, or run 'no-mistakes rerun' when the stale-attested tip is already the pipeline-pushed head."
+  echo "A gate older than no-mistakes v1.60.2 never restamps the attestation onto its own CI-repair pushes, so when the pipeline pushed this head, upgrade the gate before the rerun or the next repair cycle wedges the check the same way."
   echo "See CONTRIBUTING.md for the full recovery contract."
 } >&2
 exit 1

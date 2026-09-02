@@ -143,6 +143,8 @@ test_timeout_reports_recovery_guidance() {
     "timeout message did not tell the operator that a re-run re-judges the live body"
   assert_contains "$output" "no-mistakes rerun" \
     "timeout message did not point at the gate rerun recovery"
+  assert_contains "$output" "v1.60.2" \
+    "timeout message did not name the minimum gate version that restamps CI-repair pushes"
   assert_no_grep "head-sha=" "$TMP_ROOT/github.out" "timed-out run must not export live facts"
   pass "an unrebound attestation times out with the documented recovery guidance"
 }
