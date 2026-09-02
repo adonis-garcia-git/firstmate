@@ -1318,9 +1318,6 @@ test_armed_check_wakes_the_watcher_with_the_dispatched_report() {
   # ordinary `check:` wake carrying the same report, with no new machinery.
   home=$(make_home wake)
   seed_issue "$home" 101 'Dispatched from the other machine' fm:dispatched
-  printf '%s\n' fm-pr-check-migration-scan-v1 > "$home/state/.pr-check-migration-scan-v1"
-  printf '%s\n' fm-pr-check-migration-v1 > "$home/state/.pr-check-migration-v1"
-  chmod 0600 "$home/state/.pr-check-migration-scan-v1" "$home/state/.pr-check-migration-v1"
   FM_HOME="$home" "$PICKUP" arm >/dev/null || fail "could not arm the dispatched-issue check"
 
   out="$home/out.txt"
