@@ -15,7 +15,7 @@ It evaluates every PR opening and body edit independently, reruns after head syn
 That cuts both ways: the `## Pipeline` section no-mistakes appends - the signature line plus the machine-read `<!-- no-mistakes-pipeline-attestation:v1 ... -->` comment - is part of the PR body contract, not decoration.
 Rewriting the description without carrying that section over fails the check on the resulting `edited` event, and re-running the failed job cannot clear it because the job reads the body from the event that triggered it.
 Either preserve the section when you edit the body, or push the branch through the gate again so no-mistakes rewrites it.
-The same staleness fails a `synchronize` run when commits reach the branch ahead of the gate's body rewrite - for example CI auto-fix commits the pipeline itself pushes onto an already-attested PR - because that event still carries the body bound to the previous head.
+The same staleness fails a `synchronize` run when commits reach the branch ahead of the gate's body rewrite - for example review-fix or CI auto-fix commits the pipeline itself pushes onto an already-attested PR - because that event still carries the body bound to the previous head.
 Recover by driving the branch through the gate again so the pipeline rewrites the body and rebinds the attestation to the current head.
 When the stale-attested tip is already the pipeline-pushed head there are no new commits for `git push no-mistakes` to forward, so re-run the pipeline on that head with `no-mistakes rerun` instead.
 The rebinding body edit then runs a fresh compliance check against the current head, and required workflows that already passed on that unchanged head keep their results.
