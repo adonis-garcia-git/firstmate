@@ -15,6 +15,8 @@ It evaluates every PR opening and body edit independently, reruns after head syn
 That cuts both ways: the `## Pipeline` section no-mistakes appends - the signature line plus the machine-read `<!-- no-mistakes-pipeline-attestation:v1 ... -->` comment - is part of the PR body contract, not decoration.
 Rewriting the description without carrying that section over fails the check on the resulting `edited` event, and re-running the failed job cannot clear it because the job reads the body from the event that triggered it.
 Either preserve the section when you edit the body, or push the branch through the gate again so no-mistakes rewrites it.
+The same staleness fails a `synchronize` run when commits reach the branch ahead of the gate's body rewrite - for example follow-up fix commits pushed onto an already-attested PR - because that event still carries the body bound to the previous head.
+Recover with the same gated re-push: it rebinds the attestation to the new head, and the fresh `synchronize` also restarts the CI workflow, which a body edit alone never triggers.
 GitHub Actions and Dependabot are exempt so their automation keeps working, but other contributor PRs that do not satisfy the attestation contract will not be reviewed or merged.
 
 ## Workflow
