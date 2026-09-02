@@ -13,12 +13,14 @@ A GitHub Actions check (`Require no-mistakes`) runs on PRs targeting `main` and 
 The attestation must bind to the current PR head commit and report the review, test, and document steps as completed, so a stale attestation, a missing `head_sha`, or a skipped required step fails.
 It evaluates every PR opening and body edit independently, reruns after head synchronization or reopening, and prevents a later edit from replacing an earlier pending compliance check.
 That cuts both ways: the `## Pipeline` section no-mistakes appends - the signature line plus the machine-read `<!-- no-mistakes-pipeline-attestation:v1 ... -->` comment - is part of the PR body contract, not decoration.
-Rewriting the description without carrying that section over fails the check on the resulting `edited` event, and re-running the failed job cannot clear it because the job reads the body from the event that triggered it.
+Rewriting the description without carrying that section over fails the check on the resulting `edited` event, because each run first judges the body carried by its triggering event.
+When that event verdict fails, the job waits briefly for the live PR body's attestation to bind the event's head and then re-judges the live body with the same pinned action, so a compliant rewrite landing within that wait clears the run in place.
 Either preserve the section when you edit the body, or push the branch through the gate again so no-mistakes rewrites it.
-The same staleness fails a `synchronize` run when commits reach the branch ahead of the gate's body rewrite - for example review-fix or CI auto-fix commits the pipeline itself pushes onto an already-attested PR - because that event still carries the body bound to the previous head.
-Recover by driving the branch through the gate again so the pipeline rewrites the body and rebinds the attestation to the current head.
+The same staleness hits a `synchronize` run when commits reach the branch ahead of the gate's body rewrite - for example review-fix or CI auto-fix commits the pipeline itself pushes onto an already-attested PR - because that event still carries the body bound to the previous head; the wait-and-re-judge fallback exists precisely so the gate's own push-then-rewrite cadence heals in place.
+When the rewrite lands after the wait budget instead, re-run the latest failed check job - it re-judges the live body and passes once the attestation binds the current head.
+If no compliant rewrite exists at all, recover by driving the branch through the gate again so the pipeline rewrites the body and rebinds the attestation to the current head.
 When the stale-attested tip is already the pipeline-pushed head there are no new commits for `git push no-mistakes` to forward, so re-run the pipeline on that head with `no-mistakes rerun` instead.
-The rebinding body edit then runs a fresh compliance check against the current head, and required workflows that already passed on that unchanged head keep their results.
+The rebinding body edit runs a fresh compliance check against the current head when GitHub delivers the `edited` event, and required workflows that already passed on that unchanged head keep their results; GitHub can skip that `edited` run when the rewrite lands seconds after a push, which is why the fallback above re-judges without needing a new event.
 If recovery forwards new commits instead, the fresh `synchronize` also restarts the full CI workflow, which a body edit alone never triggers.
 GitHub Actions and Dependabot are exempt so their automation keeps working, but other contributor PRs that do not satisfy the attestation contract will not be reviewed or merged.
 
