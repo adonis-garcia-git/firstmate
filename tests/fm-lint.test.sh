@@ -265,6 +265,23 @@ SH
   chmod +x "$fakebin/shellcheck"
 }
 
+# Stub the pinned actionlint so no-args lint runs stay hermetic on hosts
+# without a real actionlint. The version is read from the workflow linter's
+# own pin at stub-creation time, so a bumped pin cannot silently rot the stub.
+fm_lint_stub_actionlint() {  # <fakebin>
+  local fakebin=$1 pin
+  pin=$("$ROOT/bin/fm-lint-workflows.sh" --required-version)
+  cat > "$fakebin/actionlint" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = -version ]; then
+  printf '%s\n' "$pin"
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/actionlint"
+}
+
 test_fast_mode_disables_extended_analysis() {
   local tmp fakebin log mode_log telemetry fixture out
   tmp=$(fm_test_tmproot fm-lint-fast-mode)
@@ -367,6 +384,7 @@ test_changed_mode_lints_only_the_changed_file() {
   fm_lint_stub_git "$fakebin"
   log="$tmp/shellcheck.log"
   fm_lint_stub_shellcheck "$fakebin" "$log"
+  fm_lint_stub_actionlint "$fakebin"
   diff_file="$tmp/diff.nul"
   target="bin/fm-install-shellcheck.sh"
   fm_lint_write_diff_file "$diff_file" "$target" "README.md"
@@ -435,6 +453,8 @@ test_zero_changed_files_exits_clean() {
   tmp=$(fm_test_tmproot fm-lint-zero-changed)
   fakebin=$(fm_fakebin "$tmp")
   fm_lint_stub_git "$fakebin"
+  fm_lint_stub_shellcheck "$fakebin" "$tmp/shellcheck.log"
+  fm_lint_stub_actionlint "$fakebin"
   diff_file="$tmp/diff.nul"
   : > "$diff_file"
 
