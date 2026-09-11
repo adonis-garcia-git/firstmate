@@ -59,7 +59,7 @@ make_remoteless_case() {
 
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
   printf 'codex\n' > "$home/config/crew-harness"
-  printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+  fm_test_spawn_brief "$home" "$id"
   touch "$home/state/.last-watcher-beat"
 
   git init --quiet -b "$default" "$project"
@@ -556,7 +556,11 @@ test_remoteless_unresolvable_primary_base_refuses() {
     "$id" "$CASE_DIR/not-a-repo" --mode no-mistakes --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn succeeded despite an unreadable primary copy"
-  assert_contains "$out" "$POOL_DIR" "the unreadable-primary refusal did not name the pooled worktree"
+  # The shared Treehouse project-lock stage refuses an unreadable project
+  # before the freshen guard can, so the refusal names the project, not the
+  # pool; the contract under test is refusal without touching the pool.
+  assert_contains "$out" "$CASE_DIR/not-a-repo" \
+    "the unreadable-primary refusal did not name the unreadable project copy"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
     || fail "spawn moved HEAD after failing to read the primary copy"
   if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then

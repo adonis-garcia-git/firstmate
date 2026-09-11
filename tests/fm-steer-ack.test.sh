@@ -148,10 +148,19 @@ set -u
 case "${1:-}" in
   send-keys) exit 0 ;;
   display-message)
-    for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
+    # The ring's dead-pane precheck (fm_backend_tmux_agent_state) must read a
+    # LIVE agent here, or the composer skip under test is never reached: name
+    # an agent process and expose no tty so the process walk stays empty.
+    for a in "$@"; do
+      case "$a" in
+        *cursor_y*) printf '1\n'; exit 0 ;;
+        *pane_current_command*) printf 'claude\n'; exit 0 ;;
+        *pane_tty*) printf '\n'; exit 0 ;;
+      esac
+    done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane) printf '╭──────────────╮\n│ > stuck text │\n╰──────────────╯\n'; exit 0 ;;
-  list-windows) exit 0 ;;
+  list-windows) printf 'fm-helm\n'; exit 0 ;;
 esac
 exit 0
 SH
