@@ -162,10 +162,14 @@ SH
 test_herdr_agent_state_preserves_husk_classifier() {
   local pane_state expected out
 
+  # The unknown row consults the real server-running probe, so a live Herdr
+  # install on the host would answer for the fixture session and flip the
+  # verdict; fail the CLI reach in the fixture shell to keep the unit
+  # hermetic (an unreachable CLI is the probe's own unknown path).
   for row in 'dead missing' 'no-agent dead' 'live alive' 'unknown unreadable'; do
     pane_state=${row%% *}
     expected=${row#* }
-    out=$(FM_TEST_PANE_STATE="$pane_state" bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state() { printf "%s" "$FM_TEST_PANE_STATE"; }; fm_backend_herdr_agent_state "sess:p1"' "$ROOT")
+    out=$(FM_TEST_PANE_STATE="$pane_state" bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state() { printf "%s" "$FM_TEST_PANE_STATE"; }; fm_backend_herdr_cli() { return 1; }; fm_backend_herdr_agent_state "sess:p1"' "$ROOT")
     [ "$out" = "$expected" ] || fail "Herdr pane state $pane_state should map to $expected, got '$out'"
   done
 

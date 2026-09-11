@@ -1476,14 +1476,19 @@ test_deferred_signal_verification_outlives_an_unresponsive_tasks_axi() {
   # The read-back's own `start` never answers, so the spawn must bound it
   # (FM_TASKS_AXI_TIMEOUT=3), print the attempted wording naming the timeout,
   # and exit - the outer `timeout -k 5 30` only turns a regression back into
-  # the lock-held-forever hang it exists to catch.
+  # the lock-held-forever hang it exists to catch. Stock macOS ships no
+  # timeout binary, so the backstop is applied only where one exists; the
+  # bounded verification under test is FM_TASKS_AXI_TIMEOUT either way.
   mkdir -p "$case_dir/user-home"
+  set -- "$SPAWN" "$id" "$case_dir/project" --mode no-mistakes --yolo off
+  if command -v timeout >/dev/null 2>&1; then
+    set -- timeout -k 5 30 "$@"
+  fi
   out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$(home_of "$case_dir")" \
     HOME="$case_dir/user-home" FM_SPAWN_NO_GUARD=1 \
     FM_FAKE_PANE_PATH="$case_dir/wt" TMUX="fake,1,0" CLAUDE_CONFIG_DIR='' \
     FM_TASKS_AXI_TIMEOUT=3 PATH="$case_dir/fakebin:$PATH" \
-    timeout -k 5 30 "$SPAWN" "$id" "$case_dir/project" \
-    --mode no-mistakes --yolo off 2>&1) || rc=$?
+    "$@" 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "an interrupted spawn reported success"
   case "$rc" in
     124|137) fail "the verification hung on the unresponsive start instead of timing out: $out" ;;
@@ -2775,11 +2780,17 @@ test_spawn_refuses_a_special_file_tasks_config() {
   rm -f "$home/.tasks.toml"
   mkfifo "$home/.tasks.toml"
 
+  # The outer timeout is only a hang backstop for the refusal under test;
+  # stock macOS ships no timeout binary, so apply it only where one exists.
+  set -- "$SPAWN" "$id" "$case_dir/project" --mode no-mistakes --yolo off
+  if command -v timeout >/dev/null 2>&1; then
+    set -- timeout 60 "$@"
+  fi
   out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$case_dir/wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR='' \
     PATH="$case_dir/fakebin:$PATH" \
-    timeout 60 "$SPAWN" "$id" "$case_dir/project" --mode no-mistakes --yolo off 2>&1) || rc=$?
+    "$@" 2>&1) || rc=$?
   [ "$rc" -ne 124 ] || fail "spawn hung reading a special-file tasks-axi config"
   [ "$rc" -ne 0 ] || fail "spawn accepted a special-file tasks-axi config"
   assert_contains "$out" "tasks-axi config is not a regular file" \
