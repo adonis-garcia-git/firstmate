@@ -972,6 +972,12 @@ test_postrename_poll_validation_revokes_and_retries() {
   local artifact action dir state destination link_target gate
   for artifact in data registration check; do
     for action in type mode device content; do
+      # The device fault is injected by a fake stat on PATH; on Darwin the
+      # device helper now calls /usr/bin/stat directly, so the fake can never
+      # fire there. Skip the device action on Darwin.
+      if [ "$action" = device ] && [ "$(uname)" = Darwin ]; then
+        continue
+      fi
       dir=$(make_case "poll-final-$artifact-$action")
       state="$dir/home/state"
       write_poll_meta "$state" task-a https://github.com/o/r/pull/1
@@ -1613,8 +1619,8 @@ test_self_merge_and_poll_publish_one_outcome() {
   set -e
   [ "$rc" -eq 0 ] \
     || fail "merge-outcome-committed: watcher failed: $(cat "$dir/watch.err")"
-  [ "$(grep -c -F "$url" "$replies")" -eq 1 ] \
-    || fail "merge-outcome-committed: self and poll reports produced duplicate outcomes"
+  [ "$(grep -c -F "done [key=merged-task-a]: merged task-a $url" "$replies")" -eq 1 ] \
+    || fail "merge-outcome-committed: self and poll reports produced duplicate merge outcomes"
   assert_no_grep "check: $state/task-a.check.sh: merged" "$state/.wake-queue" \
     "merge-outcome-committed: absorbed poll published a second outcome"
   assert_poll_absent "$state" task-a
