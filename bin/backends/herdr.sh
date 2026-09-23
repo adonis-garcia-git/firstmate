@@ -837,7 +837,9 @@ fm_backend_herdr_canonical_socket_path() {  # <socket-path>
   printf '%s' "$socket"
 }
 
-fm_backend_herdr_presentation_session_socket_path() {  # <session>
+# fm_backend_herdr_session_socket_path: the running named session's control
+# socket, canonicalized; nonzero when it is absent, stopped, or ambiguous.
+fm_backend_herdr_session_socket_path() {  # <session>
   local session=$1 sessions socket
   [ -n "$session" ] || return 1
   sessions=$(fm_backend_herdr_cli "$session" session list --json 2>/dev/null) || return 1
@@ -855,7 +857,7 @@ fm_backend_herdr_presentation_session_socket_path() {  # <session>
 fm_backend_herdr_presentation_session_lock_path() {  # <session>
   local session=$1 socket key dir hash
   [ -n "$session" ] || return 1
-  socket=$(fm_backend_herdr_presentation_session_socket_path "$session") || return 1
+  socket=$(fm_backend_herdr_session_socket_path "$session") || return 1
   if command -v shasum >/dev/null 2>&1; then
     hash=$(printf '%s\0%s' "$session" "$socket" | shasum -a 256 2>/dev/null | awk '{print $1}')
   elif command -v sha256sum >/dev/null 2>&1; then
@@ -1241,7 +1243,7 @@ fm_backend_herdr_emptying_close_plan() {  # <session> <pane-id> <workspace-id> <
       printf 'plain\n'
       return 0
     fi
-    socket=$(fm_backend_herdr_presentation_session_socket_path "$session") || {
+    socket=$(fm_backend_herdr_session_socket_path "$session") || {
       echo "warning: herdr presentation cleanup found an ambiguous named session socket; closing without the focus-safe removal path" >&2
       printf 'plain\n'
       return 0
@@ -1597,7 +1599,7 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
       return 0
       ;;
   esac
-  socket=$(fm_backend_herdr_presentation_session_socket_path "$session") || {
+  socket=$(fm_backend_herdr_session_socket_path "$session") || {
     echo "warning: herdr presentation ordering found an ambiguous named session socket; leaving worker in Herdr's current order" >&2
     return 0
   }
@@ -1770,7 +1772,7 @@ fm_backend_herdr_launcher_identity() {  # <session>
     echo "error: herdr launcher pane '$pane' reports an unusable socket path; refusing to place a worker from an unverifiable parent identity" >&2
     return 1
   }
-  session_socket=$(fm_backend_herdr_presentation_session_socket_path "$session") || {
+  session_socket=$(fm_backend_herdr_session_socket_path "$session") || {
     echo "error: herdr session '$session' has no unambiguous socket to match against the launcher pane's own; refusing to place a worker from an unverifiable parent identity" >&2
     return 1
   }
@@ -3008,6 +3010,45 @@ fm_backend_herdr_send_literal() {  # <target> <text>
   return "$rc"
 }
 
+# fm_backend_herdr_send_composer_text: type TEXT, UNSUBMITTED, into an agent
+# composer so the harness receives all of it. `pane send-text` writes raw
+# bytes, and the pane's application reads a long raw write back in pty-sized
+# pieces (1,022 bytes per read on macOS). With no paste boundary, a harness
+# that detects pastes by read size turns each large read into its own paste
+# and a short final read into typed keys. Live Claude Code 2.1.281 on Herdr
+# 0.9.1 then drops the earlier paste, so only the message's tail is submitted.
+# Text longer than FM_BACKEND_HERDR_RAW_TEXT_MAX_BYTES therefore goes through
+# Herdr's paste-aware pane.send_input path (bin/backends/herdr-send-input.py),
+# which brackets it exactly when the application enabled bracketed paste, so
+# it arrives as ONE paste however the kernel splits it into reads. Shorter text
+# fits one read and keeps the raw keystroke send, byte-identical to before, so
+# slash-command and `$skill` popups still open on every harness. The long path
+# never falls back to a raw write: when that transport is unavailable it
+# returns nonzero with nothing typed, and the caller reports send-failed.
+FM_BACKEND_HERDR_RAW_TEXT_MAX_BYTES=512
+fm_backend_herdr_send_composer_text() {  # <target> <text>
+  local target=$1 text=$2 bytes socket
+  bytes=$(printf '%s' "$text" | LC_ALL=C wc -c | tr -d ' ')
+  if [ "$bytes" -le "$FM_BACKEND_HERDR_RAW_TEXT_MAX_BYTES" ]; then
+    fm_backend_herdr_send_literal "$target" "$text"
+    return
+  fi
+  fm_backend_herdr_target_ready "$target" || return 1
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "warning: herdr: a $bytes-byte message needs Herdr's paste-aware input path, which requires python3; refusing a raw send the harness could truncate" >&2
+    return 1
+  fi
+  if ! socket=$(fm_backend_herdr_session_socket_path "$FM_BACKEND_HERDR_SESSION"); then
+    echo "warning: herdr: could not resolve the control socket of session $FM_BACKEND_HERDR_SESSION for a $bytes-byte message; refusing a raw send the harness could truncate" >&2
+    return 1
+  fi
+  if ! printf '%s' "$text" | python3 "$FM_BACKEND_HERDR_ROOT/bin/backends/herdr-send-input.py" \
+      "$socket" "$FM_BACKEND_HERDR_PANE" >/dev/null 2>&1; then
+    echo "warning: herdr: pane.send_input refused a $bytes-byte message for $FM_BACKEND_HERDR_PANE; nothing was typed" >&2
+    return 1
+  fi
+}
+
 # fm_backend_herdr_normalize_key: map firstmate's key vocabulary (Enter,
 # Escape, C-c, as used by fm-send.sh --key and stuck-crewmate-recovery) onto
 # herdr's `pane send-keys` names. Verified empirically: enter, escape/esc, and
@@ -3153,8 +3194,8 @@ fm_backend_herdr_rendered_busy_state() {  # <target> [harness] -> busy|idle|unkn
   fi
 }
 
-# fm_backend_herdr_send_text_submit: type <text> into <target> once (raw,
-# unsubmitted, via send_literal), then submit with a named Enter key, retried
+# fm_backend_herdr_send_text_submit: type <text> into <target> once
+# (unsubmitted, via send_composer_text), then submit with a named Enter key, retried
 # (Enter only, never retyped) until native agent-state, a cleared composer, or
 # fm_composer_queued_enter_verdict confirms delivery. When native identity is
 # Claude, text is typed only into an empty composer and Enter is sent only
@@ -3349,7 +3390,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
       || { printf 'send-failed'; return 0; }
     [ -z "${content//[$' \t\r\n\v\f']/}" ] || { printf 'send-failed'; return 0; }
   fi
-  fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
+  fm_backend_herdr_send_composer_text "$target" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
   if [ "$proof" = 1 ]; then
     if ! content=$(fm_backend_herdr_composer_content "$target" "$proof_lines") \
