@@ -1163,11 +1163,13 @@ A 2,996-byte raw send submitted three separate pastes spliced at the read bounda
 The same texts sent through `pane.send_input` were submitted byte-for-byte at 1,031, 2,996, 9,994, and 100,008 bytes with Enter 0.3 seconds later, and a pasted `/context` still ran as a command.
 `fm_backend_herdr_send_text_submit` therefore types long composer text through `bin/backends/herdr-send-input.py`.
 `tests/fm-backend-herdr.test.sh` pins the routing and the no-raw-fallback refusal, and `tests/fm-backend-herdr-smoke.test.sh` proves against real Herdr that a bracketed-paste recorder receives the long text as exactly one paste.
-The live guard above refreshes the Claude proof; observed 2026-09-23:
+The live guard above refreshes the Claude proof.
+It launches the lab Claude with a fixed session id and without the parent Claude Code session's identity markers, because Claude Code 2.1.281 started as a child of another session reports "Transcript saving is off" and saves no transcript to read.
+Observed 2026-09-23, run from inside a Claude Code session:
 
 ```text
-ok - live Herdr submit confirm: Claude Code (2.1.281 (Claude Code)) on herdr 0.9.1 reports empty and renders the requested reply in isolated session fm-lab-herdr-submit-con-74488-14809
-ok - live Herdr long message: Claude Code (2.1.281 (Claude Code)) on herdr 0.9.1 submits the whole 1131-char multi-line message byte-for-byte
+ok - live Herdr submit confirm: Claude Code (2.1.281 (Claude Code)) on herdr 0.9.1 reports empty and renders the requested reply in isolated session fm-lab-herdr-submit-con-94626-28278
+ok - live Herdr long message: Claude Code (2.1.281 (Claude Code)) on herdr 0.9.1 submits the whole 1142-char multi-line message byte-for-byte
 ```
 
 With the submit core routed back through the raw send, the same guard failed:

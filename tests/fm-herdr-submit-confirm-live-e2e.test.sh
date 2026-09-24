@@ -33,6 +33,13 @@ fm_live_gate opt-in FM_HERDR_SUBMIT_CONFIRM_LIVE herdr jq claude
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
 herdr_forget_inherited_pane
+# The lab server hands this process's environment to every pane it starts. A
+# guard run from inside a Claude Code session would pass that session's
+# identity markers to the lab Claude, which then runs as a child session and
+# saves no transcript, and the long-message case below reads that transcript.
+unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CLAUDE_CODE_ENTRYPOINT \
+  CLAUDE_CODE_SESSION_ATTENDED CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN \
+  CLAUDE_CODE_EXECPATH CLAUDE_PID
 
 ORIGINAL_PATH=$PATH
 SESSION=$("$LAB_HELPER" name herdr-submit-confirm-live)
@@ -83,7 +90,11 @@ TARGET="$SESSION:$PANE"
 VERSION=$(PATH="$ORIGINAL_PATH" claude --version 2>/dev/null | head -1 || printf 'version-unknown')
 HERDR_VER=$(PATH="$ORIGINAL_PATH" herdr --version 2>/dev/null | head -1 || printf 'herdr-unknown')
 
-lab pane run "$PANE" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}'" >/dev/null \
+# A fixed session id names the one transcript the long-message case reads.
+CLAUDE_SESSION=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null) || CLAUDE_SESSION=
+CLAUDE_SESSION=$(printf '%s' "$CLAUDE_SESSION" | tr 'A-F' 'a-f')
+[ -n "$CLAUDE_SESSION" ] || fail "could not generate a Claude Code session id (needs uuidgen or /proc/sys/kernel/random/uuid)"
+lab pane run "$PANE" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}' --session-id $CLAUDE_SESSION" >/dev/null \
   || fail "could not launch Claude Code ($VERSION) in the isolated Herdr pane"
 
 idle=0
@@ -191,26 +202,24 @@ verdict=$(fm_backend_herdr_send_text_submit "$TARGET" "$LONG_MSG" 3 0.4 0.3) \
   || fail "send_text_submit failed to run the long message against Claude Code ($VERSION) on $HERDR_VER"
 [ "$verdict" = empty ] \
   || fail "Claude Code ($VERSION) on $HERDR_VER: a landed ${#LONG_MSG}-char message must confirm empty, got '$verdict'"
-TRANSCRIPTS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$(printf '%s' "$ROOT" | sed 's/[^A-Za-z0-9]/-/g')"
+TRANSCRIPT="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$(printf '%s' "$ROOT" | sed 's/[^A-Za-z0-9]/-/g')/$CLAUDE_SESSION.jsonl"
 submitted=''
 i=0
 while [ "$i" -lt 30 ]; do
-  for f in "$TRANSCRIPTS"/*.jsonl; do
-    [ -f "$f" ] || continue
-    grep -q "${LONG_TOKEN}END" "$f" || continue
+  if [ -f "$TRANSCRIPT" ] && grep -q "${LONG_TOKEN}END" "$TRANSCRIPT"; then
     submitted=$(jq -j --arg m "$LONG_MSG" --arg t "${LONG_TOKEN}END" '
       select(.type == "user") | .message.content
       | if type == "string" then . else ([.[]? | select(.type == "text") | .text] | join("")) end
       | select(contains($t))
       | if contains($m) then "whole" else "fragment:" + (length | tostring) end
-    ' "$f" 2>/dev/null)
-  done
+    ' "$TRANSCRIPT" 2>/dev/null)
+  fi
   [ -n "$submitted" ] && break
   i=$((i + 1))
   sleep 1
 done
 [ -n "$submitted" ] \
-  || fail "Claude Code ($VERSION) on $HERDR_VER: the long message never appeared in a session transcript under $TRANSCRIPTS"
+  || fail "Claude Code ($VERSION) on $HERDR_VER: the long message never appeared in the lab session transcript $TRANSCRIPT"
 [ "$submitted" = whole ] \
   || fail "Claude Code ($VERSION) on $HERDR_VER: the submitted prompt was not the whole ${#LONG_MSG}-char message ($submitted chars)"
 pass "live Herdr long message: Claude Code ($VERSION) on $HERDR_VER submits the whole ${#LONG_MSG}-char multi-line message byte-for-byte"
