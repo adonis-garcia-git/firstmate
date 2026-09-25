@@ -84,8 +84,11 @@ usage() {
   ' "$0"
 }
 
+# Backlog reads go through bin/fm-tasks-axi.sh so this scan reads the same
+# backlog every other firstmate backlog command addresses, including a data
+# directory that lives outside FM_HOME.
 tasks_axi() {
-  (cd "$FM_HOME" && tasks-axi "$@")
+  FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-tasks-axi.sh" "$@"
 }
 
 holds_available() {
