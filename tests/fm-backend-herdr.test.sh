@@ -4714,10 +4714,8 @@ long_numbered_message() {
 # Unix socket paths are capped near 104 bytes, and macOS TMPDIR alone is most
 # of that, so the fake control socket lives in a short /tmp directory.
 short_socket_dir() {
-  local d
-  d=$(mktemp -d /tmp/fmhsi.XXXXXX) || fail "could not create a short socket directory"
-  FM_TEST_CLEANUP_DIRS+=("$d")
-  printf '%s\n' "$d"
+  SHORT_SOCKET_DIR=$(mktemp -d /tmp/fmhsi.XXXXXX) || fail "could not create a short socket directory"
+  FM_TEST_CLEANUP_DIRS+=("$SHORT_SOCKET_DIR")
 }
 
 wait_for_socket() {  # <path>
@@ -4730,7 +4728,7 @@ test_send_text_submit_long_text_rides_paste_aware_input() {
   command -v python3 >/dev/null 2>&1 || fail "python3 is required for Herdr's paste-aware input path"
   local dir log resp fb out sock_dir sock server msg enter_count
   dir="$TMP_ROOT/submit-long-paste"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  sock_dir=$(short_socket_dir); sock="$sock_dir/h.sock"
+  short_socket_dir; sock_dir=$SHORT_SOCKET_DIR; sock="$sock_dir/h.sock"
   msg=$(long_numbered_message)
   # 1: session list - resolves the session's control socket
   # 2: agent get - pre-Enter baseline is idle
@@ -4780,7 +4778,7 @@ test_send_text_submit_long_text_refused_input_types_nothing() {
   local dir log resp fb out sock_dir sock server msg
   msg=$(long_numbered_message)
   dir="$TMP_ROOT/submit-long-refused"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  sock_dir=$(short_socket_dir); sock="$sock_dir/h.sock"
+  short_socket_dir; sock_dir=$SHORT_SOCKET_DIR; sock="$sock_dir/h.sock"
   jq -cn --arg s "$sock" '{sessions:[{name:"default",running:true,socket_path:$s}]}' > "$resp/1.out"
   server=$(make_fake_herdr_input_server "$dir")
   python3 "$server" "$sock" "$dir/request.json" error &

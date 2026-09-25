@@ -3044,7 +3044,7 @@ fm_backend_herdr_send_composer_text() {  # <target> <text>
   fi
   if ! printf '%s' "$text" | python3 "$FM_BACKEND_HERDR_ROOT/bin/backends/herdr-send-input.py" \
       "$socket" "$FM_BACKEND_HERDR_PANE" >/dev/null 2>&1; then
-    echo "warning: herdr: pane.send_input refused a $bytes-byte message for $FM_BACKEND_HERDR_PANE; nothing was typed" >&2
+    echo "warning: herdr: pane.send_input did not confirm a $bytes-byte message for $FM_BACKEND_HERDR_PANE; delivery is unconfirmed, Herdr may already hold the text unsubmitted, and no Enter was pressed" >&2
     return 1
   fi
 }
