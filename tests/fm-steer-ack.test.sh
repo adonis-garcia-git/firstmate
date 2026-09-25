@@ -413,6 +413,13 @@ test_tick_clears_on_ack_including_late_and_duplicate() {
   out=$(run_tick "$state") || fail "tick failed"
   [ -z "$out" ] || fail "late-acked order re-surfaced: $out"
   assert_absent "$(record_path "$state" helm dddd4444)" "a late ack must clear the escalated record"
+
+  # The emission-stamped reply the brief teaches clears the record too.
+  arm_record "$state" helm eeee5555 "rerun the gate" "$(epoch_ago 400)"
+  printf 'resolved [key=ack-eeee5555] [at=%s]: starting the gate rerun\n' "$(epoch_ago 10)" >> "$state/helm.status"
+  out=$(run_tick "$state") || fail "tick failed"
+  [ -z "$out" ] || fail "an emission-stamped ack was still surfaced: $out"
+  assert_absent "$(record_path "$state" helm eeee5555)" "an emission-stamped ack must clear the pending record"
   pass "steer-ack tick clears acked records; duplicate and late acks are safe"
 }
 
@@ -552,13 +559,13 @@ test_briefs_teach_the_ack_reply() {
     || fail "ship brief scaffold failed"
   brief="$home/data/ship-task/brief.md"
   assert_grep '[ack={token}]' "$brief" "ship brief should name the token-marked order form"
-  assert_grep 'resolved [key=ack-{token}]: starting' "$brief" \
+  assert_grep 'resolved [key=ack-{token}] [at=<epoch>]: starting' "$brief" \
     "ship brief should teach the keyed ack reply"
   FM_HOME="$home" "$BRIEF" scout-task some-proj --scout >/dev/null 2>&1 \
     || fail "scout brief scaffold failed"
   brief="$home/data/scout-task/brief.md"
   assert_grep '[ack={token}]' "$brief" "scout brief should name the token-marked order form"
-  assert_grep 'resolved [key=ack-{token}]: starting' "$brief" \
+  assert_grep 'resolved [key=ack-{token}] [at=<epoch>]: starting' "$brief" \
     "scout brief should teach the keyed ack reply"
   pass "generated ship and scout briefs teach the steer-ack reply"
 }

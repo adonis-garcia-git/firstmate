@@ -28,6 +28,7 @@ The slash popup consumes the first Enter; that Enter closes it and a genuine sec
 Cursor does not clear inherited `CLAUDECODE`, so a Cursor worker under Claude carries both markers.
 `../../../bin/fm-harness.sh` tests Cursor first, and launch also clears foreign markers.
 Both remain necessary: sanitization covers Firstmate launches, ordering covers hand-started sessions.
+That ordering settles the marker layer only, and a nearer Claude ancestor still outranks a retained Cursor marker.
 
 Cursor is a bundled Node script, so tmux can report bare `node` while `ps -o comm=` carries its install path.
 Bare `node` matches nothing; `../../../bin/fm-cursor-lib.sh` proves identity from Cursor's name or install tree in path or argv zero.
@@ -67,6 +68,7 @@ Example: `../../../bin/fm-spawn.sh <task-id> <project> --scout --harness cursor 
 ## Primary integration
 
 Primary supervision is the stop-hook park in `../../../docs/supervision-protocols/cursor.md` through tracked `.cursor/hooks.json`; primary and secondmate launches require `--trust` or hooks do not load.
+In a home with `config/supervision-host` the park runs the supervision host instead of `../../../bin/fm-watch-arm.sh`, with Claude's print mode as its headless engine; [`supervision-host.md`](../../../../../docs/supervision-host.md) owns the host.
 Cursor exposes 20 project events plus a Claude-Code compatibility map that loads `.claude/settings.json`.
 Tracked hooks register `stop`, `sessionStart`, and two `preToolUse` seatbelts through `$CURSOR_PROJECT_DIR`; Claude entries stand down on Cursor payloads under `../../../docs/turnend-guard.md`.
 
