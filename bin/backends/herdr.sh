@@ -3023,8 +3023,9 @@ fm_backend_herdr_send_literal() {  # <target> <text>
 # it arrives as ONE paste however the kernel splits it into reads. Shorter text
 # fits one read and keeps the raw keystroke send, byte-identical to before, so
 # slash-command and `$skill` popups still open on every harness. The long path
-# never falls back to a raw write: when that transport is unavailable it
-# returns nonzero with nothing typed, and the caller reports send-failed.
+# never falls back to a raw write: when that transport is unavailable or the
+# request is unconfirmed it returns nonzero without pressing Enter, and the
+# caller reports send-failed.
 FM_BACKEND_HERDR_RAW_TEXT_MAX_BYTES=512
 fm_backend_herdr_send_composer_text() {  # <target> <text>
   local target=$1 text=$2 bytes socket

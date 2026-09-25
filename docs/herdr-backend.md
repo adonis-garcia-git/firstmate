@@ -538,7 +538,7 @@ Typed-plane slash input, and dollar-prefixed skill input for Codex, uses the sha
 Typed-plane text is typed once; only Enter is retried.
 Composer text longer than 512 bytes is typed through Herdr's paste-aware `pane.send_input` method, which brackets it exactly when the application enabled bracketed paste.
 A raw `pane send-text` longer than one pty read reaches the application in several reads, 1,022 bytes each on macOS, and live Claude Code then submitted only the last read's text.
-That path needs Python and never falls back to a raw write, so an unavailable transport fails the send with nothing typed; shorter text fits one read and keeps the raw send so harness completion popups still open.
+That path needs Python and never falls back to a raw write, so an unavailable transport or unconfirmed request fails the send without pressing Enter; shorter text fits one read and keeps the raw send so harness completion popups still open.
 
 ### Claude composer proof
 
