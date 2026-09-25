@@ -71,6 +71,7 @@ Refresh the hints whenever the serial lane gains scripts, rather than waiting fo
 
 `bin/fm-test-run.sh` owns the per-shard packing, so its `--check-coverage` output is the current account of lane size and coverage rather than a copied inventory.
 Nine serial runners pack the refreshed measurements into a longest modeled script sum of 697969 ms (11m38s), with other shards near 10m36s.
+In this fork the seven fork-only serial scripts, six of them unhinted at that default weight, fill the other eight shards to within 0.1 s of that floor, so every fork shard models about 11m38s.
 The longest script, `tests/fm-watch-triage.test.sh`, legitimately occupies one whole shard and is the indivisible floor for this layout.
 This is a packing estimate, not measured new-workflow execution or an end-to-end latency guarantee.
 Job timeouts remain hang tripwires under the policy in [Timeouts](#timeouts) below; they are not the desired healthy duration.
