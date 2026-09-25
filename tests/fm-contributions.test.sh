@@ -12,6 +12,12 @@ new_home() {
   local home="$TMP_ROOT/$1"
   mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects" "$home/fakebin"
   printf '# Backlog\n\n## Queued\n' > "$home/data/backlog.md"
+  # Keep the recorded-PR reconcile sweep (bin/fm-pr-reconcile.sh) inside its
+  # hourly self-throttle: this suite's fake forge serves only the contribution
+  # observer's reads, so a sweep over the recorded pr= would queue its bounded
+  # offline diagnostic and a bounded watcher run would deliver that instead of
+  # the contribution wake under test. tests/fm-pr-reconcile.test.sh covers it.
+  date +%s > "$home/state/.pr-reconcile-last"
   printf '#!/bin/sh\nexit 1\n' > "$home/fakebin/tmux"
   printf '#!/bin/sh\nexit 0\n' > "$home/fakebin/no-mistakes"
   chmod +x "$home/fakebin/"*

@@ -146,12 +146,20 @@ test_helper_normal_is_noop() {
 # signal (NO_MISTAKES_GATE=1) or an override to exercise the stock-layout
 # requirement. All FM_*_OVERRIDE vars are unset first so the suite stays
 # hermetic inside a real gate.
+# The lab permit reads every nonempty FM_*_OVERRIDE as a relocated layout, so
+# the lab-home helpers unset each one the suite inherited, including
+# test-harness seams such as tests/lib.sh's FM_SYSTEM_WAKE_EPOCH_OVERRIDE.
+LAB_OVERRIDE_UNSETS=()
+for lab_override in "${!FM_@}"; do
+  case "$lab_override" in *_OVERRIDE) LAB_OVERRIDE_UNSETS+=(-u "$lab_override") ;; esac
+done
+unset lab_override
+
 run_guard_lib_home() {
   local cwd=$1 home=$2; shift 2
   # shellcheck disable=SC2016 # $1/$2 expand in the child shell, not here.
   env -u NO_MISTAKES_GATE -u FM_GATE_REFUSE_BYPASS \
-      -u FM_ROOT_OVERRIDE -u FM_STATE_OVERRIDE -u FM_DATA_OVERRIDE \
-      -u FM_PROJECTS_OVERRIDE -u FM_CONFIG_OVERRIDE \
+      ${LAB_OVERRIDE_UNSETS[@]+"${LAB_OVERRIDE_UNSETS[@]}"} \
       FM_HOME="$home" "$@" \
       bash -c 'cd "$1" || exit 111; set -eu; . "$2"; fm_refuse_if_gate_agent' \
       _ "$cwd" "$GATE_LIB" 2>&1
@@ -410,6 +418,7 @@ run_teardown() {
 run_teardown_lab() {
   local cwd=$1 case_dir=$2; shift 2
   ( cd "$cwd" && env -u NO_MISTAKES_GATE -u FM_GATE_REFUSE_BYPASS \
+      ${LAB_OVERRIDE_UNSETS[@]+"${LAB_OVERRIDE_UNSETS[@]}"} \
       "FM_HOME=$case_dir" \
       "PATH=$case_dir/fakebin:$PATH" "$@" \
       "$TEARDOWN" task-x1 ) 2>&1
