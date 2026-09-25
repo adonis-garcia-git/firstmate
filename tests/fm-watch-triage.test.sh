@@ -2900,6 +2900,11 @@ wedge_threshold_fixture() {  # <name> <status-log> <status-age-secs> [<wedge-tim
   if [ -n "$timer" ]; then
     printf '%s\n' "$(( $(date +%s) - timer ))" > "$state/.stale-since-$key"
   fi
+  # Hold the completion-alarm sweep (bin/fm-completion-alarm-lib.sh) inside its
+  # pacing: it reads every live task's current state on its own cadence, so its
+  # read would otherwise land in the current-state counts these cases take to
+  # prove whether the parked-gate evidence path was reached.
+  touch "$state/.last-completion-scan"
   # An UNCONFIGURED home: the config dir exists and is empty, so every case here
   # starts with the parked-gate wait evidence off and has to arm it deliberately.
   mkdir -p "$dir/config"
