@@ -192,6 +192,10 @@
 #   reporting command, not a gate. A lock refusal is reported as a loud
 #   banner inline, never a silent failure or a non-zero exit that would make
 #   an agent skip the rest of the digest.
+#   The one non-zero exit for a well-formed invocation: when FM_HOME resolves
+#   to a linked task worktree rather than a firstmate home, it prints a refusal
+#   to stderr and exits 1 before any digest output, because no session start
+#   belongs there.
 #
 #   --reemit  This process ALREADY took the helm at its own startup and has
 #             only lost its context (a /clear or a compaction). Skip the
@@ -259,6 +263,22 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+# --- task-worktree refusal ----------------------------------------------------
+# A linked task worktree is a checkout of this repository, so with FM_HOME
+# unset it resolves as a home, but a session start there would take a lock, run
+# sweeps, and write state for a phantom home. The session-open adapters already
+# stand down there (bin/fm-sessionstart-run.sh); this refuses the same case when
+# an agent runs the command by hand. It is the one non-zero exit of this
+# reporting command for a well-formed invocation, and it happens before any
+# digest output.
+# shellcheck source=bin/fm-primary-scope-lib.sh
+. "$SCRIPT_DIR/fm-primary-scope-lib.sh"
+if fm_root_is_task_worktree "$FM_HOME"; then
+  printf 'fm-session-start: refusing to run in %s: it is a task worktree, not a firstmate home.\n' "$FM_HOME" >&2
+  printf 'fm-session-start: session start belongs to the firstmate home supervising this task; a worker follows its launch brief instead.\n' >&2
+  exit 1
+fi
 
 # --- 0. runtime bound ---------------------------------------------------------
 # The ordered stage list is the contract behind the truncation banner: the child

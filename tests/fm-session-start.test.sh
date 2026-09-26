@@ -762,6 +762,59 @@ EOF
   pass "context digest distinguishes ABSENT, empty-but-present, and populated files"
 }
 
+# --- task-worktree refusal ----------------------------------------------------
+
+# A worker in a linked task worktree that runs session start by hand must be
+# refused before anything is written, while a plain primary checkout and a
+# marked secondmate home, which is itself a linked worktree, still run.
+test_task_worktree_is_refused() {
+  local rec root home fakebin w wt mate out err rc
+  rec=$(new_world task-worktree)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  w=${root%/root}
+  wt="$w/task-wt"
+  mate="$w/mate-wt"
+  git -C "$root" worktree add -q --detach "$wt"
+  git -C "$root" worktree add -q --detach "$mate"
+  err="$w/refusal.err"
+
+  # FM_HOME unset: the worktree resolves as its own home, exactly as it does
+  # for a worker that runs bin/fm-session-start.sh from its task worktree.
+  rc=0
+  out=$(env -u FM_HOME -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    FM_ROOT_OVERRIDE="$wt" PATH="$fakebin:$BASE_PATH" "$SESSION_START" 2>"$err") || rc=$?
+  expect_code 1 "$rc" "session start must exit non-zero in a task worktree"
+  assert_equals "" "$out" "a refused session start must print no digest"
+  assert_grep "is a task worktree, not a firstmate home" "$err" "refusal did not name the task worktree"
+  assert_absent "$wt/state" "a refused session start created state in the task worktree"
+
+  rc=0
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    FM_HOME="$wt" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" "$SESSION_START" 2>"$err") || rc=$?
+  expect_code 1 "$rc" "an explicit FM_HOME naming a task worktree must also be refused"
+
+  mkdir -p "$root/state" "$root/data" "$root/config"
+  rc=0
+  out=$(run_session_start "$root" "$root" "$fakebin:$BASE_PATH" 2>"$err") || rc=$?
+  expect_code 0 "$rc" "a plain primary checkout must still run session start"
+  assert_contains "$out" "data/projects.md" "a plain primary checkout did not get its digest"
+  assert_no_grep "task worktree" "$err" "a plain primary checkout was refused"
+
+  printf '%s\n' fmtest-mate > "$mate/.fm-secondmate-home"
+  mkdir -p "$mate/state" "$mate/data" "$mate/config"
+  rc=0
+  out=$(run_session_start "$mate" "$root" "$fakebin:$BASE_PATH" 2>"$err") || rc=$?
+  expect_code 0 "$rc" "a marked secondmate home must still run session start"
+  assert_contains "$out" "data/projects.md" "a marked secondmate home did not get its digest"
+  assert_no_grep "task worktree" "$err" "a marked secondmate home was refused"
+
+  pass "session start refuses a task worktree and still runs in primary and secondmate homes"
+}
+
 # --- lock refusal: read-only path --------------------------------------------
 
 test_lock_refusal_read_only_path() {
@@ -2700,6 +2753,7 @@ EOF
 }
 
 test_context_digest_absent_empty_present
+test_task_worktree_is_refused
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
 test_trace_context_effective_state_is_frozen_after_lock

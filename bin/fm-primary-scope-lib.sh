@@ -31,3 +31,21 @@ fm_primary_scope_matches() {
   [ -d "$root/bin" ] || return 1
   [ -d "$state" ] || return 1
 }
+
+# Return 0 when $1 is the top level of a linked task worktree: a linked git
+# worktree with no genuine secondmate-home marker. Such a checkout carries this
+# repository's AGENTS.md and bin/, so it looks like a home, but it never is one.
+# It reads the worktree's own .git file instead of running git, so a caller on a
+# blocking path pays no unbounded subprocess. A plain checkout (a .git
+# directory), a marked secondmate home, a subdirectory of a checkout, and a path
+# outside git all return 1.
+fm_root_is_task_worktree() {
+  local root=$1 line
+  fm_root_is_secondmate_home "$root" && return 1
+  [ -f "$root/.git" ] && [ ! -L "$root/.git" ] || return 1
+  IFS= read -r line < "$root/.git" 2>/dev/null || return 1
+  case "$line" in
+    'gitdir: '*/worktrees/*) return 0 ;;
+  esac
+  return 1
+}
