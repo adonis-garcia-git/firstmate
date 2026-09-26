@@ -43,6 +43,18 @@ cleanup() {
     . "$ROOT/bin/fm-remote-job-lib.sh"
     fm_remote_job_stop_worker_tree "$worker_pid" || true
   fi
+  # A late writer (this shell's background stages or a just-signalled detached
+  # process) can still add an entry while rm -rf walks the tree, which surfaced
+  # as a CI flake after every assertion passed:
+  #   rm: cannot remove '/tmp/fm-remote-secondmate-e2e.XXXXXX': Directory not empty
+  # Drain background jobs, then retry until the quiesced tree is gone.
+  wait 2>/dev/null || true
+  local i=0
+  while [ "$i" -lt 50 ]; do
+    rm -rf -- "$TMP_ROOT" 2>/dev/null && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
   rm -rf -- "$TMP_ROOT"
 }
 trap cleanup EXIT
