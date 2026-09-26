@@ -1179,6 +1179,28 @@ With the submit core routed back through the raw send, the Claude composer proof
 not ok - Claude Code (2.1.283 (Claude Code)) on herdr 0.8.2: a landed 1142-char message must confirm empty, got 'send-failed'
 ```
 
+### Paragraph breaks in short composer text
+
+Measured 2026-09-26 against Herdr 0.8.2 and Claude Code 2.1.283 in an isolated `fm-lab-` session.
+
+Claude renders a typed blank line as a blank row inside its composer, between the horizontal rules above and below it.
+A bare composer's read-back that ends at the first blank row returned only the first paragraph, so the pre-Enter payload proof refused every raw-typed message with a paragraph break, including helm's `<text>`, blank line, `ATTACHMENTS: <path>` shape.
+`bin/fm-composer-lib.sh` now carries a bare composer past a blank run only when a rule sits directly above the glyph row, typed text resumes below the run, and a rule closes it; `test_ruled_bare_composer_keeps_text_past_a_blank_line` in `tests/fm-composer-lib.test.sh` pins that boundary.
+The live guard above refreshes the Claude proof, including a composer holding only the head or only the tail of a two-paragraph message, which the proof must still refuse.
+Observed 2026-09-26:
+
+```text
+ok - live Herdr paragraph break: Claude Code (2.1.283 (Claude Code)) on herdr 0.8.2 submits the whole 124-char paragraphs message byte-for-byte
+ok - live Herdr paragraph break: Claude Code (2.1.283 (Claude Code)) on herdr 0.8.2 submits the whole 212-char attachment message byte-for-byte
+ok - live Herdr payload proof: Claude Code (2.1.283 (Claude Code)) on herdr 0.8.2 refuses a composer showing only the head or only the tail
+```
+
+With the read-back stopping at the first blank row, the same guard failed:
+
+```text
+not ok - Claude Code (2.1.283 (Claude Code)) on herdr 0.8.2: a 124-char paragraphs message with a blank line must confirm empty, got 'send-failed'
+```
+
 ### Prune and respawn
 
 The real label-collision reproduction is owned by:

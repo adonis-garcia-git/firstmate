@@ -1409,6 +1409,38 @@ _fm_composer_locate_footer_zone() {  # <plain>
     && [ "$FM_COMPOSER_SCAN_BARE_ROW" -le "$FM_COMPOSER_FOOTER_LAST" ]
 }
 
+# _fm_composer_bare_blank_is_interior: 0 when the blank row at <row> sits
+# inside a ruled bare composer's typed text rather than below it. A typed blank
+# line (a paragraph break) renders as a blank composer row, so the extent must
+# not end there. It is interior only when the composer is ruled like Claude
+# Code's (a horizontal rule directly above its glyph row <first>), typed text
+# resumes after the blank run, and a horizontal rule closes the run. Any other
+# shape keeps the old rule that a blank row ends the composer, so a bare prompt
+# followed by a gap and footer text never absorbs the footer.
+_fm_composer_bare_blank_is_interior() {  # <plain-screen> <first> <row>
+  local plain=$1 first=$2 row=$3 rows trimmed resumed=0
+  [ "$first" -gt 0 ] || return 1
+  trimmed=$(_fm_composer_screen_row "$((first - 1))" "$plain")
+  fm_composer_normalize_trim_var trimmed
+  case "$trimmed" in '─'*|'━'*|'═'*) ;; *) return 1 ;; esac
+  rows=$(printf '%s\n' "$plain" | wc -l | tr -d ' ')
+  while [ "$row" -lt "$rows" ]; do
+    trimmed=$(_fm_composer_screen_row "$row" "$plain")
+    fm_composer_normalize_trim_var trimmed
+    if [ -n "$trimmed" ]; then
+      case "$trimmed" in
+        '─'*|'━'*|'═'*) [ "$resumed" = 1 ]; return ;;
+      esac
+      fm_composer_row_has_edge "$trimmed" && return 1
+      _fm_composer_row_is_omp_status "$trimmed" && return 1
+      _fm_composer_row_is_braille_furniture "$trimmed" && return 1
+      resumed=1
+    fi
+    row=$((row + 1))
+  done
+  return 1
+}
+
 _fm_composer_select_cursorless() {
   local plain=$1 generic=-1 next boundary raw trimmed glyph bare footer=0
   FM_COMPOSER_SELECTED_KIND=
@@ -1477,7 +1509,11 @@ _fm_composer_select_cursorless() {
       raw=$(_fm_composer_screen_row "$next" "$plain")
       trimmed=$raw
       fm_composer_normalize_trim_var trimmed
-      [ -n "$trimmed" ] || break
+      if [ -z "$trimmed" ]; then
+        _fm_composer_bare_blank_is_interior "$plain" "$FM_COMPOSER_SELECTED_FIRST" "$next" || break
+        next=$((next + 1))
+        continue
+      fi
       fm_composer_row_has_edge "$trimmed" && break
       _fm_composer_row_is_omp_status "$trimmed" && break
       _fm_composer_row_is_braille_furniture "$trimmed" && break

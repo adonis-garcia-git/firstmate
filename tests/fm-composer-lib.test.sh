@@ -944,6 +944,38 @@ test_titled_bottom_requires_matching_width
 test_cursor_on_proven_box_bottom_classifies_content
 test_selected_content_is_composer_scoped_and_wrap_normalized
 
+test_ruled_bare_composer_keeps_text_past_a_blank_line() {
+  # helm chat with an attachment types "<text>\n\nATTACHMENTS: <path>" into
+  # the Claude composer on Herdr. Claude renders the typed blank line as a
+  # blank composer row between its two rules, and the extent must run past it:
+  # stopping there read back only the first paragraph, the pre-Enter payload
+  # proof refused, and every such send failed as "herdr send failed".
+  local rule footer screen out
+  rule='──────────────────────────────'
+  footer=$'\n  Opus 5.5 | ctx: 8% used\n  ⏵⏵ bypass permissions on'
+  screen=$'transcript line\n'"$rule"$'\n❯ 1. first paragraph\n\n  ATTACHMENTS: /tmp/x.png\n'"$rule$footer"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$screen")
+  [ "$out" = '1. first paragraph ATTACHMENTS: /tmp/x.png' ] \
+    || fail "a ruled composer must keep typed text past a blank line, got '$out'"
+  assert_screen "ruled claude draft with a paragraph break" pending "$CAPS_STYLED" "$screen" '' "$(printf 'claude\tidle')"
+  # Several paragraph breaks, including a double blank line, all stay inside.
+  screen=$'transcript line\n'"$rule"$'\n❯ a\n\n  b\n\n\n  c\n'"$rule$footer"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$screen")
+  [ "$out" = 'a b c' ] || fail "a ruled composer must keep every paragraph, got '$out'"
+  # The boundary this must not move: without a rule above and below, a blank
+  # row still ends a bare composer, so footer text is never read as content.
+  screen=$'transcript line\n❯ my draft\n\n  ? for shortcuts'
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  [ "$out" = 'my draft' ] || fail "an unruled bare composer must still end at a blank row, got '$out'"
+  screen=$'transcript line\n'"$rule"$'\n❯ my draft\n\n  ? for shortcuts'
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$screen")
+  [ "$out" = 'my draft' ] || fail "a blank run with no closing rule must still end the composer, got '$out'"
+  screen=$'transcript line\n'"$rule"$'\n❯ my draft\n\n'"$rule$footer"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$screen")
+  [ "$out" = 'my draft' ] || fail "a trailing blank row before the rule adds nothing, got '$out'"
+  pass "fm_composer_extract_selected_content: a ruled bare composer keeps text past a blank line"
+}
+
 test_queued_enter_verdict_busy_pending_is_empty() {
   local out
   out=$(fm_composer_queued_enter_verdict pending busy)
@@ -974,3 +1006,4 @@ test_queued_enter_verdict_does_not_convert_other_states() {
 test_queued_enter_verdict_busy_pending_is_empty
 test_queued_enter_verdict_idle_pending_stays_pending
 test_queued_enter_verdict_does_not_convert_other_states
+test_ruled_bare_composer_keeps_text_past_a_blank_line

@@ -77,6 +77,9 @@ fm_git_init_commit "$2"
 fm_git_identity
 # Child Git processes and direct commits inherit the same isolation.
 bash -eu -c 'git -C "$1" commit -q --allow-empty -m child' _ "$2"
+# No detached auto-maintenance may repack a fixture while a test reads it.
+[ "$(bash -eu -c 'git -C "$1" config --get maintenance.auto' _ "$2")" = false ] \
+  || fail "fixture Git still runs automatic maintenance"
 # Repository-local config and explicit command inputs remain authoritative.
 git -C "$2" config commit.gpgsign true
 git -C "$2" config gpg.program /usr/bin/false
