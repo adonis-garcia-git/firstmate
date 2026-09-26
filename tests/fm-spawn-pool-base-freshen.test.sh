@@ -216,6 +216,9 @@ test_stale_pool_base_refreshes_before_branching() {
       "$branch_head" "$current" "$(cat "$POOL_DIR/advanced-main.txt")"
   fi
 
+  # The repeat reuses the same pool slot, so retire the first task's record
+  # as its cleanup would; one live record owns a slot.
+  rm -f "$HOME_DIR/state/$id.meta"
   id='pool-current-base-repeat-r1'
   fm_test_spawn_brief "$HOME_DIR" "$id"
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)

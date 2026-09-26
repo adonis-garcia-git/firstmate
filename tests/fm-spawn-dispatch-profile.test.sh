@@ -212,6 +212,9 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
 
   linked_home="$CASE_DIR/home-link"
   ln -s "$HOME_DIR" "$linked_home"
+  # The second spawn reuses the same fake pool slot, so retire the first
+  # task's record as its cleanup would; one live record owns a slot.
+  rm -f "$HOME_DIR/state/$relative_id.meta"
   : > "$LAUNCH_LOG"
   out=$(
     FM_ROOT_OVERRIDE='' FM_HOME="$linked_home" \
