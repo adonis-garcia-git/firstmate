@@ -109,7 +109,9 @@
 #   the fences once the new pane has settled. Any spawn or relaunch whose
 #   worktree another live record still names refuses before launching an agent
 #   and before the slot-owner claim, so the refusal never overwrites the claim
-#   of the task that still records that copy.
+#   of the task that still records that copy; a secondmate spawn refuses such a
+#   home before its pre-launch sync. bin/fm-home-seed.sh's home lease shares the
+#   same fence (bin/fm-wake-lib.sh's fm_treehouse_pool_fence_start).
 #   A herdr crewmate or scout is placed in the exact workspace of the firstmate
 #   or secondmate process launching it, resolved from that process's own herdr
 #   pane rather than from a workspace label (herdr enforces no label uniqueness,
@@ -1175,7 +1177,6 @@ SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
 SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
 SPAWN_SLOT_CLAIMED=0
-SPAWN_POOL_FENCE_PIDS=
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -1211,75 +1212,15 @@ parse_orca_worktree_result() {
   fi
 }
 
-# The ids of every OTHER live task record in this home whose worktree= names the
-# same physical directory as <path>, one per line. A live record is this home's
-# proof of ownership: treehouse reports a pool slot available whenever no
-# process sits in it, so a task whose agent died still owns its slot even though
-# treehouse would hand it out again.
-spawn_worktree_other_owners() {  # <path>
-  local target meta id wt wt_real
-  target=$(real_path_or_raw "$1")
-  for meta in "$STATE"/*.meta; do
-    [ -f "$meta" ] || continue
-    id=$(basename "$meta" .meta)
-    [ "$id" != "$ID" ] || continue
-    wt=$(fm_meta_get "$meta" worktree)
-    [ -n "$wt" ] || continue
-    wt_real=$(real_path_or_raw "$wt")
-    [ "$wt_real" != "$target" ] || printf '%s\n' "$id"
-  done
-}
-
-# Fence every Treehouse pool slot of this project that another live task record
-# in this home names as its worktree=, so `treehouse get` cannot hand it out and
-# reset it: treehouse counts a slot as in use only while a process sits in it,
-# and a parked task whose agent died leaves its slot empty. Each fence is this
-# script's own child whose cwd is the slot, bounded by its own timeout, and
-# released by PID only. The slot-owner claim cannot do this job: it is written
-# after `treehouse get` has already reset the slot.
+# Fence the pool slots other live tasks in this home own before `treehouse get`
+# (bin/fm-wake-lib.sh's fm_treehouse_pool_fence_start owns why). The slot-owner
+# claim cannot do this job: it is written after `treehouse get` has already
+# reset the slot.
 spawn_pool_fence_start() {
-  local meta id wt wt_real ready n=0 i
-  ready=$(mktemp -d "${TMPDIR:-/tmp}/fm-spawn-fence.XXXXXX") || {
-    echo "error: could not create a pool fence readiness directory for $ID" >&2
+  fm_treehouse_pool_fence_start "$STATE" "$ID" "$PROJ_ABS" || {
+    echo "error: could not fence the pool slots other live tasks in this home own; refusing treehouse get for $ID" >&2
     exit 1
   }
-  for meta in "$STATE"/*.meta; do
-    [ -f "$meta" ] || continue
-    id=$(basename "$meta" .meta)
-    [ "$id" != "$ID" ] || continue
-    wt=$(fm_meta_get "$meta" worktree)
-    [ -n "$wt" ] || continue
-    fm_treehouse_pool_slot "$PROJ_ABS" "$wt" || continue
-    wt_real=$(cd "$wt" 2>/dev/null && pwd -P) || continue
-    n=$((n + 1))
-    # A slot that vanished since it was resolved needs no fence; it still
-    # reports ready so the wait below never stalls on it.
-    (cd "$wt_real" || { : > "$ready/$n"; exit 0; }
-      : > "$ready/$n"
-      PATH=$(getconf PATH) exec sleep 300) \
-      </dev/null >/dev/null 2>&1 &
-    SPAWN_POOL_FENCE_PIDS="$SPAWN_POOL_FENCE_PIDS $!"
-  done
-  # Every fence must be sitting in its slot before treehouse looks.
-  for i in $(seq 1 100); do
-    [ "$(find "$ready" -type f | wc -l | tr -d ' ')" -ge "$n" ] && break
-    [ "$i" -lt 100 ] || {
-      rm -rf -- "$ready"
-      echo "error: could not fence the pool slots other live tasks in this home own; refusing treehouse get for $ID" >&2
-      exit 1
-    }
-    sleep 0.05
-  done
-  rm -rf -- "$ready"
-}
-
-spawn_pool_fence_release() {
-  local pid
-  for pid in $SPAWN_POOL_FENCE_PIDS; do
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
-  done
-  SPAWN_POOL_FENCE_PIDS=
 }
 
 # Refuse a worktree another live task record in this home still names: two
@@ -1287,16 +1228,16 @@ spawn_pool_fence_release() {
 # work, and an agent launched there would work on top of it.
 spawn_require_unowned_worktree() {  # <source>
   local owners
-  owners=$(spawn_worktree_other_owners "$WT" | tr '\n' ' ')
+  owners=$(fm_treehouse_worktree_other_owners "$STATE" "$ID" "$WT" | tr '\n' ' ')
   owners=${owners% }
   [ -z "$owners" ] && return 0
-  echo "error: $1 gave task $ID the worktree '$WT', which live task(s) $owners in this home still record as their own; refusing to launch an agent on another task's copy. Inspect target $T" >&2
+  echo "error: $1 gave task $ID the worktree '$WT', which live task(s) $owners in this home still record as their own; refusing to launch an agent on another task's copy.${T:+ Inspect target $T}" >&2
   exit 1
 }
 
 spawn_abort_cleanup() {
   local status=$?
-  spawn_pool_fence_release
+  fm_treehouse_pool_fence_release
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] &&
     [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] &&
     [ -n "$SPAWN_META_TMP" ] &&
@@ -2853,6 +2794,9 @@ if [ "$KIND" = secondmate ]; then
     SECONDMATE_PROJECTS=$SECONDMATE_REGISTRY_MATCH_PROJECTS
   fi
   WT="$PROJ_ABS"
+  # A home another live record names is that task's copy; refuse before the sync
+  # below can move it.
+  spawn_require_unowned_worktree "secondmate home resolution"
   # Local-HEAD sync: before launch, fast-forward this secondmate's worktree to the
   # PRIMARY checkout's current default-branch commit, so a freshly spawned or
   # recovery-respawned secondmate always runs the primary's version (AGENTS.md
@@ -4212,10 +4156,11 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
-  spawn_pool_fence_release
+  fm_treehouse_pool_fence_release
 fi
 # Checked before the slot claim below, so a refused spawn never overwrites the
-# claim of the task that still records this copy.
+# claim of the task that still records this copy. A secondmate was checked
+# before its home sync.
 if [ "$KIND" != secondmate ]; then
   spawn_require_unowned_worktree "$([ "$RELAUNCH" -eq 1 ] && echo relaunch || echo "worktree acquisition")"
 fi

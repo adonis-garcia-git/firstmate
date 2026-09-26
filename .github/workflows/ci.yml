@@ -271,7 +271,8 @@ jobs:
           set -eu
           # Several real-herdr-gated E2E scripts require treehouse for spawn
           # worktree acquisition (presentation, workspace-per-home, autodetect,
-          # and the spawn pool-slot fence in fm-spawn-pool-slot-ownership).
+          # and the pool-slot fences in fm-spawn-pool-slot-ownership and
+          # fm-home-seed-pool-fence).
           bin/fm-install-treehouse.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Assert Herdr pin and protocol floor
