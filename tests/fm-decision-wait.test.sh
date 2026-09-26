@@ -81,6 +81,25 @@ wait_live() {
   return 0
 }
 
+# Wait up to <limit> 0.1s ticks while <pid> stays alive until <cmd...> succeeds.
+# A loaded host can stretch the watcher's startup past any fixed liveness
+# window, so a phase that asserts a sweep's write waits for that write itself.
+# Returns 1 if the watcher exits first and 2 on timeout.
+wait_live_until() {  # <pid> <limit-ticks> <cmd...>
+  local pid=$1 limit=$2 i=0
+  shift 2
+  while [ "$i" -lt "$limit" ]; do
+    "$@" && return 0
+    kill -0 "$pid" 2>/dev/null || return 1
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 2
+}
+
+record_has() { grep -q "$2" "$1/data/decision-waits.tsv" 2>/dev/null; }  # <home> <pattern>
+record_empty() { [ -z "$(record_of "$1")" ]; }  # <home>
+
 wait_for_grep() {  # <pattern> <file> [limit-ticks]
   local pattern=$1 file=$2 limit=${3:-100} i=0
   while [ "$i" -lt "$limit" ]; do
@@ -343,6 +362,10 @@ test_watch_digest_fires_once_per_interval_and_stays_quiet() {
   out="$home/watch0.out"
   watch_bg "$home" "$out"
   pid=$!
+  # The watcher touches the marker before it runs the scan, so wait for the
+  # scan's last write, the wait record, before the liveness window.
+  wait_live_until "$pid" 150 record_has "$home" "hold:dec-a" \
+    || { reap "$pid"; fail "watcher exited or never recorded the wait on a fresh home's first sweep: $(cat "$out")"; }
   wait_live "$pid" 25 || { reap "$pid"; fail "watcher exited on a fresh home's first sweep: $(cat "$out")"; }
   reap "$pid"
   # The reap kill leaves watcher downtime-recovery state armed; clear it so the
@@ -397,6 +420,8 @@ test_watch_digest_fires_once_per_interval_and_stays_quiet() {
   out="$home/watch3.out"
   watch_bg "$home" "$out"
   pid=$!
+  wait_live_until "$pid" 150 record_empty "$home" \
+    || { reap "$pid"; fail "watcher exited or never dropped the cleared wait: $(cat "$out")"; }
   wait_live "$pid" 25 || { reap "$pid"; fail "watcher exited with nothing waiting: $(cat "$out")"; }
   reap "$pid"
   ! grep -q 'decision-digest' "$queue" 2>/dev/null || fail "no digest wake when nothing is waiting"
