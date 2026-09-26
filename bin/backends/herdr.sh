@@ -3025,16 +3025,16 @@ fm_backend_herdr_send_literal() {  # <target> <text>
 # it arrives as ONE paste however the kernel splits it into reads. Shorter text
 # fits one read and keeps the raw keystroke send, byte-identical to before, so
 # slash-command and `$skill` popups still open on every harness. The long path
-# never falls back to a raw write: when that transport is unavailable or the
-# request is unconfirmed it returns nonzero without pressing Enter, and the
-# caller reports send-failed.
+# never falls back to a raw write and never presses Enter: it returns 1 when
+# the text was not sent, and 2 when the request was sent but Herdr never
+# confirmed it, so the composer may already hold the text unsubmitted.
 FM_BACKEND_HERDR_RAW_TEXT_MAX_BYTES=512
-fm_backend_herdr_send_composer_text() {  # <target> <text>
-  local target=$1 text=$2 bytes socket
+fm_backend_herdr_send_composer_text() {  # <target> <text> -> 0 | 1 not sent | 2 unconfirmed
+  local target=$1 text=$2 bytes socket rc=0
   bytes=$(printf '%s' "$text" | LC_ALL=C wc -c | tr -d ' ')
   if [ "$bytes" -le "$FM_BACKEND_HERDR_RAW_TEXT_MAX_BYTES" ]; then
-    fm_backend_herdr_send_literal "$target" "$text"
-    return
+    fm_backend_herdr_send_literal "$target" "$text" || return 1
+    return 0
   fi
   fm_backend_herdr_target_ready "$target" || return 1
   if ! command -v python3 >/dev/null 2>&1; then
@@ -3045,11 +3045,19 @@ fm_backend_herdr_send_composer_text() {  # <target> <text>
     echo "warning: herdr: could not resolve the control socket of session $FM_BACKEND_HERDR_SESSION for a $bytes-byte message; refusing a raw send the harness could truncate" >&2
     return 1
   fi
-  if ! printf '%s' "$text" | python3 "$FM_BACKEND_HERDR_ROOT/bin/backends/herdr-send-input.py" \
-      "$socket" "$FM_BACKEND_HERDR_PANE" >/dev/null 2>&1; then
-    echo "warning: herdr: pane.send_input did not confirm a $bytes-byte message for $FM_BACKEND_HERDR_PANE; delivery is unconfirmed, Herdr may already hold the text unsubmitted, and no Enter was pressed" >&2
-    return 1
-  fi
+  printf '%s' "$text" | python3 "$FM_BACKEND_HERDR_ROOT/bin/backends/herdr-send-input.py" \
+    "$socket" "$FM_BACKEND_HERDR_PANE" >/dev/null 2>&1 || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    3)
+      echo "warning: herdr: pane.send_input did not confirm a $bytes-byte message for $FM_BACKEND_HERDR_PANE; delivery is unconfirmed, Herdr may already hold the text unsubmitted, and no Enter was pressed" >&2
+      return 2
+      ;;
+    *)
+      echo "warning: herdr: pane.send_input refused a $bytes-byte message for $FM_BACKEND_HERDR_PANE; no Enter was pressed" >&2
+      return 1
+      ;;
+  esac
 }
 
 # fm_backend_herdr_normalize_key: map firstmate's key vocabulary (Enter,
@@ -3359,8 +3367,9 @@ fm_backend_herdr_composer_payload_shown() {  # <text> <after>
   [ -z "$literal" ]
 }
 
-# fm_backend_herdr_composer_clear: after a refused proof, press Ctrl+U until
-# the shared classifier reads the composer as empty. Claude documents Ctrl+U
+# fm_backend_herdr_composer_clear: after a refused proof or an unconfirmed
+# paste-aware send, press Ctrl+U until the shared classifier reads the
+# composer as empty. Claude documents Ctrl+U
 # as delete-to-line-start, repeated across lines of a multiline draft; Ctrl+C
 # is not used because it interrupts a running turn. Live Claude deletes one
 # wrapped screen row per press, so a single-line leftover can need several
@@ -3379,7 +3388,7 @@ fm_backend_herdr_composer_clear() {  # <target> <text>
 
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
-  local raw_status footer_baseline='' allow_rendered=0 enter_sent=0 identity proof=0 proof_lines content
+  local raw_status footer_baseline='' allow_rendered=0 enter_sent=0 identity proof=0 proof_lines content send_rc=0
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   # Claude on Herdr is the live-verified truncation shape: Enter is withheld
   # unless the composer, empty before the send, shows this payload. A suffix
@@ -3393,18 +3402,18 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
       || { printf 'send-failed'; return 0; }
     [ -z "${content//[$' \t\r\n\v\f']/}" ] || { printf 'send-failed'; return 0; }
   fi
-  fm_backend_herdr_send_composer_text "$target" "$text" || { printf 'send-failed'; return 0; }
+  fm_backend_herdr_send_composer_text "$target" "$text" || send_rc=$?
+  [ "$send_rc" = 0 ] || [ "$send_rc" = 2 ] || { printf 'send-failed'; return 0; }
   sleep "$settle"
-  if [ "$proof" = 1 ]; then
-    if ! content=$(fm_backend_herdr_composer_content "$target" "$proof_lines") \
-      || ! fm_backend_herdr_composer_payload_shown "$text" "$content"; then
-      if fm_backend_herdr_composer_clear "$target" "$text"; then
-        printf 'send-failed'
-      else
-        printf 'unknown'
-      fi
-      return 0
+  if [ "$send_rc" = 2 ] || { [ "$proof" = 1 ] && {
+      ! content=$(fm_backend_herdr_composer_content "$target" "$proof_lines") \
+      || ! fm_backend_herdr_composer_payload_shown "$text" "$content"; }; }; then
+    if fm_backend_herdr_composer_clear "$target" "$text"; then
+      printf 'send-failed'
+    else
+      printf 'unknown'
     fi
+    return 0
   fi
   raw_status=$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
   baseline=$(fm_backend_herdr_classify_submit_agent_status "$raw_status")

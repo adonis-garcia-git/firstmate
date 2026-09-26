@@ -136,12 +136,12 @@ herdr_submit_claude_prefix() {  # <resp-dir> <typed-text>
 # pane.send_input request instead of `pane send-text`, and that send's only CLI
 # call is the `session list` naming the socket. This answers call <slot> with
 # that listing and starts a one-shot server that appends the request line to
-# <resp-dir>/paste.jsonl, answers ok (as the real server does) or with an
-# error, and exits on its own at the latest 10 seconds after it starts
+# <resp-dir>/paste.jsonl, answers ok (as the real server does), with an
+# error, or not at all (silent: it hangs up after reading), and exits on its own at the latest 10 seconds after it starts
 # waiting, so no test needs to reap it. Unix socket paths are capped near 104
 # bytes, and macOS TMPDIR alone is most of that, so the socket lives in a
 # short /tmp directory.
-herdr_paste_socket() {  # <resp-dir> <slot> [ok|error]
+herdr_paste_socket() {  # <resp-dir> <slot> [ok|error|silent]
   local resp=$1 slot=$2 reply=${3:-ok} dir sock i=0
   command -v python3 >/dev/null 2>&1 || fail "python3 is required for Herdr's paste-aware input path"
   dir=$(mktemp -d /tmp/fmhsi.XXXXXX) || fail "could not create a short socket directory"
@@ -170,6 +170,9 @@ line = buf.split(b"\n", 1)[0]
 with open(record, "ab") as handle:
     handle.write(line + b"\n")
 req = json.loads(line)
+if reply == "silent":
+    conn.close()
+    sys.exit(0)
 if reply == "ok":
     body = {"id": req["id"], "result": {"type": "ok"}}
 else:
@@ -4809,6 +4812,48 @@ test_send_text_submit_long_text_refused_input_types_nothing() {
   pass "fm_backend_herdr_send_text_submit: when Herdr refuses the paste-aware request, a long message reports send-failed with nothing typed raw and no Enter"
 }
 
+# A paste-aware request Herdr received but never answered may already sit in
+# the composer. It must be cleared without Enter, so a resend cannot submit it
+# twice: a verified-empty composer reports send-failed, a stuck one unknown.
+test_send_text_submit_unconfirmed_paste_is_cleared_and_reports_send_failed() {
+  local dir log resp fb out msg
+  msg=$(long_numbered_message)
+  dir="$TMP_ROOT/submit-long-unconfirmed"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # 1: agent get - codex identity; 2: session list - silent socket; 3: Ctrl+U; 4: empty composer
+  printf '{"result":{"agent":{"agent":"codex","agent_status":"idle"}}}\n' > "$resp/1.out"
+  herdr_paste_socket "$resp" 2 silent
+  printf '  \xe2\x9d\xaf\n' > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$msg" 2>/dev/null )
+  [ "$(herdr_paste_count "$resp")" -eq 1 ] || fail "the silent fake Herdr control socket never received the request"
+  [ "$out" = send-failed ] || fail "an unconfirmed paste cleared back to an empty composer should report send-failed, got '$out'"
+  [ "$(herdr_ctrl_u_count "$log")" -eq 1 ] || fail "an unconfirmed paste should be cleared with Ctrl+U, sent $(herdr_ctrl_u_count "$log")"
+  [ "$(grep -cE $'\x1f''pane'$'\x1f''send-text|'$'\x1f''enter$' "$log")" -eq 0 ] \
+    || fail "an unconfirmed paste must not fall back to raw send-text or press Enter: $(cat "$log")"
+  pass "fm_backend_herdr_send_text_submit: a paste-aware request Herdr never answered is cleared without Enter and reports send-failed"
+}
+
+test_send_text_submit_unconfirmed_paste_that_will_not_clear_is_unknown() {
+  local dir log resp fb out msg cap n
+  msg=$(long_numbered_message)
+  dir="$TMP_ROOT/submit-long-unconfirmed-stuck"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent":"codex","agent_status":"idle"}}}\n' > "$resp/1.out"
+  herdr_paste_socket "$resp" 2 silent
+  cap=$(( ${#msg} / 40 + 8 ))
+  for ((n = 4; n <= 2 + 2 * cap; n += 2)); do
+    printf '  \xe2\x9d\xaf %s\n' "${msg: -300}" > "$resp/$n.out"
+  done
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$msg" 2>/dev/null )
+  [ "$out" = unknown ] || fail "an unconfirmed paste that stays in the composer must not claim nothing was typed, got '$out'"
+  [ "$(herdr_ctrl_u_count "$log")" -eq "$cap" ] || fail "a leftover that will not clear should get a bounded $cap Ctrl+U presses, sent $(herdr_ctrl_u_count "$log")"
+  [ "$(grep -cE $'\x1f''pane'$'\x1f''send-text|'$'\x1f''enter$' "$log")" -eq 0 ] \
+    || fail "an unconfirmed paste must not fall back to raw send-text or press Enter: $(cat "$log")"
+  pass "fm_backend_herdr_send_text_submit: an unconfirmed paste whose clear cannot be verified reports unknown, not send-failed"
+}
+
 test_send_text_submit_unknown_on_capture_failure() {
   local dir log resp fb out enter_count
   dir="$TMP_ROOT/submit-read-fail"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -5956,6 +6001,8 @@ test_send_text_submit_send_failed
 test_send_text_submit_long_text_rides_paste_aware_input
 test_send_text_submit_long_text_without_socket_types_nothing
 test_send_text_submit_long_text_refused_input_types_nothing
+test_send_text_submit_unconfirmed_paste_is_cleared_and_reports_send_failed
+test_send_text_submit_unconfirmed_paste_that_will_not_clear_is_unknown
 test_send_text_submit_unknown_on_capture_failure
 test_send_text_submit_unknown_on_composer_capture_failure
 test_send_text_submit_long_literal_submits_when_composer_holds_every_byte
