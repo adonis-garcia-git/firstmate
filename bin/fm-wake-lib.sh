@@ -1331,6 +1331,80 @@ fm_treehouse_pool_slot() {  # <project-dir> <worktree>
   [ "$project_common" = "$slot_common" ]
 }
 
+# Pool-slot fence shared by every Treehouse acquirer (bin/fm-spawn.sh's
+# `treehouse get` and bin/fm-home-seed.sh's `treehouse get --lease`).
+# A live state/<id>.meta is this home's proof that its worktree= belongs to that
+# task: treehouse reports a pool slot available whenever no process sits in it,
+# so a parked task whose agent died still owns its slot even though treehouse
+# would hand it out again and reset it. Both helpers read worktree= through
+# fm_meta_get, so the caller must also source bin/fm-backend.sh.
+
+# The ids of every live task record in <state-dir> other than <exclude-id> whose
+# worktree= names the same physical directory as <path>, one per line.
+fm_treehouse_worktree_other_owners() {  # <state-dir> <exclude-id> <path>
+  local state=$1 exclude=$2 target meta id wt wt_real
+  target=$(CDPATH='' cd -- "$3" 2>/dev/null && pwd -P) || target=$3
+  for meta in "$state"/*.meta; do
+    [ -f "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    [ "$id" != "$exclude" ] || continue
+    wt=$(fm_meta_get "$meta" worktree)
+    [ -n "$wt" ] || continue
+    wt_real=$(CDPATH='' cd -- "$wt" 2>/dev/null && pwd -P) || wt_real=$wt
+    [ "$wt_real" != "$target" ] || printf '%s\n' "$id"
+  done
+}
+
+# Fence every Treehouse pool slot of <project-dir> that a live task record in
+# <state-dir> other than <exclude-id> names as its worktree=, so the caller's
+# next `treehouse get` cannot hand it out: treehouse counts a slot as in use only
+# while a process sits in it. Each fence is the caller's own child whose cwd is
+# the slot, bounded by its own timeout, and released by PID only through
+# fm_treehouse_pool_fence_release. Appends the fence PIDs to
+# FM_TREEHOUSE_POOL_FENCE_PIDS and returns only once every fence sits in its
+# slot; on failure it releases what it started and returns 1.
+fm_treehouse_pool_fence_start() {  # <state-dir> <exclude-id> <project-dir>
+  local state=$1 exclude=$2 project=$3 meta id wt wt_real ready n=0 i
+  ready=$(mktemp -d "${TMPDIR:-/tmp}/fm-pool-fence.XXXXXX") || return 1
+  for meta in "$state"/*.meta; do
+    [ -f "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    [ "$id" != "$exclude" ] || continue
+    wt=$(fm_meta_get "$meta" worktree)
+    [ -n "$wt" ] || continue
+    fm_treehouse_pool_slot "$project" "$wt" || continue
+    wt_real=$(CDPATH='' cd -- "$wt" 2>/dev/null && pwd -P) || continue
+    n=$((n + 1))
+    # A slot that vanished since it was resolved needs no fence; it still
+    # reports ready so the wait below never stalls on it.
+    (cd "$wt_real" || { : > "$ready/$n"; exit 0; }
+      : > "$ready/$n"
+      PATH=$(getconf PATH) exec sleep 300) \
+      </dev/null >/dev/null 2>&1 &
+    FM_TREEHOUSE_POOL_FENCE_PIDS="${FM_TREEHOUSE_POOL_FENCE_PIDS:-} $!"
+  done
+  # Every fence must be sitting in its slot before treehouse looks.
+  for i in $(seq 1 100); do
+    [ "$(find "$ready" -type f | wc -l | tr -d ' ')" -ge "$n" ] && break
+    [ "$i" -lt 100 ] || {
+      rm -rf -- "$ready"
+      fm_treehouse_pool_fence_release
+      return 1
+    }
+    sleep 0.05
+  done
+  rm -rf -- "$ready"
+}
+
+fm_treehouse_pool_fence_release() {
+  local pid
+  for pid in ${FM_TREEHOUSE_POOL_FENCE_PIDS:-}; do
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+  FM_TREEHOUSE_POOL_FENCE_PIDS=
+}
+
 # Slot-owner claim: which task a Treehouse pool slot currently belongs to.
 #
 # Treehouse can record ownership durably: `treehouse get --lease --lease-holder`

@@ -7,7 +7,11 @@
 #       a fresh firstmate worktree via "treehouse get --lease", which durably
 #       leases the worktree under the secondmate <id> so the home survives with
 #       no live process and is never recycled until the lease is released with
-#       "treehouse return". Projects are cloned
+#       "treehouse return". Before leasing, every pool slot a live
+#       state/<id>.meta in this home records as its worktree= is fenced so
+#       treehouse cannot hand a parked task's copy out and reset it, and a
+#       leased home another live record still names is refused and left
+#       untouched, lease included. Projects are cloned
 #       from the active home into the secondmate home's projects/ directory.
 #       That project list is non-exclusive provisioning data. Pass --no-projects
 #       instead of a project list to seed a project-less home for a domain whose
@@ -49,6 +53,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-secondmate-charter-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-backend.sh
+. "$SCRIPT_DIR/fm-backend.sh"
 
 usage() {
   echo "usage: fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}" >&2
@@ -393,11 +399,29 @@ acquire_treehouse_home() {
   # live process and is skipped by later get/prune, so the home survives restarts
   # until teardown or rollback returns it. treehouse prints only the worktree path
   # to stdout (banners go to stderr), so command substitution captures the path.
+  # A firstmate-repo task parked in this home still owns its slot even with no
+  # process in it, so fence those slots first (bin/fm-wake-lib.sh's
+  # fm_treehouse_pool_fence_start owns why).
+  local owners
+  fm_treehouse_pool_fence_start "$STATE" "$id" "$FM_ROOT" || {
+    echo "error: could not fence the pool slots live tasks in this home own; refusing to lease a firstmate home for $id" >&2
+    return 1
+  }
   home=$(cd "$FM_ROOT" && treehouse get --lease --lease-holder "$id") || {
+    fm_treehouse_pool_fence_release
     echo "error: treehouse get --lease failed to lease a firstmate home" >&2
     return 1
   }
+  fm_treehouse_pool_fence_release
   [ -n "$home" ] || { echo "error: treehouse get --lease did not report a firstmate home" >&2; return 1; }
+  # Backstop: a leased home another live record still names is that task's copy.
+  # It is left untouched, lease included, because returning it would reset it.
+  owners=$(fm_treehouse_worktree_other_owners "$STATE" "$id" "$home" | tr '\n' ' ')
+  owners=${owners% }
+  if [ -n "$owners" ]; then
+    echo "error: treehouse leased '$home' as secondmate $id's home, but live task(s) $owners in this home still record it as their own; refusing to seed another task's copy. The lease under holder $id still holds it; release it only after confirming the copy's owner" >&2
+    return 1
+  fi
   printf '%s\n' "$home"
 }
 
