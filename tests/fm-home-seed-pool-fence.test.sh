@@ -43,6 +43,8 @@ test_seed_skips_slot_owned_by_parked_task() {
   mkdir -p "$th_home" "$home/projects" "$home/data" "$home/state"
   # A firstmate code root whose pool is private to this case.
   git clone --quiet "$ROOT" "$root"
+  # CI checks out a detached HEAD with no branches, so give the pool a main.
+  git -C "$root" checkout --quiet -B main
   printf 'max_trees = 4\nroot = "%s/pool-root"\n' "$case_dir" > "$root/treehouse.toml"
   commit_all "$root" treehouse
   git clone --quiet --bare "$root" "$origin"
