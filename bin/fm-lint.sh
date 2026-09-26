@@ -41,18 +41,26 @@
 # invocations in the core bin/ and bin/backends/ scripts so every configured
 # backlog backend follows the same tasks-axi lifecycle path.
 #
-# Lint defaults to two bounded workers over two stable logical shards.
-# Diagnostics replay in stable shard/root order. FM_LINT_JOBS=1 changes
+# Every root runs in its own ShellCheck process, at most two at a time, and
+# diagnostics replay in canonical root order, so FM_LINT_JOBS=1 changes
 # concurrency, not diagnostics or exit selection.
+# Memory bounds that schedule. ShellCheck re-analyzes a library at every source
+# site, so a root costs about its expanded source tree: its own bytes plus each
+# library ShellCheck follows, at each site. A root weighing more than a quarter
+# of the run's heaviest root runs alone; the rest share two workers, so two
+# concurrent roots weigh at most half the heaviest root for any file set, and
+# file-size changes cannot pair memory-heavy roots.
 # --partition 1of2/2of2 splits the entire canonical inventory across
 # two CI runners, each with those same bounded workers. Partitions are complete,
-# disjoint, and byte-weight balanced; --list-files exposes their actual roots.
+# disjoint, and balanced by expanded source weight; --list-files exposes their
+# actual roots.
 # Partition mode is always full source-aware analysis, never changed-only or
 # --fast, and does not accept explicit paths. Each partition also runs workflow
 # lint and backend-purity checks, keeping either invocation independently useful.
 #
 # Optional quiet telemetry writes one bounded TSV snapshot of content and source
-# graph identity, wall/CPU/RSS, shard load, and competing ShellCheck processes.
+# graph identity, wall/CPU/RSS, the heaviest root and the roots run alone, worker
+# load, the concurrent RSS bound, and competing ShellCheck processes.
 #
 # Usage:
 #   fm-lint.sh                         lint the context-selected file set (see above)
@@ -84,54 +92,46 @@ fm_lint_worker_stop() {
   FM_LINT_WORKER_SHELLCHECK_PID=
 }
 
-fm_lint_worker() {  # <manifest> <output-dir> <shard-index>
-  local manifest=$1 output_dir=$2 shard_index=$3 tab index path output invocation_rc rc=0
-  local -a roots shellcheck_args
+# Each manifest root gets its own ShellCheck process, output, and status, so a
+# process never holds more than one root's source tree and replay never
+# depends on scheduling.
+fm_lint_worker() {  # <manifest> <output-dir>
+  local manifest=$1 output_dir=$2 tab index path invocation_rc i
+  local -a indexes roots shellcheck_args
+  indexes=()
   roots=()
   tab=$(printf '\t')
   while IFS="$tab" read -r index path || [ -n "${index:-}${path:-}" ]; do
     [ -n "${index:-}" ] || continue
+    indexes+=("$index")
     roots+=("$path")
   done < "$manifest"
-  output="$output_dir/shard.$shard_index"
-  if [ "${#roots[@]}" -gt 0 ]; then
-    trap 'fm_lint_worker_stop; exit 129' HUP
-    trap 'fm_lint_worker_stop; exit 130' INT
-    trap 'fm_lint_worker_stop; exit 143' TERM
-    shellcheck_args=(--norc)
-    if [ "${FM_LINT_INTERNAL_FOLLOW_SOURCES:-1}" -eq 1 ]; then
-      shellcheck_args+=(--external-sources)
-    fi
-    if [ -n "${FM_LINT_INTERNAL_EXCLUDE:-}" ]; then
-      shellcheck_args+=(--exclude="$FM_LINT_INTERNAL_EXCLUDE")
-    fi
-    if [ "${FM_LINT_INTERNAL_FAST:-0}" -eq 1 ]; then
-      shellcheck_args+=(--extended-analysis=false)
-    fi
-    : > "$output.out"
-    if [ "${FM_LINT_INTERNAL_FOLLOW_SOURCES:-1}" -eq 1 ]; then
-      "$FM_LINT_SHELLCHECK" "${shellcheck_args[@]}" -- "${roots[@]}" >> "$output.out" 2>&1 &
-      FM_LINT_WORKER_SHELLCHECK_PID=$!
-      wait "$FM_LINT_WORKER_SHELLCHECK_PID" || rc=$?
-      FM_LINT_WORKER_SHELLCHECK_PID=
-    else
-      for path in "${roots[@]}"; do
-        invocation_rc=0
-        "$FM_LINT_SHELLCHECK" "${shellcheck_args[@]}" -- "$path" >> "$output.out" 2>&1 &
-        FM_LINT_WORKER_SHELLCHECK_PID=$!
-        wait "$FM_LINT_WORKER_SHELLCHECK_PID" || invocation_rc=$?
-        FM_LINT_WORKER_SHELLCHECK_PID=
-        if [ "$rc" -eq 0 ] && [ "$invocation_rc" -ne 0 ]; then
-          rc=$invocation_rc
-        fi
-      done
-    fi
-    trap - HUP INT TERM
-  else
-    : > "$output.out"
+  [ "${#roots[@]}" -gt 0 ] || return 0
+  shellcheck_args=(--norc)
+  if [ "${FM_LINT_INTERNAL_FOLLOW_SOURCES:-1}" -eq 1 ]; then
+    shellcheck_args+=(--external-sources)
   fi
-  printf '%s\n' "$rc" > "$output.rc"
-  return "$rc"
+  if [ -n "${FM_LINT_INTERNAL_EXCLUDE:-}" ]; then
+    shellcheck_args+=(--exclude="$FM_LINT_INTERNAL_EXCLUDE")
+  fi
+  if [ "${FM_LINT_INTERNAL_FAST:-0}" -eq 1 ]; then
+    shellcheck_args+=(--extended-analysis=false)
+  fi
+  trap 'fm_lint_worker_stop; exit 129' HUP
+  trap 'fm_lint_worker_stop; exit 130' INT
+  trap 'fm_lint_worker_stop; exit 143' TERM
+  i=0
+  while [ "$i" -lt "${#roots[@]}" ]; do
+    invocation_rc=0
+    "$FM_LINT_SHELLCHECK" "${shellcheck_args[@]}" -- "${roots[i]}" \
+      > "$output_dir/root.${indexes[i]}.out" 2>&1 < /dev/null &
+    FM_LINT_WORKER_SHELLCHECK_PID=$!
+    wait "$FM_LINT_WORKER_SHELLCHECK_PID" || invocation_rc=$?
+    FM_LINT_WORKER_SHELLCHECK_PID=
+    printf '%s\n' "$invocation_rc" > "$output_dir/root.${indexes[i]}.rc"
+    i=$((i + 1))
+  done
+  trap - HUP INT TERM
 }
 
 # Private subprocess mode used only by the bounded parent above.
@@ -140,8 +140,8 @@ if [ "${1:-}" = "--internal-worker" ]; then
     printf 'fm-lint.sh: --internal-worker is private to the lint owner.\n' >&2
     exit 2
   }
-  [ "$#" -eq 4 ] && [ -n "${FM_LINT_SHELLCHECK:-}" ] || exit 2
-  fm_lint_worker "$2" "$3" "$4"
+  [ "$#" -eq 3 ] && [ -n "${FM_LINT_SHELLCHECK:-}" ] || exit 2
+  fm_lint_worker "$2" "$3"
   exit $?
 fi
 
@@ -554,11 +554,20 @@ if [ "$CHANGED_MODE" -eq 1 ] && [ "$FAST" -eq 0 ]; then
   EXCLUDE_CODES=$LOCAL_NOX_EXCLUDE
   ANALYSIS_MODE=local
 fi
-# Stable largest-first packing is shared by cross-runner partition selection
-# and the two local workers. Weights are a scheduling proxy, never a skip rule.
+# Every root is weighed by the source tree ShellCheck analyzes for it, because
+# ShellCheck re-reads and re-analyzes a library at every `source` site, so a
+# root's memory and time track that expanded tree rather than its own bytes.
+# The weight is the root's bytes plus, when sources are followed, every
+# non-/dev/null `# shellcheck source=` target counted again at each site, and
+# each undirected `. "$VAR/path"` target that exists as ./path counted once per
+# file, because ShellCheck follows those from the working directory too. Such a
+# line inside a quoted string or heredoc is not code, which the once-per-file
+# count bounds. Expansion recurses, stopping only at a file already on the
+# include stack as ShellCheck does. Weights order and pack work; they never
+# skip a root.
 TAB=$(printf '\t')
 fm_lint_root_weights() {
-  local index=1 path weight
+  local index=1 path
   for path in "${ROOTS[@]}"; do
     case "$path" in
       *"$TAB"*|*$'\n'*)
@@ -566,14 +575,71 @@ fm_lint_root_weights() {
         return 2
         ;;
     esac
-    weight=1
-    if [ -f "$path" ]; then
-      weight=$(wc -c < "$path" 2>/dev/null | tr -d '[:space:]')
-    fi
-    case "$weight" in ''|*[!0-9]*) weight=1 ;; esac
-    printf '%s\t%s\t%s\n' "$weight" "$index" "$path"
+    printf '%s\t%s\n' "$index" "$path"
     index=$((index + 1))
-  done
+  done | LC_ALL=C awk -F '\t' -v follow="$FOLLOW_SOURCES" '
+    function readable(file,    line, status) {
+      if (file in found) return found[file]
+      status = (getline line < file)
+      if (status >= 0) close(file)
+      found[file] = (status >= 0)
+      return found[file]
+    }
+    function load(file,    line, target, status, directed) {
+      if (file in size) return
+      size[file] = 0
+      deps[file] = 0
+      directed = 0
+      while ((status = (getline line < file)) > 0) {
+        size[file] += length(line) + 1
+        if (!follow) continue
+        if (line ~ /^[[:space:]]*# shellcheck source=/) {
+          target = line
+          sub(/^[[:space:]]*# shellcheck source=/, "", target)
+          sub(/[[:space:]].*$/, "", target)
+          if (target != "/dev/null") dep[file, ++deps[file]] = target
+          directed = 1
+          continue
+        }
+        if (!directed && line ~ /^[[:space:]]*(\.|source)[[:space:]]/) {
+          target = line
+          sub(/^[[:space:]]*(\.|source)[[:space:]]+"?/, "", target)
+          if (sub(/^\$(\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)"?/, "", target) && target ~ /^\//) {
+            sub(/["[:space:];].*$/, "", target)
+            target = "." target
+            if (target !~ /\$/ && !((file, target) in undirected) && readable(target)) {
+              undirected[file, target] = 1
+              dep[file, ++deps[file]] = target
+            }
+          }
+        }
+        if (line !~ /^[[:space:]]*$/) directed = 0
+      }
+      if (status == 0) close(file)
+    }
+    function expand(file, stack,    i, total, outer_cut) {
+      if (index(stack, SUBSEP file SUBSEP)) {
+        cut = 1
+        return 0
+      }
+      if (file in memo) return memo[file]
+      load(file)
+      outer_cut = cut
+      cut = 0
+      total = size[file]
+      for (i = 1; i <= deps[file]; i++) total += expand(dep[file, i], stack SUBSEP file SUBSEP)
+      # A recursion cut makes this total depend on the include stack.
+      if (!cut) memo[file] = total
+      cut = cut || outer_cut
+      return total
+    }
+    {
+      weight = expand($2, "")
+      print (weight > 0 ? weight : 1) "\t" $1 "\t" $2
+    }
+  '
+  # A tab/newline refusal above must stop the caller, not yield a short list.
+  [ "${PIPESTATUS[0]}" -eq 0 ] || return 2
 }
 
 if [ -n "$PARTITION" ]; then
@@ -667,21 +733,34 @@ trap 'exit 143' TERM
 WEIGHTS="$TMP_ROOT/weights"
 OUTPUT_DIR="$TMP_ROOT/output"
 mkdir -p "$OUTPUT_DIR"
-SHARD_COUNT=2
-worker=0
-while [ "$worker" -lt "$SHARD_COUNT" ]; do
-  : > "$TMP_ROOT/manifest.$worker"
-  worker=$((worker + 1))
-done
-
 fm_lint_root_weights > "$WEIGHTS" || exit $?
 
-# Largest-first deterministic greedy assignment keeps the two bounded workers
-# balanced without affecting replay order. Direct bytes are a stable portable
-# proxy after the expensive dynamic adapter source fan-out is cut.
-WORKER_LOADS=(0 0)
+# Memory, not balance alone, bounds the schedule. The run's heaviest root has
+# to fit alone anyway, so a root weighing more than a quarter of it runs alone,
+# one at a time, first; the rest are packed largest-first across two workers
+# that each run one root at a time. Two concurrent roots then weigh at most half
+# the heaviest. Measured ShellCheck 0.11.0 memory grows about as weight^0.77,
+# so that pair needs roughly 70% of the heaviest root's memory, leaving
+# headroom for the weight being only an estimate. The bound holds for any file
+# set, so a change in file sizes cannot pair heavy roots. Replay never depends
+# on this assignment.
 LC_ALL=C sort -t "$TAB" -k1,1nr -k2,2n "$WEIGHTS" > "$WEIGHTS.sorted"
+HEAVIEST_WEIGHT=0
+HEAVIEST_ROOT=
+IFS="$TAB" read -r HEAVIEST_WEIGHT _ HEAVIEST_ROOT < "$WEIGHTS.sorted" || true
+: > "$TMP_ROOT/manifest.alone"
+: > "$TMP_ROOT/manifest.0"
+: > "$TMP_ROOT/manifest.1"
+ALONE_COUNT=0
+ALONE_LOAD=0
+WORKER_LOADS=(0 0)
 while IFS="$TAB" read -r weight index path; do
+  if [ $((weight * 4)) -gt "$HEAVIEST_WEIGHT" ]; then
+    printf '%s\t%s\n' "$index" "$path" >> "$TMP_ROOT/manifest.alone"
+    ALONE_COUNT=$((ALONE_COUNT + 1))
+    ALONE_LOAD=$((ALONE_LOAD + weight))
+    continue
+  fi
   worker=0
   if [ "${WORKER_LOADS[1]}" -lt "${WORKER_LOADS[0]}" ]; then
     worker=1
@@ -689,12 +768,6 @@ while IFS="$TAB" read -r weight index path; do
   printf '%s\t%s\n' "$index" "$path" >> "$TMP_ROOT/manifest.$worker"
   WORKER_LOADS[worker]=$((WORKER_LOADS[worker] + weight))
 done < "$WEIGHTS.sorted"
-worker=0
-while [ "$worker" -lt "$SHARD_COUNT" ]; do
-  LC_ALL=C sort -t "$TAB" -k1,1n "$TMP_ROOT/manifest.$worker" > "$TMP_ROOT/manifest.$worker.sorted"
-  mv "$TMP_ROOT/manifest.$worker.sorted" "$TMP_ROOT/manifest.$worker"
-  worker=$((worker + 1))
-done
 
 fm_lint_shellcheck_count() {
   if command -v pgrep >/dev/null 2>&1; then
@@ -729,37 +802,31 @@ if [ -n "$TELEMETRY" ]; then
   TELEMETRY_CPU_START=$(fm_lint_aggregate_cpu)
 fi
 
-fm_lint_run_worker() {  # <worker-index>
-  local worker_index=$1 manifest timing
-  manifest="$TMP_ROOT/manifest.$worker_index"
-  timing="$TMP_ROOT/timing.$worker_index"
+fm_lint_run_worker() {  # <manifest-name>
+  local manifest="$TMP_ROOT/manifest.$1" timing="$TMP_ROOT/timing.$1"
+  local -a invocation
+  invocation=(env FM_LINT_INTERNAL=1 FM_LINT_INTERNAL_FAST="$FAST"
+    FM_LINT_INTERNAL_FOLLOW_SOURCES="$FOLLOW_SOURCES" FM_LINT_INTERNAL_EXCLUDE="$EXCLUDE_CODES"
+    FM_LINT_SHELLCHECK="$SHELLCHECK_BIN"
+    "${BASH:-bash}" "$SELF" --internal-worker "$manifest" "$OUTPUT_DIR")
   if [ -n "$TELEMETRY" ] && [ -x /usr/bin/time ]; then
     if [ "$(uname)" = Darwin ]; then
       exec "$PERL_BIN" -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' \
-        /usr/bin/time -lp -o "$timing" \
-        env FM_LINT_INTERNAL=1 FM_LINT_INTERNAL_FAST="$FAST" \
-        FM_LINT_INTERNAL_FOLLOW_SOURCES="$FOLLOW_SOURCES" FM_LINT_INTERNAL_EXCLUDE="$EXCLUDE_CODES" \
-        FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
-        "${BASH:-bash}" "$SELF" --internal-worker "$manifest" "$OUTPUT_DIR" "$worker_index"
+        /usr/bin/time -lp -o "$timing" "${invocation[@]}"
     else
       exec "$PERL_BIN" -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' \
         /usr/bin/time -f 'wall_seconds=%e\nuser_seconds=%U\nsystem_seconds=%S\nmax_rss_kib=%M' -o "$timing" \
-        env FM_LINT_INTERNAL=1 FM_LINT_INTERNAL_FAST="$FAST" \
-        FM_LINT_INTERNAL_FOLLOW_SOURCES="$FOLLOW_SOURCES" FM_LINT_INTERNAL_EXCLUDE="$EXCLUDE_CODES" \
-        FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
-        "${BASH:-bash}" "$SELF" --internal-worker "$manifest" "$OUTPUT_DIR" "$worker_index"
+        "${invocation[@]}"
     fi
   else
     [ -z "$TELEMETRY" ] || printf 'timing_unavailable=1\n' > "$timing"
     exec "$PERL_BIN" -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' \
-      env FM_LINT_INTERNAL=1 FM_LINT_INTERNAL_FAST="$FAST" \
-      FM_LINT_INTERNAL_FOLLOW_SOURCES="$FOLLOW_SOURCES" FM_LINT_INTERNAL_EXCLUDE="$EXCLUDE_CODES" \
-      FM_LINT_SHELLCHECK="$SHELLCHECK_BIN" \
-      "${BASH:-bash}" "$SELF" --internal-worker "$manifest" "$OUTPUT_DIR" "$worker_index"
+      "${invocation[@]}"
   fi
 }
 
-fm_lint_start_worker() {
+fm_lint_start_worker() {  # <manifest-name>
+  [ -s "$TMP_ROOT/manifest.$1" ] || return 0
   fm_lint_run_worker "$1" &
   ACTIVE_PIDS+=("$!")
 }
@@ -773,40 +840,30 @@ fm_lint_wait_workers() {
   done
 }
 
-if [ "$JOBS" -eq 1 ]; then
-  worker=0
-  while [ "$worker" -lt "$SHARD_COUNT" ]; do
-    fm_lint_start_worker "$worker"
-    fm_lint_wait_workers
-    worker=$((worker + 1))
-  done
-else
-  worker=0
-  while [ "$worker" -lt "$SHARD_COUNT" ]; do
-    fm_lint_start_worker "$worker"
-    worker=$((worker + 1))
-  done
-  fm_lint_wait_workers
-fi
+fm_lint_start_worker alone
+fm_lint_wait_workers
+fm_lint_start_worker 0
+[ "$JOBS" -eq 2 ] || fm_lint_wait_workers
+fm_lint_start_worker 1
+fm_lint_wait_workers
 
-# Replay both stable shards in deterministic order and select the first nonzero
-# shard status. ShellCheck processes every root in a shard after earlier findings.
+# Replay every root in canonical order and select the first nonzero status.
 overall_rc=0
-worker=0
-while [ "$worker" -lt "$SHARD_COUNT" ]; do
-  output="$OUTPUT_DIR/shard.$worker"
+index=1
+for path in "${ROOTS[@]}"; do
+  output="$OUTPUT_DIR/root.$index"
   [ ! -f "$output.out" ] || cat "$output.out"
   if [ -f "$output.rc" ]; then
     rc=$(cat "$output.rc" 2>/dev/null || printf '2')
     case "$rc" in ''|*[!0-9]*) rc=2 ;; esac
   else
-    printf 'fm-lint.sh: worker produced no result for shard %s.\n' "$worker" >&2
+    printf 'fm-lint.sh: worker produced no result for %s.\n' "$path" >&2
     rc=2
   fi
   if [ "$overall_rc" -eq 0 ] && [ "$rc" -ne 0 ]; then
     overall_rc=$rc
   fi
-  worker=$((worker + 1))
+  index=$((index + 1))
 done
 
 if [ -n "$TELEMETRY" ]; then
@@ -859,19 +916,37 @@ if [ -n "$TELEMETRY" ]; then
           rss=$1 / 1024
           rss_sum += rss
           if (rss > max_rss) max_rss=rss
+          worker=FILENAME
+          sub(/.*\/timing\./, "", worker)
+          peak[worker]=rss
         }
-        END {printf "%.2f %.2f %.2f %.0f %.0f %.2f", user, sys_cpu, wall, max_rss, rss_sum, max_wall}
-      ' "$TMP_ROOT"/timing.*)
+        END {
+          shared=(jobs == 2) ? peak["0"] + peak["1"] : (peak["0"] > peak["1"] ? peak["0"] : peak["1"])
+          printf "%.2f %.2f %.2f %.0f %.0f %.2f %.0f %.0f %.0f %.0f", user, sys_cpu, wall, max_rss, rss_sum, max_wall,
+            peak["alone"], peak["0"], peak["1"], (peak["alone"] > shared ? peak["alone"] : shared)
+        }
+      ' jobs="$JOBS" "$TMP_ROOT"/timing.*)
     else
       timing_summary=$(awk -F= '
         $1 == "wall_seconds" {wall += $2; if ($2 > max_wall) max_wall=$2}
         $1 == "user_seconds" {user += $2}
         $1 == "system_seconds" {sys_cpu += $2}
-        $1 == "max_rss_kib" {rss_sum += $2; if ($2 > max_rss) max_rss=$2}
-        END {printf "%.2f %.2f %.2f %.0f %.0f %.2f", user, sys_cpu, wall, max_rss, rss_sum, max_wall}
-      ' "$TMP_ROOT"/timing.*)
+        $1 == "max_rss_kib" {
+          rss_sum += $2
+          if ($2 > max_rss) max_rss=$2
+          worker=FILENAME
+          sub(/.*\/timing\./, "", worker)
+          peak[worker]=$2
+        }
+        END {
+          shared=(jobs == 2) ? peak["0"] + peak["1"] : (peak["0"] > peak["1"] ? peak["0"] : peak["1"])
+          printf "%.2f %.2f %.2f %.0f %.0f %.2f %.0f %.0f %.0f %.0f", user, sys_cpu, wall, max_rss, rss_sum, max_wall,
+            peak["alone"], peak["0"], peak["1"], (peak["alone"] > shared ? peak["alone"] : shared)
+        }
+      ' jobs="$JOBS" "$TMP_ROOT"/timing.*)
     fi
-    read -r timing_user timing_system timing_worker_wall max_worker_rss worker_rss_sum max_worker_wall <<EOF
+    read -r timing_user timing_system timing_worker_wall max_worker_rss worker_rss_sum max_worker_wall \
+      alone_max_rss shared_1_max_rss shared_2_max_rss concurrent_rss_bound <<EOF
 $timing_summary
 EOF
   else
@@ -881,6 +956,10 @@ EOF
     max_worker_rss=unavailable
     worker_rss_sum=unavailable
     max_worker_wall=unavailable
+    alone_max_rss=unavailable
+    shared_1_max_rss=unavailable
+    shared_2_max_rss=unavailable
+    concurrent_rss_bound=unavailable
   fi
 
   telemetry_tmp="$TMP_ROOT/telemetry.tsv"
@@ -899,8 +978,12 @@ EOF
     printf 'source_boundary_directives\t%s\n' "$source_boundaries"
     printf 'source_followed_directives\t%s\n' "$source_followed"
     printf 'source_target_count\t%s\n' "$source_targets"
-    printf 'shard_1_weight_bytes\t%s\n' "${WORKER_LOADS[0]}"
-    printf 'shard_2_weight_bytes\t%s\n' "${WORKER_LOADS[1]:-0}"
+    printf 'heaviest_root\t%s\n' "$HEAVIEST_ROOT"
+    printf 'heaviest_root_weight_bytes\t%s\n' "$HEAVIEST_WEIGHT"
+    printf 'alone_root_count\t%s\n' "$ALONE_COUNT"
+    printf 'alone_weight_bytes\t%s\n' "$ALONE_LOAD"
+    printf 'shared_worker_1_weight_bytes\t%s\n' "${WORKER_LOADS[0]}"
+    printf 'shared_worker_2_weight_bytes\t%s\n' "${WORKER_LOADS[1]}"
     printf 'wall_seconds\t%s\n' "$((TELEMETRY_END_EPOCH - TELEMETRY_START_EPOCH))"
     printf 'worker_wall_sum_seconds\t%s\n' "$timing_worker_wall"
     printf 'max_worker_wall_seconds\t%s\n' "$max_worker_wall"
@@ -908,6 +991,10 @@ EOF
     printf 'system_seconds\t%s\n' "$timing_system"
     printf 'max_worker_rss_kib\t%s\n' "$max_worker_rss"
     printf 'worker_rss_sum_kib\t%s\n' "$worker_rss_sum"
+    printf 'alone_max_rss_kib\t%s\n' "$alone_max_rss"
+    printf 'shared_worker_1_max_rss_kib\t%s\n' "$shared_1_max_rss"
+    printf 'shared_worker_2_max_rss_kib\t%s\n' "$shared_2_max_rss"
+    printf 'concurrent_rss_bound_kib\t%s\n' "$concurrent_rss_bound"
     printf 'shellcheck_processes_start\t%s\n' "$TELEMETRY_SHELLCHECK_START"
     printf 'shellcheck_processes_end\t%s\n' "$TELEMETRY_SHELLCHECK_END"
     printf 'load_average_start\t%s\n' "$TELEMETRY_LOAD_START"
