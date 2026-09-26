@@ -702,6 +702,7 @@ test_batch_preserves_native_ultra() {
   rec=$(make_spawn_case ultra-batch pi "$id1" "$id2")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
+  give_batch_task_own_slot "$id2"
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness pi --model codex-native/gpt-6-astra --effort ultra)
   expect_code 0 "$?" "native Ultra batch failed: $out"
@@ -854,6 +855,23 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
   pass "pi-signed is a distinct persistent secondmate runtime with shared Pi supervision semantics"
 }
 
+# give_batch_task_own_slot <id>: a batch spawn gives each task its own pool
+# slot, and one live record owns a slot, so <id>'s window reports a second copy
+# instead of the case's shared one. Call after read_case_record.
+give_batch_task_own_slot() {
+  local id=$1 wt="$CASE_DIR/wt-$1"
+  git -C "$PROJ_DIR" worktree add --quiet -b "wt-$id" "$wt"
+  mv "$FAKEBIN_DIR/tmux" "$FAKEBIN_DIR/tmux-shared"
+  cat > "$FAKEBIN_DIR/tmux" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *"fm-$id"*"#{pane_current_path}"*) printf '%s\\n' '$wt'; exit 0 ;;
+esac
+exec '$FAKEBIN_DIR/tmux-shared' "\$@"
+SH
+  chmod +x "$FAKEBIN_DIR/tmux"
+}
+
 test_batch_forwards_shared_profile_flags() {
   local rec id1 id2 out status
   id1=profile-batch-a-z9
@@ -861,6 +879,7 @@ test_batch_forwards_shared_profile_flags() {
   rec=$(make_spawn_case profile-batch claude "$id1" "$id2")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
+  give_batch_task_own_slot "$id2"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --model gpt-5 --effort high)
