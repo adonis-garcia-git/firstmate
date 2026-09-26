@@ -2403,7 +2403,7 @@ run_script_bounded() {  # <script> <out> <stream> <id>
   # Declaring the variables local first keeps the helper's export scoped to this
   # call and its child script, so the runner's own environment is left as the
   # caller had it.
-  local GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM
+  local GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM GIT_CONFIG_PARAMETERS=${GIT_CONFIG_PARAMETERS-}
   # shellcheck source=tests/git-config-helpers.sh
   . "$ROOT/tests/git-config-helpers.sh" || return
   local rc
