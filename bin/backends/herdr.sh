@@ -3016,7 +3016,9 @@ fm_backend_herdr_send_literal() {  # <target> <text>
 # pieces (1,022 bytes per read on macOS). With no paste boundary, a harness
 # that detects pastes by read size turns each large read into its own paste
 # and a short final read into typed keys. Live Claude Code 2.1.281 on Herdr
-# 0.9.1 then drops the earlier paste, so only the message's tail is submitted.
+# 0.9.1 then drops the earlier paste, so its composer holds only the message's
+# tail, and the Claude composer proof in fm_backend_herdr_send_text_submit
+# refuses every such send.
 # Text longer than FM_BACKEND_HERDR_RAW_TEXT_MAX_BYTES therefore goes through
 # Herdr's paste-aware pane.send_input path (bin/backends/herdr-send-input.py),
 # which brackets it exactly when the application enabled bracketed paste, so

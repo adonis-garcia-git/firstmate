@@ -1165,17 +1165,18 @@ The same texts sent through `pane.send_input` were submitted byte-for-byte at 1,
 `tests/fm-backend-herdr.test.sh` pins the routing and the no-raw-fallback refusal, and `tests/fm-backend-herdr-smoke.test.sh` proves against real Herdr that a bracketed-paste recorder receives the long text as exactly one paste.
 The live guard above refreshes the Claude proof.
 It launches the lab Claude with a fixed session id and without the parent Claude Code session's identity markers, because Claude Code 2.1.281 started as a child of another session reports "Transcript saving is off" and saves no transcript to read.
-Observed 2026-09-23, run from inside a Claude Code session:
+Observed 2026-09-25 against Herdr 0.8.2 and Claude Code 2.1.283, run from inside a Claude Code session:
 
 ```text
-ok - live Herdr submit confirm: Claude Code (2.1.281 (Claude Code)) on herdr 0.9.1 reports empty and renders the requested reply in isolated session fm-lab-herdr-submit-con-94626-28278
-ok - live Herdr long message: Claude Code (2.1.281 (Claude Code)) on herdr 0.9.1 submits the whole 1142-char multi-line message byte-for-byte
+ok - live Herdr submit confirm: Claude Code (2.1.283 (Claude Code)) on herdr 0.8.2 reports empty and renders the requested reply in isolated session fm-lab-herdr-submit-con-46783-29716
+ok - live Herdr submit confirm: Claude Code (2.1.283 (Claude Code)) on herdr 0.8.2 submits a U+2063 away-supervisor payload whose read-back drops the mark
+ok - live Herdr long message: Claude Code (2.1.283 (Claude Code)) on herdr 0.8.2 submits the whole 1142-char multi-line message byte-for-byte
 ```
 
-With the submit core routed back through the raw send, the same guard failed:
+With the submit core routed back through the raw send, the Claude composer proof saw only the tail, withheld Enter, and the same guard failed:
 
 ```text
-not ok - Claude Code (2.1.281 (Claude Code)) on herdr 0.9.1: the submitted prompt was not the whole 1142-char message (fragment:120 chars)
+not ok - Claude Code (2.1.283 (Claude Code)) on herdr 0.8.2: a landed 1142-char message must confirm empty, got 'send-failed'
 ```
 
 ### Prune and respawn
