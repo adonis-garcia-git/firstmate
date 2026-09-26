@@ -2854,7 +2854,7 @@ wedge_threshold_round() {  # <state> <fakebin> <out> <capture> <window> <verdict
     FM_WATCH_HANDLING_SUCCESSOR=1 \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_PAUSE_RESURFACE_SECS="${FM_TEST_PAUSE_RESURFACE:-999}" FM_STALE_ESCALATE_SECS="${FM_TEST_STALE_ESCALATE:-1}" \
-    FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_COMPLETION_SCAN_INTERVAL=999999 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
   pid=$!
   if [ "$mode" = exit ]; then
@@ -2900,10 +2900,12 @@ wedge_threshold_fixture() {  # <name> <status-log> <status-age-secs> [<wedge-tim
   if [ -n "$timer" ]; then
     printf '%s\n' "$(( $(date +%s) - timer ))" > "$state/.stale-since-$key"
   fi
-  # Hold the completion-alarm sweep (bin/fm-completion-alarm-lib.sh) inside its
-  # pacing: it reads every live task's current state on its own cadence, so its
-  # read would otherwise land in the current-state counts these cases take to
-  # prove whether the parked-gate evidence path was reached.
+  # Hold the completion-alarm sweep (bin/fm-completion-alarm-lib.sh) out of
+  # these cases: it reads every live task's current state on its own cadence, so
+  # its read would otherwise land in the current-state counts these cases take to
+  # prove whether the parked-gate evidence path was reached. wedge_threshold_round
+  # sets its interval out of reach so no case length makes it due, and this fresh
+  # marker is still needed because a missing one reads as due at any interval.
   touch "$state/.last-completion-scan"
   # An UNCONFIGURED home: the config dir exists and is empty, so every case here
   # starts with the parked-gate wait evidence off and has to arm it deliberately.
