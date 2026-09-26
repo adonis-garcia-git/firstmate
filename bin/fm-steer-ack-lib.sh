@@ -24,7 +24,7 @@
 #      skipped or never lands: the order WAS delivered, so detection must keep
 #      tracking it.
 #   2. The generated brief scaffold (bin/fm-brief.sh) teaches ship and scout
-#      workers to append `resolved [key=ack-<token>]: starting <restatement>`
+#      workers to append `resolved [key=ack-<token>] [at=<epoch>]: starting <restatement>`
 #      to their status file as the FIRST action on receiving a token-marked
 #      order, consistent with fm-classify-lib.sh's keyed status grammar.
 #   3. The watcher's fm_steer_ack_tick clears a record as soon as ANY status

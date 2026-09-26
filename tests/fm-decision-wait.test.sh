@@ -6,7 +6,8 @@
 # restarts (fresh processes over the durable record) and across runtime
 # tasks-axi failures (a failed held read must not reset recorded ages),
 # resolved/unheld waits dropping out, the meta-missing open-decision rule
-# mirroring origin_open_decisions, stale reconcile temp files being swept,
+# mirroring origin_open_decisions, captain holds in a relocated data directory
+# read through the home's backlog addressing, stale reconcile temp files being swept,
 # ranking by unblocking power then age, and the digest wake firing at most
 # once per interval and never when nothing is waiting.
 set -u
@@ -79,6 +80,25 @@ wait_live() {
   done
   return 0
 }
+
+# Wait up to <limit> 0.1s ticks while <pid> stays alive until <cmd...> succeeds.
+# A loaded host can stretch the watcher's startup past any fixed liveness
+# window, so a phase that asserts a sweep's write waits for that write itself.
+# Returns 1 if the watcher exits first and 2 on timeout.
+wait_live_until() {  # <pid> <limit-ticks> <cmd...>
+  local pid=$1 limit=$2 i=0
+  shift 2
+  while [ "$i" -lt "$limit" ]; do
+    "$@" && return 0
+    kill -0 "$pid" 2>/dev/null || return 1
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 2
+}
+
+record_has() { grep -q "$2" "$1/data/decision-waits.tsv" 2>/dev/null; }  # <home> <pattern>
+record_empty() { [ -z "$(record_of "$1")" ]; }  # <home>
 
 wait_for_grep() {  # <pattern> <file> [limit-ticks]
   local pattern=$1 file=$2 limit=${3:-100} i=0
@@ -270,6 +290,33 @@ test_home_without_data_dir_is_inert() {
   pass "a home without a data directory is skipped silently and never written"
 }
 
+# --- backlog addressing -------------------------------------------------------
+
+# The scan must read the same backlog every other firstmate backlog command
+# addresses (bin/fm-tasks-axi.sh), not whatever .tasks.toml sits in FM_HOME, so
+# a home whose data directory lives elsewhere still surfaces its captain holds.
+test_relocated_data_dir_holds_are_scanned() {
+  local home data rec out
+  home="$TMP_ROOT/relocated-home"
+  data="$TMP_ROOT/relocated-data/data"
+  mkdir -p "$home/state" "$home/config" "$data"
+  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$data/backlog.md"
+  FM_HOME="$home" FM_DATA_OVERRIDE="$data" "$ROOT/bin/fm-tasks-axi.sh" \
+    add dec-r "Pick the relocated option" --kind captain >/dev/null \
+    || fail "could not add dec-r to the relocated backlog"
+  FM_HOME="$home" FM_DATA_OVERRIDE="$data" "$ROOT/bin/fm-tasks-axi.sh" \
+    hold dec-r --reason "captain decision pending" --kind captain >/dev/null \
+    || fail "could not hold dec-r in the relocated backlog"
+  [ ! -e "$home/data" ] || fail "fixture must keep FM_HOME free of a data directory"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$data" \
+    "$DW" scan 2>&1) || fail "scan failed on a relocated data directory: $out"
+  rec=$(cat "$data/decision-waits.tsv" 2>/dev/null || true)
+  assert_contains "$rec" "hold:dec-r" "a captain hold in a relocated backlog must be recorded: $out"
+  [ ! -e "$home/data" ] || fail "scan must not materialize a second backlog under FM_HOME"
+  pass "captain holds in a relocated data directory are scanned through the home's backlog addressing"
+}
+
 # --- reconcile temp hygiene --------------------------------------------------
 
 test_reconcile_sweeps_stale_tmpfiles() {
@@ -315,6 +362,10 @@ test_watch_digest_fires_once_per_interval_and_stays_quiet() {
   out="$home/watch0.out"
   watch_bg "$home" "$out"
   pid=$!
+  # The watcher touches the marker before it runs the scan, so wait for the
+  # scan's last write, the wait record, before the liveness window.
+  wait_live_until "$pid" 150 record_has "$home" "hold:dec-a" \
+    || { reap "$pid"; fail "watcher exited or never recorded the wait on a fresh home's first sweep: $(cat "$out")"; }
   wait_live "$pid" 25 || { reap "$pid"; fail "watcher exited on a fresh home's first sweep: $(cat "$out")"; }
   reap "$pid"
   # The reap kill leaves watcher downtime-recovery state armed; clear it so the
@@ -369,6 +420,8 @@ test_watch_digest_fires_once_per_interval_and_stays_quiet() {
   out="$home/watch3.out"
   watch_bg "$home" "$out"
   pid=$!
+  wait_live_until "$pid" 150 record_empty "$home" \
+    || { reap "$pid"; fail "watcher exited or never dropped the cleared wait: $(cat "$out")"; }
   wait_live "$pid" 25 || { reap "$pid"; fail "watcher exited with nothing waiting: $(cat "$out")"; }
   reap "$pid"
   ! grep -q 'decision-digest' "$queue" 2>/dev/null || fail "no digest wake when nothing is waiting"
@@ -386,5 +439,6 @@ test_runtime_list_failure_preserves_hold_ages
 test_status_wait_without_meta_skips_ended_check
 test_ranking_prefers_blocking_then_age
 test_home_without_data_dir_is_inert
+test_relocated_data_dir_holds_are_scanned
 test_reconcile_sweeps_stale_tmpfiles
 test_watch_digest_fires_once_per_interval_and_stays_quiet

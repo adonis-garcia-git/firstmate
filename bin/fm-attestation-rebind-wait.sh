@@ -2,12 +2,13 @@
 # fm-attestation-rebind-wait.sh - wait for the no-mistakes gate to rebind the
 # PR-body attestation to this event's head, then export the live PR facts.
 #
-# The `Require no-mistakes` check first judges the PR body carried by the
-# triggering event.
+# The `Require no-mistakes` check first judges the PR's live body when its run
+# starts.
 # The pipeline pushes a head and rewrites the PR body moments later, and GitHub
 # does not reliably deliver a fresh `edited` check run for a body rewrite that
-# lands seconds after a push, so a stale-body `synchronize` failure can stay the
-# check's latest verdict for a head whose live body is already compliant.
+# lands seconds after a push, so a `synchronize` failure judged before the
+# rewrite landed can stay the check's latest verdict for a head whose live body
+# is already compliant.
 # This helper closes that gap: it waits, bounded, for the live body's
 # attestation to bind the event's head, then appends the live facts to
 # GITHUB_OUTPUT so the workflow can re-judge them with the same pinned shared
@@ -15,7 +16,7 @@
 # The attestation extraction below is only a wait heuristic - the compliance
 # verdict always comes from the pinned action, never from repo-owned logic.
 #
-# Usage (from the Require no-mistakes workflow, after a failed event verdict):
+# Usage (from the Require no-mistakes workflow, after a failed first verdict):
 #   GITHUB_REPOSITORY=<owner/repo> PR_NUMBER=<n> EVENT_HEAD_SHA=<sha> \
 #   GITHUB_OUTPUT=<file> bin/fm-attestation-rebind-wait.sh
 #

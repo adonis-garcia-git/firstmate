@@ -27,17 +27,20 @@ jobs:
       github.event.pull_request.user.login != 'github-actions[bot]' &&
       github.event.pull_request.user.login != 'dependabot[bot]'
     steps:
-      # Each opening, edit, and push is still judged first on the body that
-      # event carried, exactly as before.
+      # Each opening, edit, and push is judged first by the pinned shared
+      # action, which reads the PR's live body and head at run time.
       - name: Verify no-mistakes signature and pipeline attestation
         id: event-verdict
         continue-on-error: true
-        uses: kunchenguid/no-mistakes/.github/actions/require-no-mistakes@32d396ac0f29135daf7fcb9964aba9d5f4e796d6 # post-v1.57.1, untagged (action added in #819)
+        uses: kunchenguid/no-mistakes/.github/actions/require-no-mistakes@f6441c96c352a18b9cadcaef6b6c7017e9ac3970 # v1.80.1
+        with:
+          exempt-authors: kunchenguid
       # The pipeline pushes a head and rewrites the PR body moments later, and
       # GitHub does not reliably deliver an `edited` run for a rewrite landing
-      # seconds after a push, so a stale-body failure could otherwise stay the
-      # check's latest verdict for a head whose live body is compliant.
-      # On a failed event verdict, wait briefly for the live body to bind this
+      # seconds after a push, so a failure judged before the rewrite lands
+      # could otherwise stay the check's latest verdict for a head whose live
+      # body is compliant.
+      # On a failed first verdict, wait briefly for the live body to bind this
       # event's head, then re-judge the live facts with the same pinned shared
       # action - the compliance verdict never comes from repo-owned logic.
       - name: Check out the rebind-wait helper
@@ -53,10 +56,11 @@ jobs:
         run: bin/fm-attestation-rebind-wait.sh
       - name: Re-judge the live PR body with the pinned shared action
         if: steps.event-verdict.outcome == 'failure'
-        uses: kunchenguid/no-mistakes/.github/actions/require-no-mistakes@32d396ac0f29135daf7fcb9964aba9d5f4e796d6 # post-v1.57.1, untagged (action added in #819)
+        uses: kunchenguid/no-mistakes/.github/actions/require-no-mistakes@f6441c96c352a18b9cadcaef6b6c7017e9ac3970 # v1.80.1
         with:
           pr-body: ${{ steps.rebind.outputs.body }}
           pr-head-sha: ${{ steps.rebind.outputs.head-sha }}
           pr-head-ref: ${{ github.event.pull_request.head.ref }}
           pr-author: ${{ github.event.pull_request.user.login }}
           pr-number: ${{ github.event.pull_request.number }}
+          exempt-authors: kunchenguid
