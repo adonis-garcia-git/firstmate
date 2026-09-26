@@ -98,6 +98,9 @@ spawn_ship() {
   local id=$1
   shift
   fm_test_spawn_brief "$HOME_DIR" "$id"
+  # Every spawn in a case reuses the one fake pool slot, so retire earlier
+  # tasks' records as their cleanup would; one live record owns a slot.
+  rm -f "$HOME_DIR/state/"*.meta
   signed_in_claude_root "$CASE/ambient-claude"
   : > "$CASE/launch.log"
   FM_FAKE_LAUNCH_LOG="$CASE/launch.log" FM_TEST_CLAUDE_CONFIG_DIR="$CASE/ambient-claude" \
