@@ -69,6 +69,7 @@ data/                durable private fleet records
   projects.md        project registry with each project's standing delivery posture (section 6)
   secondmates.md     secondmate routing table (section 6)
   captain.md captain-shared.md learnings.md   captain preferences and curated learnings (section 6)
+  decision-waits.tsv captain-decision wait record; owned and reconciled by bin/fm-decision-wait.sh and changed only through that script
   <id>/brief.md      task brief, or a secondmate's charter brief
   <id>/report.md     scout deliverable; survives teardown
 projects/            project clones; read-only except under hard rule 1's exception
