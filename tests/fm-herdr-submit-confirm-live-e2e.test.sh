@@ -5,9 +5,11 @@
 # a busy-queued Enter can keep proven pending text visible. A stub cannot prove
 # either signal. This guard launches real Claude Code in an isolated Herdr lab
 # and requires fm_backend_herdr_send_text_submit to report empty for a landed
-# idle steer, and to submit a long multi-line message whole, as Claude's own
-# session transcript records it. It fails naming the harness and version
-# rather than degrading quietly.
+# idle steer, to submit a long multi-line message and short messages with a
+# paragraph break (helm's text-plus-attachment shape) whole, as Claude's own
+# session transcript records it, and to refuse a composer that shows only part
+# of the payload. It fails naming the harness and version rather than
+# degrading quietly.
 #
 # Run explicitly with FM_HERDR_SUBMIT_CONFIRM_LIVE=1 after a Herdr or Claude
 # upgrade, and before trusting a refreshed docs/verification/runtime-backends.md
@@ -82,6 +84,37 @@ export PATH="$FAKEBIN:$ORIGINAL_PATH"
 . "$ROOT/bin/backends/herdr.sh"
 
 lab() { env PATH="$ORIGINAL_PATH" "$LAB_HELPER" run "$SESSION" "$@"; }
+wait_idle() {  # <seconds>
+  local st i=0
+  while [ "$i" -lt "$1" ]; do
+    st=$(lab agent get "$PANE" 2>/dev/null | jq -r '.result.agent.agent_status // empty')
+    case "$st" in idle|done) return 0 ;; esac
+    i=$((i + 1))
+    sleep 1
+  done
+  return 1
+}
+# submitted_shape: print "whole" when Claude's session transcript records a
+# submitted prompt containing <message> byte-for-byte, "fragment:<chars>" when
+# the prompt carrying <token> holds less, and nothing when no prompt carries
+# <token> within 30 seconds.
+submitted_shape() {  # <message> <token>
+  local shape='' i=0
+  while [ "$i" -lt 30 ]; do
+    if [ -f "$TRANSCRIPT" ] && grep -q "$2" "$TRANSCRIPT"; then
+      shape=$(jq -j --arg m "$1" --arg t "$2" '
+        select(.type == "user") | .message.content
+        | if type == "string" then . else ([.[]? | select(.type == "text") | .text] | join("")) end
+        | select(contains($t))
+        | if contains($m) then "whole" else "fragment:" + (length | tostring) end
+      ' "$TRANSCRIPT" 2>/dev/null)
+    fi
+    [ -n "$shape" ] && break
+    i=$((i + 1))
+    sleep 1
+  done
+  printf '%s' "$shape"
+}
 WS_JSON=$(lab workspace create --cwd "$ROOT" --label fm-submitlive --no-focus) \
   || fail "could not create the isolated submit-confirm workspace"
 PANE=$(printf '%s' "$WS_JSON" | jq -er '.result.root_pane.pane_id') \
@@ -94,6 +127,7 @@ HERDR_VER=$(PATH="$ORIGINAL_PATH" herdr --version 2>/dev/null | head -1 || print
 CLAUDE_SESSION=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null) || CLAUDE_SESSION=
 CLAUDE_SESSION=$(printf '%s' "$CLAUDE_SESSION" | tr 'A-F' 'a-f')
 [ -n "$CLAUDE_SESSION" ] || fail "could not generate a Claude Code session id (needs uuidgen or /proc/sys/kernel/random/uuid)"
+TRANSCRIPT="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$(printf '%s' "$ROOT" | sed 's/[^A-Za-z0-9]/-/g')/$CLAUDE_SESSION.jsonl"
 lab pane run "$PANE" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}' --session-id $CLAUDE_SESSION" >/dev/null \
   || fail "could not launch Claude Code ($VERSION) in the isolated Herdr pane"
 
@@ -149,13 +183,7 @@ pass "live Herdr submit confirm: Claude Code ($VERSION) on $HERDR_VER reports em
 # The pre-Enter proof must still accept the rest of the payload.
 # shellcheck source=bin/fm-operational-input.sh
 . "$ROOT/bin/fm-operational-input.sh"
-i=0
-while [ "$i" -lt 45 ]; do
-  st=$(lab agent get "$PANE" 2>/dev/null | jq -r '.result.agent.agent_status // empty')
-  case "$st" in idle|done) break ;; esac
-  i=$((i + 1))
-  sleep 1
-done
+wait_idle 45 || true
 OP_TOKEN="FMHERDROPPONG$$_$RANDOM"
 op_text=
 fm_operational_input_encode away-supervisor "Reply with exactly $OP_TOKEN and nothing else." op_text \
@@ -185,13 +213,7 @@ pass "live Herdr submit confirm: Claude Code ($VERSION) on $HERDR_VER submits a 
 # submitted even though the submit confirmed. The composer collapses a paste to
 # a placeholder, so the screen cannot prove completeness; Claude's own session
 # transcript is the ground truth for what was submitted.
-i=0
-while [ "$i" -lt 60 ]; do
-  st=$(lab agent get "$PANE" 2>/dev/null | jq -r '.result.agent.agent_status // empty')
-  case "$st" in idle|done) break ;; esac
-  i=$((i + 1))
-  sleep 1
-done
+wait_idle 60 || true
 LONG_TOKEN="FMLONG$$x$RANDOM"
 LONG_MSG=''
 for n in 01 02 03 04 05 06 07 08 09 10; do
@@ -202,26 +224,67 @@ verdict=$(fm_backend_herdr_send_text_submit "$TARGET" "$LONG_MSG" 3 0.4 0.3) \
   || fail "send_text_submit failed to run the long message against Claude Code ($VERSION) on $HERDR_VER"
 [ "$verdict" = empty ] \
   || fail "Claude Code ($VERSION) on $HERDR_VER: a landed ${#LONG_MSG}-char message must confirm empty, got '$verdict'"
-TRANSCRIPT="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$(printf '%s' "$ROOT" | sed 's/[^A-Za-z0-9]/-/g')/$CLAUDE_SESSION.jsonl"
-submitted=''
-i=0
-while [ "$i" -lt 30 ]; do
-  if [ -f "$TRANSCRIPT" ] && grep -q "${LONG_TOKEN}END" "$TRANSCRIPT"; then
-    submitted=$(jq -j --arg m "$LONG_MSG" --arg t "${LONG_TOKEN}END" '
-      select(.type == "user") | .message.content
-      | if type == "string" then . else ([.[]? | select(.type == "text") | .text] | join("")) end
-      | select(contains($t))
-      | if contains($m) then "whole" else "fragment:" + (length | tostring) end
-    ' "$TRANSCRIPT" 2>/dev/null)
-  fi
-  [ -n "$submitted" ] && break
-  i=$((i + 1))
-  sleep 1
-done
+submitted=$(submitted_shape "$LONG_MSG" "${LONG_TOKEN}END")
 [ -n "$submitted" ] \
   || fail "Claude Code ($VERSION) on $HERDR_VER: the long message never appeared in the lab session transcript $TRANSCRIPT"
 [ "$submitted" = whole ] \
   || fail "Claude Code ($VERSION) on $HERDR_VER: the submitted prompt was not the whole ${#LONG_MSG}-char message ($submitted chars)"
 pass "live Herdr long message: Claude Code ($VERSION) on $HERDR_VER submits the whole ${#LONG_MSG}-char multi-line message byte-for-byte"
+
+# Short messages with a paragraph break (the captain's helm send failure):
+# Claude renders a typed blank line as a blank row inside its ruled composer.
+# The pre-Enter read-back once stopped at that row, so the payload proof saw
+# only the first paragraph and refused every such send. helm joins chat text
+# and its attachment line with a blank line, so both shapes must land whole.
+# Both stay under the paste threshold, so they take the raw typing path.
+PNG="$TMP_ROOT/helm-attachment.png"
+printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==' \
+  | base64 -d > "$PNG" 2>/dev/null || printf 'png' > "$PNG"
+PARA_TOKEN="FMPARA$$x$RANDOM"
+HELM_TOKEN="FMHELM$$x$RANDOM"
+for shape in paragraphs attachment; do
+  case "$shape" in
+    paragraphs) token=$PARA_TOKEN
+      msg="First paragraph ${token}A of a short message."$'\n\n'"Second paragraph ${token}END - reply with only the word OK." ;;
+    attachment) token=$HELM_TOKEN
+      msg="1. ${token}END this screenshot shows the report. Reply with only the word OK."$'\n\n'"ATTACHMENTS: $PNG" ;;
+  esac
+  wait_idle 60 || true
+  verdict=$(fm_backend_herdr_send_text_submit "$TARGET" "$msg" 3 0.4 0.3) \
+    || fail "send_text_submit failed to run the $shape message against Claude Code ($VERSION) on $HERDR_VER"
+  [ "$verdict" = empty ] \
+    || fail "Claude Code ($VERSION) on $HERDR_VER: a ${#msg}-char $shape message with a blank line must confirm empty, got '$verdict'"
+  submitted=$(submitted_shape "$msg" "$token")
+  [ "$submitted" = whole ] \
+    || fail "Claude Code ($VERSION) on $HERDR_VER: the ${#msg}-char $shape message was not submitted whole (${submitted:-absent})"
+  pass "live Herdr paragraph break: Claude Code ($VERSION) on $HERDR_VER submits the whole ${#msg}-char $shape message byte-for-byte"
+done
+
+# The payload proof must still refuse a composer that shows only part of the
+# message. Type just the tail, and then just the head, of a two-paragraph
+# message into the real composer and require the proof to reject each read.
+wait_idle 60 || true
+CUT_TOKEN="FMCUT$$x$RANDOM"
+cut_head="Head paragraph ${CUT_TOKEN}A."
+cut_tail="Tail paragraph ${CUT_TOKEN}B."
+cut_msg="$cut_head"$'\n\n'"$cut_tail"
+for part in tail head; do
+  if [ "$part" = tail ]; then typed=$cut_tail; else typed=$cut_head; fi
+  lab pane send-text "$PANE" "$typed" >/dev/null \
+    || fail "could not type the $part of the truncation probe into the lab composer"
+  sleep 0.5
+  content=$(fm_backend_herdr_composer_content "$TARGET" "$(fm_backend_herdr_proof_lines "$cut_msg")") \
+    || fail "Claude Code ($VERSION) on $HERDR_VER: could not read back the composer holding the $part"
+  case "$content" in
+    *"$typed"*) ;;
+    *) fail "Claude Code ($VERSION) on $HERDR_VER: the composer read-back '$content' does not show the typed $part" ;;
+  esac
+  if fm_backend_herdr_composer_payload_shown "$cut_msg" "$content"; then
+    fail "Claude Code ($VERSION) on $HERDR_VER: the payload proof accepted a composer showing only the $part"
+  fi
+  fm_backend_herdr_composer_clear "$TARGET" "$cut_msg" \
+    || fail "Claude Code ($VERSION) on $HERDR_VER: could not clear the truncation probe's $part from the composer"
+done
+pass "live Herdr payload proof: Claude Code ($VERSION) on $HERDR_VER refuses a composer showing only the head or only the tail"
 
 [ "$CHECKED" -gt 0 ] || fail "FM_HERDR_SUBMIT_CONFIRM_LIVE=1 checked no harness"
