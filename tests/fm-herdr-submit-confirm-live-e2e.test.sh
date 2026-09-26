@@ -5,13 +5,16 @@
 # a busy-queued Enter can keep proven pending text visible. A stub cannot prove
 # either signal. This guard launches real Claude Code in an isolated Herdr lab
 # and requires fm_backend_herdr_send_text_submit to report empty for a landed
-# idle steer. It fails naming the harness and version rather than degrading
-# quietly.
+# idle steer, and to submit a long multi-line message whole, as Claude's own
+# session transcript records it. It fails naming the harness and version
+# rather than degrading quietly.
 #
 # Run explicitly with FM_HERDR_SUBMIT_CONFIRM_LIVE=1 after a Herdr or Claude
 # upgrade, and before trusting a refreshed docs/verification/runtime-backends.md
 # "Herdr submit confirmation" entry.
-# Every Herdr call, including adapter calls, is routed through bin/fm-herdr-lab.sh.
+# Every Herdr CLI call, including adapter calls, is routed through
+# bin/fm-herdr-lab.sh. The long message's paste-aware request goes straight to
+# the control socket that the lab-routed session list names for the lab session.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -30,6 +33,13 @@ fm_live_gate opt-in FM_HERDR_SUBMIT_CONFIRM_LIVE herdr jq claude
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
 herdr_forget_inherited_pane
+# The lab server hands this process's environment to every pane it starts. A
+# guard run from inside a Claude Code session would pass that session's
+# identity markers to the lab Claude, which then runs as a child session and
+# saves no transcript, and the long-message case below reads that transcript.
+unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CLAUDE_CODE_ENTRYPOINT \
+  CLAUDE_CODE_SESSION_ATTENDED CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN \
+  CLAUDE_CODE_EXECPATH CLAUDE_PID
 
 ORIGINAL_PATH=$PATH
 SESSION=$("$LAB_HELPER" name herdr-submit-confirm-live)
@@ -80,7 +90,11 @@ TARGET="$SESSION:$PANE"
 VERSION=$(PATH="$ORIGINAL_PATH" claude --version 2>/dev/null | head -1 || printf 'version-unknown')
 HERDR_VER=$(PATH="$ORIGINAL_PATH" herdr --version 2>/dev/null | head -1 || printf 'herdr-unknown')
 
-lab pane run "$PANE" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}'" >/dev/null \
+# A fixed session id names the one transcript the long-message case reads.
+CLAUDE_SESSION=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null) || CLAUDE_SESSION=
+CLAUDE_SESSION=$(printf '%s' "$CLAUDE_SESSION" | tr 'A-F' 'a-f')
+[ -n "$CLAUDE_SESSION" ] || fail "could not generate a Claude Code session id (needs uuidgen or /proc/sys/kernel/random/uuid)"
+lab pane run "$PANE" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}' --session-id $CLAUDE_SESSION" >/dev/null \
   || fail "could not launch Claude Code ($VERSION) in the isolated Herdr pane"
 
 idle=0
@@ -165,5 +179,49 @@ done
 [ "$landed" = 1 ] \
   || fail "Claude Code ($VERSION) on $HERDR_VER: operational submit reported '$verdict' but the expected reply never rendered"
 pass "live Herdr submit confirm: Claude Code ($VERSION) on $HERDR_VER submits a U+2063 away-supervisor payload whose read-back drops the mark"
+
+# Long multi-line message integrity (helm issue #3): a raw send of a message
+# longer than one pty read reached Claude Code in pieces, and only the tail was
+# submitted even though the submit confirmed. The composer collapses a paste to
+# a placeholder, so the screen cannot prove completeness; Claude's own session
+# transcript is the ground truth for what was submitted.
+i=0
+while [ "$i" -lt 60 ]; do
+  st=$(lab agent get "$PANE" 2>/dev/null | jq -r '.result.agent.agent_status // empty')
+  case "$st" in idle|done) break ;; esac
+  i=$((i + 1))
+  sleep 1
+done
+LONG_TOKEN="FMLONG$$x$RANDOM"
+LONG_MSG=''
+for n in 01 02 03 04 05 06 07 08 09 10; do
+  LONG_MSG+="$((10#$n)). ${LONG_TOKEN}L$n begins here and carries ordinary prose so the line is about one hundred chars avo."$'\n'
+done
+LONG_MSG+="END OF TEST MESSAGE ${LONG_TOKEN}END - reply with only the word OK."
+verdict=$(fm_backend_herdr_send_text_submit "$TARGET" "$LONG_MSG" 3 0.4 0.3) \
+  || fail "send_text_submit failed to run the long message against Claude Code ($VERSION) on $HERDR_VER"
+[ "$verdict" = empty ] \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: a landed ${#LONG_MSG}-char message must confirm empty, got '$verdict'"
+TRANSCRIPT="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$(printf '%s' "$ROOT" | sed 's/[^A-Za-z0-9]/-/g')/$CLAUDE_SESSION.jsonl"
+submitted=''
+i=0
+while [ "$i" -lt 30 ]; do
+  if [ -f "$TRANSCRIPT" ] && grep -q "${LONG_TOKEN}END" "$TRANSCRIPT"; then
+    submitted=$(jq -j --arg m "$LONG_MSG" --arg t "${LONG_TOKEN}END" '
+      select(.type == "user") | .message.content
+      | if type == "string" then . else ([.[]? | select(.type == "text") | .text] | join("")) end
+      | select(contains($t))
+      | if contains($m) then "whole" else "fragment:" + (length | tostring) end
+    ' "$TRANSCRIPT" 2>/dev/null)
+  fi
+  [ -n "$submitted" ] && break
+  i=$((i + 1))
+  sleep 1
+done
+[ -n "$submitted" ] \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: the long message never appeared in the lab session transcript $TRANSCRIPT"
+[ "$submitted" = whole ] \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: the submitted prompt was not the whole ${#LONG_MSG}-char message ($submitted chars)"
+pass "live Herdr long message: Claude Code ($VERSION) on $HERDR_VER submits the whole ${#LONG_MSG}-char multi-line message byte-for-byte"
 
 [ "$CHECKED" -gt 0 ] || fail "FM_HERDR_SUBMIT_CONFIRM_LIVE=1 checked no harness"

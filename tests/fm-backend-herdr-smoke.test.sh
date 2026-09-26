@@ -286,6 +286,74 @@ case "$out" in
 esac
 pass "real herdr: send_literal + send_key Enter submit as two separate steps (verified: send-text does NOT auto-submit)"
 
+# --- send_composer_text: long text arrives as ONE bracketed paste -----------
+# Regression for the long-message truncation (helm issue #3): a raw send-text
+# reaches a bracketed-paste application with no paste boundary, and live
+# Claude Code dropped the beginning of a long message. A recorder that enables
+# bracketed paste, like every agent composer does, must receive the fixed
+# path's long text wrapped in exactly one paste boundary. The raw path is
+# recorded too, so the case fails loudly if the recorder ever stops being able
+# to tell the two apart.
+
+if command -v python3 >/dev/null 2>&1; then
+  cat > "$SM_SCRATCH/paste-recorder.py" <<'PY'
+import os, select, sys, termios, time, tty
+out, token = sys.argv[1], sys.argv[2]
+old = termios.tcgetattr(0)
+tty.setraw(0)
+buf = b""
+try:
+    os.write(1, b"\x1b[?2004h")
+    os.write(1, ("RECORDER-READY-%s\r\n" % token).encode())
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline and b"\x1b[201~" not in buf:
+        ready, _, _ = select.select([0], [], [], 1.0)
+        if not ready:
+            if buf:
+                break
+            continue
+        buf += os.read(0, 65536)
+finally:
+    os.write(1, b"\x1b[?2004l")
+    termios.tcsetattr(0, termios.TCSADRAIN, old)
+with open(out + ".tmp", "wb") as handle:
+    handle.write(buf)
+os.rename(out + ".tmp", out)
+PY
+  LONG_MSG=''
+  for i in 01 02 03 04 05 06 07 08 09 10; do
+    LONG_MSG+="$((10#$i)). ITEM$i begins here and carries some ordinary prose so the line is about one hundred chars avo."$'\n'
+  done
+  LONG_MSG+='END OF TEST MESSAGE - reply with only the word OK.'
+  record_long_send() {  # <send-function> <out-file> <token>
+    local i
+    fm_backend_herdr_send_text_line "$TARGET" "python3 '$SM_SCRATCH/paste-recorder.py' '$2' $3" \
+      || fail "could not start the paste recorder"
+    i=0
+    until fm_backend_herdr_capture "$TARGET" 40 | grep -q "RECORDER-READY-$3"; do
+      i=$((i + 1))
+      [ "$i" -lt 50 ] || fail "the paste recorder never announced it had enabled bracketed paste"
+      sleep 0.2
+    done
+    "$1" "$TARGET" "$LONG_MSG" || fail "$1 failed to send a ${#LONG_MSG}-char message"
+    i=0
+    until [ -f "$2" ]; do
+      i=$((i + 1))
+      [ "$i" -lt 150 ] || fail "the paste recorder never recorded the $1 message"
+      sleep 0.2
+    done
+  }
+  record_long_send fm_backend_herdr_send_composer_text "$SM_SCRATCH/paste.bin" pasted
+  printf '\033[200~%s\033[201~' "$LONG_MSG" | cmp -s - "$SM_SCRATCH/paste.bin" \
+    || fail "real herdr: a long composer message must arrive as exactly one bracketed paste; got $(od -c "$SM_SCRATCH/paste.bin" | head -3)"
+  record_long_send fm_backend_herdr_send_literal "$SM_SCRATCH/raw.bin" raw
+  printf '%s' "$LONG_MSG" | cmp -s - "$SM_SCRATCH/raw.bin" \
+    || fail "real herdr: the recorder must see a raw send-text with no paste boundary, or this case proves nothing; got $(od -c "$SM_SCRATCH/raw.bin" | head -3)"
+  pass "real herdr: a ${#LONG_MSG}-char composer message arrives as one bracketed paste through pane.send_input, while raw send-text carries no paste boundary"
+else
+  echo "note: python3 not installed; skipping the long composer text paste check" >&2
+fi
+
 # --- current_path -------------------------------------------------------------
 
 fm_backend_herdr_send_text_line "$TARGET" "cd /tmp"

@@ -37,7 +37,7 @@ Prerequisites:
 - Herdr protocol 14 or newer, installed from [herdr.dev](https://herdr.dev).
 - `jq` for JSON responses.
 - The universal harness and toolchain requirements in [`configuration.md`](configuration.md#toolchain).
-- `python3` only for optional protocol-16 presentation-space ordering and native event subscription.
+- `python3` for sending composer text longer than 512 bytes, and for optional protocol-16 presentation-space ordering and native event subscription.
 
 Herdr is dual-licensed AGPL-3.0-or-later or commercial.
 Firstmate invokes its CLI as a separate process.
@@ -536,6 +536,10 @@ Enter, Escape, and Ctrl-C are supported.
 
 Typed-plane slash input, and dollar-prefixed skill input for Codex, uses the shared harness-aware settle before the first Enter, so a completion popup cannot consume it.
 Typed-plane text is typed once; only Enter is retried.
+Composer text longer than 512 bytes is typed through Herdr's paste-aware `pane.send_input` method, which brackets it exactly when the application enabled bracketed paste.
+A raw `pane send-text` longer than one pty read reaches the application in several reads, 1,022 bytes each on macOS, and live Claude Code then held only the last read's text, so the Claude composer proof below refused every such send.
+That path needs Python and never falls back to a raw write, so an unavailable transport or refused request reports `send-failed` without pressing Enter; shorter text fits one read and keeps the raw send so harness completion popups still open.
+When the request was sent but Herdr never answered, the composer may already hold the text, so the adapter clears it with Ctrl+U as the Claude composer proof does: a verified-empty composer reports `send-failed`, and one it cannot clear reports `unknown`.
 
 ### Claude composer proof
 
@@ -805,6 +809,7 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 ## Active limits
 
 - Presentation ordering needs protocol 16 and Python and is best-effort only.
+- Typing long composer text needs Python; without it that send fails rather than typing raw text a harness could truncate.
 - Mutable labels can collide; they are never placement or destructive authority.
 - A Firstmate outside Herdr cannot resolve a launcher workspace, so a colliding home label refuses new spawns until the collision is cleared.
 - Ghost and placeholder recognition uses ANSI de-emphasis when available; an unstyled glyph row carrying trailing non-idle text fails safely to `unknown`.

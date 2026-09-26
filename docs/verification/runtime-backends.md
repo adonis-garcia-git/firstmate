@@ -1059,7 +1059,8 @@ The CLI matrix was checked directly:
 | Guarantee | Command shape | Result |
 | --- | --- | --- |
 | Explicit session routing | `herdr <verb> ... --session <name>` | Reached the named session even while another server was running. |
-| Literal send | `herdr pane send-text <pane> <text> --session <name>` | Left text unsubmitted until Enter. |
+| Literal send | `herdr pane send-text <pane> <text> --session <name>` | Left text unsubmitted until Enter, as raw bytes with no paste boundary even when the application enabled bracketed paste. |
+| Paste-aware input | `pane.send_input` with `pane_id` and `text` and no `keys`, over the session's control socket | Left text unsubmitted; Herdr wrapped it in one bracketed paste when the application enabled bracketed paste. |
 | Keys | `herdr pane send-keys <pane> enter|escape|ctrl+c --session <name>` | Enter and Escape worked; Ctrl-C interrupted foreground work. |
 | Capture | `herdr pane read <pane> --source recent --lines N` | Small N could return empty below viewport height; a 200-line request plus local trim was stable. |
 | Viewport capture | `herdr pane read <pane> --source visible` | Verified on 2026-09-17 against Herdr 0.8.0 (protocol 19): `herdr pane read --help` documents `--source <SOURCE>` with `[possible values: visible, recent, recent-unwrapped, detection]`; `--source visible` exited 0 and returned 51 lines (the viewport) while `--source recent --lines 200` returned 200. This is the viewport-only read behind `fm_backend_herdr_visible_capture`, which Kimi's trust-dialog gate requires. |
@@ -1150,6 +1151,32 @@ Observed 2026-08-19:
 
 ```text
 ok - live Herdr submit confirm: Claude Code (2.1.236 (Claude Code)) on herdr 0.8.0 reports empty for a landed idle steer
+```
+
+### Long composer text
+
+Measured 2026-09-23 against Herdr 0.9.1 and Claude Code 2.1.281 in an isolated `fm-lab-` session, reading what Claude submitted from its session transcript.
+
+A raw `pane send-text` reached the application in 1,022-byte reads on macOS.
+A 1,031-byte numbered list followed by Enter submitted only its last 9 bytes, with or without a 3-second pause before Enter, and the composer already held only that tail before Enter.
+A 2,996-byte raw send submitted three separate pastes spliced at the read boundaries.
+The same texts sent through `pane.send_input` were submitted byte-for-byte at 1,031, 2,996, 9,994, and 100,008 bytes with Enter 0.3 seconds later, and a pasted `/context` still ran as a command.
+`fm_backend_herdr_send_text_submit` therefore types long composer text through `bin/backends/herdr-send-input.py`.
+`tests/fm-backend-herdr.test.sh` pins the routing and the no-raw-fallback refusal, and `tests/fm-backend-herdr-smoke.test.sh` proves against real Herdr that a bracketed-paste recorder receives the long text as exactly one paste.
+The live guard above refreshes the Claude proof.
+It launches the lab Claude with a fixed session id and without the parent Claude Code session's identity markers, because Claude Code 2.1.281 started as a child of another session reports "Transcript saving is off" and saves no transcript to read.
+Observed 2026-09-25 against Herdr 0.8.2 and Claude Code 2.1.283, run from inside a Claude Code session:
+
+```text
+ok - live Herdr submit confirm: Claude Code (2.1.283 (Claude Code)) on herdr 0.8.2 reports empty and renders the requested reply in isolated session fm-lab-herdr-submit-con-46783-29716
+ok - live Herdr submit confirm: Claude Code (2.1.283 (Claude Code)) on herdr 0.8.2 submits a U+2063 away-supervisor payload whose read-back drops the mark
+ok - live Herdr long message: Claude Code (2.1.283 (Claude Code)) on herdr 0.8.2 submits the whole 1142-char multi-line message byte-for-byte
+```
+
+With the submit core routed back through the raw send, the Claude composer proof saw only the tail, withheld Enter, and the same guard failed:
+
+```text
+not ok - Claude Code (2.1.283 (Claude Code)) on herdr 0.8.2: a landed 1142-char message must confirm empty, got 'send-failed'
 ```
 
 ### Prune and respawn
