@@ -1424,6 +1424,125 @@ SH
   pass "seeded dispatcher, adapter, production-owner, and test-local diagnostics preserve parity"
 }
 
+# fm_lint_stub_overlap_shellcheck <fakebin>: a ShellCheck stand-in that
+# appends "start <root>" and "end <root>" around a short hold to
+# FM_TEST_OVERLAP_LOG, so a test can see which roots ran at the same time.
+fm_lint_stub_overlap_shellcheck() {
+  local fakebin=$1
+  cat > "$fakebin/shellcheck" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf 'ShellCheck - shell script analysis tool\nversion: 0.11.0\n'
+  exit 0
+fi
+while [ "$#" -gt 0 ] && [ "$1" != -- ]; do shift; done
+[ "$#" -eq 0 ] || shift
+printf 'start %s\n' "$*" >> "$FM_TEST_OVERLAP_LOG"
+sleep "${FM_TEST_HOLD:-0.2}"
+printf 'end %s\n' "$*" >> "$FM_TEST_OVERLAP_LOG"
+exit 0
+SH
+  chmod +x "$fakebin/shellcheck"
+}
+
+# fm_lint_overlaps <log>: print "<a> <b>" for every pair of roots that ran at
+# the same time, and "multi <roots>" for any process given more than one root.
+fm_lint_overlaps() {
+  awk '
+    $1 == "start" {
+      if (NF > 2) print "multi", $0
+      for (r in running) print r, $2
+      running[$2] = 1
+    }
+    $1 == "end" { delete running[$2] }
+  ' "$1"
+}
+
+# The regression: roots whose own bytes are tiny but whose followed source
+# trees are heavy used to be packed by their own bytes, so two memory-heavy
+# roots could share one ShellCheck process or run at the same time on one
+# runner. A root heavier than a quarter of the heaviest root must run alone,
+# whether it follows its libraries through directives or through undirected
+# `. "$VAR/path"` lines, and padding any file's bytes must not change that.
+test_heavy_roots_run_alone() {
+  local tmp rel fakebin log overlaps pad i
+  tmp=$(mktemp -d "$ROOT/.fm-lint-weight.XXXXXX")
+  if [ "${#FM_TEST_CLEANUP_DIRS[@]}" -eq 0 ]; then
+    trap fm_test_cleanup EXIT
+  fi
+  FM_TEST_CLEANUP_DIRS+=("$tmp")
+  rel=${tmp#"$ROOT/"}
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_overlap_shellcheck "$fakebin"
+  log="$tmp/overlap.log"
+  # Two 20400-byte libraries: heavy-a follows lib three times (about 61 KB),
+  # heavy-b twice, and heavy-c follows both without directives (each about
+  # 41 KB, more than a quarter of heavy-a), while each light root stays under
+  # a quarter.
+  awk 'BEGIN { for (i = 0; i < 400; i++) printf "# %048d\n", i }' > "$tmp/lib.sh"
+  cp "$tmp/lib.sh" "$tmp/lib2.sh"
+  # shellcheck disable=SC2016 # The fixture must keep $LIBS literal.
+  printf '#!/usr/bin/env bash\nLIBS=.\n. "$LIBS/%s/lib.sh"\n. "$LIBS/%s/lib2.sh"\n' "$rel" "$rel" > "$tmp/heavy-c.sh"
+  # A source cycle must stop at the include stack instead of recursing.
+  printf '#!/usr/bin/env bash\n# shellcheck source=%s/cycle-b.sh\n. ./cycle-b.sh\n' "$rel" > "$tmp/cycle-a.sh"
+  printf '#!/usr/bin/env bash\n# shellcheck source=%s/cycle-a.sh\n. ./cycle-a.sh\n' "$rel" > "$tmp/cycle-b.sh"
+  {
+    printf '#!/usr/bin/env bash\n'
+    for i in 1 2 3; do printf '# shellcheck source=%s/lib.sh\n. ./lib.sh\n' "$rel"; done
+  } > "$tmp/heavy-a.sh"
+  {
+    printf '#!/usr/bin/env bash\n'
+    for i in 1 2; do printf '# shellcheck source=%s/lib.sh\n. ./lib.sh\n' "$rel"; done
+  } > "$tmp/heavy-b.sh"
+  for i in 1 2 3 4; do
+    printf '#!/usr/bin/env bash\nprintf "%%s\\n" light-%s\n' "$i" > "$tmp/light-$i.sh"
+  done
+  for pad in 0 2000 4000 8000; do
+    # Pad light roots only, cumulatively; each stays under a quarter of heavy-a's weight.
+    for i in 1 2; do
+      awk -v n="$pad" 'BEGIN { for (j = 0; j < n / 50; j++) printf "# %047d\n", j }' >> "$tmp/light-$i.sh"
+    done
+    : > "$log"
+    PATH="$fakebin:$PATH" FM_LINT_JOBS=2 FM_TEST_OVERLAP_LOG="$log" \
+      "$LINT" "$tmp/light-1.sh" "$tmp/heavy-b.sh" "$tmp/light-2.sh" "$tmp/heavy-a.sh" \
+      "$tmp/light-3.sh" "$tmp/heavy-c.sh" "$tmp/light-4.sh" "$tmp/cycle-a.sh" > "$tmp/out" 2>&1 \
+      || fail "weighted lint failed at pad $pad: $(cat "$tmp/out")"
+    [ "$(grep -c '^start ' "$log")" -eq 8 ] || fail "pad $pad did not lint every root exactly once"
+    overlaps=$(fm_lint_overlaps "$log")
+    assert_not_contains "$overlaps" "multi" "pad $pad gave one ShellCheck process several roots"
+    assert_not_contains "$overlaps" "heavy-a" "pad $pad ran the heaviest root beside another root"
+    assert_not_contains "$overlaps" "heavy-b" "pad $pad ran a root over a quarter of the heaviest beside another root"
+    assert_not_contains "$overlaps" "heavy-c" "pad $pad weighed a root without its undirected sources"
+    assert_contains "$overlaps" "light-" "pad $pad stopped sharing workers between light roots"
+  done
+  pass "roots heavier than a quarter of the heaviest source tree run alone at any file size while light roots share workers"
+}
+
+test_partitions_run_their_heaviest_root_alone() {
+  local tmp fakebin part log telemetry heaviest weight own overlaps
+  tmp=$(fm_test_tmproot fm-lint-partition-weight)
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_overlap_shellcheck "$fakebin"
+  for part in 1of2 2of2; do
+    log="$tmp/$part.log"
+    telemetry="$tmp/$part.tsv"
+    : > "$log"
+    PATH="$fakebin:$PATH" FM_TEST_HOLD=0.01 FM_TEST_OVERLAP_LOG="$log" \
+      "$LINT" --partition "$part" --telemetry "$telemetry" > "$tmp/$part.out" 2>&1 \
+      || fail "partition $part failed under the observing stand-in: $(cat "$tmp/$part.out")"
+    heaviest=$(awk -F '\t' '$1 == "heaviest_root" {print $2}' "$telemetry")
+    weight=$(awk -F '\t' '$1 == "heaviest_root_weight_bytes" {print $2}' "$telemetry")
+    [ -n "$heaviest" ] && [ -f "$ROOT/$heaviest" ] || fail "partition $part did not name its heaviest root"
+    own=$(wc -c < "$ROOT/$heaviest" | tr -d '[:space:]')
+    [ "$weight" -gt "$own" ] || fail "partition $part weighed $heaviest by its own bytes, not its source tree"
+    overlaps=$(fm_lint_overlaps "$log")
+    assert_not_contains "$overlaps" "multi" "partition $part gave one ShellCheck process several roots"
+    [ -z "$(printf '%s\n' "$overlaps" | awk -v r="$heaviest" '$1 == r || $2 == r')" ] \
+      || fail "partition $part ran its heaviest root beside another root"
+  done
+  pass "each canonical partition weighs roots by followed sources and runs its heaviest root alone"
+}
+
 test_help_reports_the_complete_interface
 test_list_files_reports_the_shell_inventory
 test_canonical_partitions_preserve_full_lint
@@ -1448,6 +1567,8 @@ test_clean_fixture_passes
 test_jobs_are_deterministic_and_complete
 test_worker_trees_stop_on_signal
 test_seeded_module_boundary_parity
+test_heavy_roots_run_alone
+test_partitions_run_their_heaviest_root_alone
 test_changed_mode_lints_only_the_changed_file
 test_ci_forces_full_lint_even_with_empty_diff
 test_main_branch_forces_full_lint
