@@ -179,7 +179,7 @@ test_list_files_reports_the_shell_inventory() {
 }
 
 test_canonical_partitions_preserve_full_lint() {
-  local tmp fakebin all part selected log flags mode rc option
+  local tmp fakebin all part selected log flags mode rc option invocation_count root_count
   tmp=$(fm_test_tmproot fm-lint-partitions)
   fakebin="$tmp/bin"
   mkdir -p "$fakebin"
@@ -204,6 +204,14 @@ test_canonical_partitions_preserve_full_lint() {
     [ "$(LC_ALL=C sort -u "$flags")" = "$(printf 'exclude=none\nexternal-sources=yes')" ] \
       || fail "partition $part weakened source-aware analysis"
     [ "$(LC_ALL=C sort -u "$mode")" = on ] || fail "partition $part disabled full analysis"
+    root_count=$(printf '%s\n' "$selected" | grep -c .)
+    invocation_count=$(grep -c '^external-sources=' "$flags" || true)
+    [ "$invocation_count" -eq "$root_count" ] \
+      || fail "partition $part used $invocation_count ShellCheck calls for $root_count roots"
+    [ "$(grep -c '^fm-lint: begin ' "$tmp/$part.out" || true)" -eq "$root_count" ] \
+      || fail "partition $part did not stream a begin record per root"
+    [ "$(grep -c '^fm-lint: end ' "$tmp/$part.out" || true)" -eq "$root_count" ] \
+      || fail "partition $part did not stream an end record per root"
   done
   [ "$(LC_ALL=C sort "$tmp/union")" = "$all" ] || fail "lint partitions lose or duplicate canonical roots"
   for option in 0of2 3of2 1of3; do
@@ -320,6 +328,80 @@ if [ -n "\${FM_TEST_FLAG_LOG:-}" ]; then
 fi
 [ "\$#" -eq 0 ] || shift
 printf '%s\n' "\$@" >> "$log"
+exit 0
+SH
+  chmod +x "$fakebin/shellcheck"
+}
+
+# fm_lint_bounds_supported: the platform pair the bounded per-root envelope
+# needs - a watchdog mechanism and an enforceable address-space limit. macOS
+# rejects ulimit -v, so bounded-mode tests run there only when this is true.
+fm_lint_bounds_supported() {
+  [ -r "$ROOT/bin/fm-timeout-lib.sh" ] || return 1
+  ( ulimit -v 65536 ) 2>/dev/null || return 1
+  command -v perl >/dev/null 2>&1 \
+    || command -v timeout >/dev/null 2>&1 \
+    || command -v gtimeout >/dev/null 2>&1 || return 1
+  return 0
+}
+
+# fm_lint_stub_reactive_shellcheck <fakebin-dir>: a ShellCheck stub whose
+# behavior is steered by the basename of the root it is asked to analyze, so
+# bounded-execution tests can mix a hang, a memory-limit death, and clean
+# roots in one run. A *blocker* root spawns a tracked child (pid written to
+# FM_TEST_CHILD_PID), records its own pid on FM_TEST_STUB_PID, and then blocks;
+# a *hoarder* root runs a perl allocator that grows to 512 MiB and fails only
+# when perl itself reports that the allocation was refused, forwarding perl's
+# own error and exiting with GHC's heap-exhaustion status 251, as ShellCheck
+# does when its runtime is refused memory; an allocation that succeeds falls
+# through like any other root.
+# Anything else records its path on FM_TEST_STUB_LOG and exits cleanly.
+fm_lint_stub_reactive_shellcheck() {
+  local fakebin=$1
+  cat > "$fakebin/shellcheck" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = "--version" ]; then
+  printf 'ShellCheck - shell script analysis tool\nversion: 0.11.0\n'
+  exit 0
+fi
+target=${!#}
+case "$target" in
+  *blocker*)
+    sleep "${FM_TEST_BLOCK_SECS:-300}" &
+    printf '%s\n' "$!" > "${FM_TEST_CHILD_PID:-/dev/null}"
+    printf '%s\n' "$$" > "${FM_TEST_STUB_PID:-/dev/null}"
+    exec sleep "${FM_TEST_BLOCK_SECS:-300}"
+    ;;
+  *hoarder*)
+    alloc_rc=0
+    alloc_err=$(perl -e 'my $s = ""; for (1..512) { $s .= "x" x 1048576 }' 2>&1 >/dev/null) \
+      || alloc_rc=$?
+    if [ "$alloc_rc" -ne 0 ]; then
+      printf '%s\n' "$alloc_err" >&2
+      case "$alloc_err" in
+        *"Out of memory"*) exit 251 ;;
+      esac
+      exit "$alloc_rc"
+    fi
+    ;;
+  *oom-exit1*)
+    printf 'shellcheck: malloc: resource exhausted (out of memory)\n' >&2
+    exit 1
+    ;;
+  *oom-heap*)
+    printf 'shellcheck: Heap exhausted;\n' >&2
+    exit 251
+    ;;
+  *oom-kill*)
+    printf 'shellcheck: out of memory (requested 1048576 bytes)\n' >&2
+    kill -KILL "$$"
+    ;;
+  *oom-text-findings*)
+    printf '\nIn %s line 2:\nshellcheck: out of memory $x\n                          ^-- SC2086 (info): Double quote to prevent globbing and word splitting.\n' "$target"
+    exit 1
+    ;;
+esac
+printf '%s\n' "$target" >> "${FM_TEST_STUB_LOG:-/dev/null}"
 exit 0
 SH
   chmod +x "$fakebin/shellcheck"
@@ -731,10 +813,16 @@ test_changed_mode_hides_cross_file_codes_that_ci_still_sees() {
     pass "SKIP (ShellCheck $REQUIRED not resolved): changed-mode exclusion behavior"
     return
   fi
-  local tmp fakebin diff_file fixture out rc
+  local tmp fakebin diff_file fixture out rc test_root lint
   tmp=$(fm_test_tmproot fm-lint-local-exclude-behavior)
-  fixture="$ROOT/tests/fm-lint-local-exclude-fixture.test.sh"
-  printf '%s\n' "$fixture" >> "$FM_TEST_CLEANUP_REGISTRY"
+  test_root="$tmp/repo"
+  mkdir -p "$test_root/bin/backends" "$test_root/tests" "$test_root/.github/workflows"
+  lint="$test_root/bin/fm-lint.sh"
+  cp "$LINT" "$lint"
+  cp "$ROOT/bin/fm-lint-workflows.sh" "$test_root/bin/"
+  cp "$ROOT"/.github/workflows/* "$test_root/.github/workflows/"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$test_root/bin/backends/noop.sh"
+  fixture="$test_root/tests/fm-lint-local-exclude-fixture.test.sh"
   cat > "$fixture" <<'SH'
 #!/usr/bin/env bash
 # Assigned here and only consumed by a library the local gate does not follow.
@@ -758,14 +846,14 @@ SH
   rc=0
   out=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
     FM_TEST_GIT_BRANCH=feature \
-    FM_TEST_GIT_DIFF_FILE="$diff_file" "$LINT" 2>&1) || rc=$?
+    FM_TEST_GIT_DIFF_FILE="$diff_file" "$lint" 2>&1) || rc=$?
   [ "$rc" -eq 0 ] \
     || fail "changed-mode local lint failed a cross-file-only fixture"$'\n'"$out"
   assert_not_contains "$out" "SC2034" "changed-mode local lint still reported SC2034"
   assert_not_contains "$out" "SC2329" "changed-mode local lint still reported SC2329"
 
   rc=0
-  out=$("$LINT" "$fixture" 2>&1) || rc=$?
+  out=$("$lint" "$fixture" 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "explicit-path lint passed a cross-file-only fixture"$'\n'"$out"
   assert_contains "$out" "SC2034" "explicit-path lint did not keep SC2034"
   assert_contains "$out" "SC2329" "explicit-path lint did not keep SC2329"
@@ -1353,6 +1441,380 @@ SH
   pass "jobs=1 and jobs=2 stop complete worker trees with and without telemetry"
 }
 
+test_root_deadline_names_the_root_and_reaps_the_tree() {
+  if ! fm_lint_bounds_supported; then
+    pass "SKIP (host cannot enforce the bounded envelope): root deadline kill check"
+    return
+  fi
+  local tmp fakebin stub_log telemetry roots_log out rc
+  local blocker ok sentinel_pid child_pid_file stub_pid_file child_pid stub_pid
+  tmp=$(fm_test_tmproot fm-lint-bound-deadline)
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_reactive_shellcheck "$fakebin"
+  stub_log="$tmp/stub.log"
+  telemetry="$tmp/lint.tsv"
+  roots_log="$tmp/lint.roots.tsv"
+  child_pid_file="$tmp/child.pid"
+  stub_pid_file="$tmp/stub.pid"
+  blocker="$tmp/blocker.sh"
+  ok="$tmp/ok.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$blocker"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$ok"
+
+  sleep 300 &
+  sentinel_pid=$!
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_LINT_JOBS=1 \
+    FM_LINT_REQUIRE_BOUNDS=1 \
+    FM_LINT_ROOT_SECONDS=1 FM_LINT_ROOT_GRACE=1 \
+    FM_TEST_STUB_LOG="$stub_log" FM_TEST_CHILD_PID="$child_pid_file" \
+    FM_TEST_STUB_PID="$stub_pid_file" FM_TEST_BLOCK_SECS=300 \
+    "$LINT" --telemetry "$telemetry" "$ok" "$blocker" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a root pinned at the wall deadline unexpectedly passed"
+  assert_contains "$out" "blocker.sh" "the timed-out root was not named"
+  assert_contains "$out" "reason=timeout" "the timed-out root was not reported as a timeout"
+  kill -0 "$sentinel_pid" 2>/dev/null \
+    || fail "the lint deadline killed an unrelated sentinel process"
+  kill -KILL "$sentinel_pid" 2>/dev/null || true
+  wait "$sentinel_pid" 2>/dev/null || true
+  if [ -s "$child_pid_file" ]; then
+    child_pid=$(cat "$child_pid_file")
+    kill -0 "$child_pid" 2>/dev/null \
+      && fail "the blocked root's child survived the deadline kill"
+  else
+    fail "the blocked root never recorded its child pid"
+  fi
+  if [ -s "$stub_pid_file" ]; then
+    stub_pid=$(cat "$stub_pid_file")
+    kill -0 "$stub_pid" 2>/dev/null \
+      && fail "the blocked root's ShellCheck process survived the deadline kill"
+  else
+    fail "the blocked root never recorded its ShellCheck pid"
+  fi
+  [ -f "$roots_log" ] || fail "the run kept no retained per-root sidecar"
+  awk -F '\t' '$1 == "end" && $3 ~ /ok\.sh$/ && $10 == "ok" { found=1 } END { exit !found }' \
+    "$roots_log" || fail "the sidecar lost the completed root's ok record"
+  awk -F '\t' '$1 == "end" && $3 ~ /blocker\.sh$/ && $10 == "timeout" { found=1 } END { exit !found }' \
+    "$roots_log" || fail "the sidecar did not record the timed-out root by name"
+  pass "a root pinned at the wall deadline fails by name, reaps its tree, and leaves the sentinel alive"
+}
+
+test_root_memory_limit_reports_a_named_death() {
+  if ! fm_lint_bounds_supported; then
+    pass "SKIP (host cannot enforce the bounded envelope): memory-limit death check"
+    return
+  fi
+  local tmp fakebin stub_log telemetry roots_log out rc hoarder ok
+  local sentinel_pid
+  tmp=$(fm_test_tmproot fm-lint-bound-memory)
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_reactive_shellcheck "$fakebin"
+  stub_log="$tmp/stub.log"
+  telemetry="$tmp/lint.tsv"
+  roots_log="$tmp/lint.roots.tsv"
+  hoarder="$tmp/hoarder.sh"
+  ok="$tmp/ok.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$hoarder"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$ok"
+
+  # Control: with no memory limit the same allocator succeeds, so a memory
+  # death below can only come from the enforced cap.
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_LINT_JOBS=1 \
+    FM_TEST_STUB_LOG="$stub_log" \
+    "$LINT" --telemetry "$tmp/control.tsv" "$ok" "$hoarder" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "the allocator failed without any memory limit"$'\n'"$out"
+  grep -q $'^meta\tbounds_enforced\t0$' "$tmp/control.roots.tsv" \
+    || fail "the control run was not unbounded"
+  awk -F '\t' '$1 == "end" && $3 ~ /hoarder\.sh$/ && $10 == "ok" { found=1 } END { exit !found }' \
+    "$tmp/control.roots.tsv" || fail "the uncapped allocator root did not complete ok"
+
+  # The hoarder stub allocates 512 MiB; under a 256 MiB address-space limit
+  # the allocator is refused and the run must name the root, not survive.
+  sleep 300 &
+  sentinel_pid=$!
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_LINT_JOBS=1 \
+    FM_LINT_REQUIRE_BOUNDS=1 FM_LINT_ROOT_MEMORY_KIB=262144 \
+    FM_TEST_STUB_LOG="$stub_log" \
+    "$LINT" --telemetry "$telemetry" "$ok" "$hoarder" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a root killed by its memory limit unexpectedly passed"
+  assert_contains "$out" "hoarder.sh" "the memory-limited root was not named"
+  assert_contains "$out" "reason=memory" "the memory-limit death was not classified as memory"
+  kill -0 "$sentinel_pid" 2>/dev/null \
+    || fail "the memory-limit kill took an unrelated sentinel process with it"
+  kill -KILL "$sentinel_pid" 2>/dev/null || true
+  wait "$sentinel_pid" 2>/dev/null || true
+  awk -F '\t' '$1 == "end" && $3 ~ /hoarder\.sh$/ && $10 == "memory" { found=1 } END { exit !found }' \
+    "$roots_log" || fail "the sidecar did not record the memory-limited root by name"
+  awk -F '\t' '$1 == "end" && $3 ~ /ok\.sh$/ && $10 == "ok" { found=1 } END { exit !found }' \
+    "$roots_log" || fail "the sidecar lost the clean root's record"
+  pass "a root refused by its enforced memory limit fails by name with a memory reason"
+}
+
+test_memory_evidence_outranks_findings_and_signal_reasons() {
+  local tmp fakebin roots_log out rc name reason bounded
+  local -a roots modes
+  tmp=$(fm_test_tmproot fm-lint-memory-evidence)
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_reactive_shellcheck "$fakebin"
+  roots=()
+  for name in oom-exit1 oom-heap oom-kill oom-text-findings; do
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/$name.sh"
+    roots+=("$tmp/$name.sh")
+  done
+  modes=(0)
+  if fm_lint_bounds_supported; then
+    modes+=(1)
+  fi
+
+  # A memory death reports memory whether the runtime exits 1 with a
+  # program-prefixed OOM error, exits with GHC's heap-exhaustion status, or is
+  # SIGKILLed after printing OOM text; a findings root whose echoed source line
+  # merely quotes "out of memory" stays findings.
+  for bounded in "${modes[@]}"; do
+    roots_log="$tmp/lint.$bounded.roots.tsv"
+    rc=0
+    if [ "$bounded" = 1 ]; then
+      out=$(PATH="$fakebin:$PATH" FM_LINT_JOBS=1 FM_LINT_REQUIRE_BOUNDS=1 \
+        "$LINT" --telemetry "$tmp/lint.$bounded.tsv" "${roots[@]}" 2>&1) || rc=$?
+    else
+      out=$(PATH="$fakebin:$PATH" FM_LINT_JOBS=1 \
+        "$LINT" --telemetry "$tmp/lint.$bounded.tsv" "${roots[@]}" 2>&1) || rc=$?
+    fi
+    [ "$rc" -ne 0 ] || fail "memory deaths unexpectedly passed (bounded=$bounded)"
+    for name in oom-exit1 oom-heap oom-kill oom-text-findings; do
+      reason=$(awk -F '\t' -v root="/$name.sh" \
+        '$1 == "end" && substr($3, length($3) - length(root) + 1) == root { print $10 }' \
+        "$roots_log")
+      case "$name" in
+        oom-text-findings)
+          [ "$reason" = findings ] \
+            || fail "$name was classified '$reason', expected findings (bounded=$bounded)"$'\n'"$out"
+          ;;
+        *)
+          [ "$reason" = memory ] \
+            || fail "$name was classified '$reason', expected memory (bounded=$bounded)"$'\n'"$out"
+          ;;
+      esac
+    done
+  done
+  pass "explicit memory evidence outranks findings and signal reasons (modes: ${modes[*]})"
+}
+
+test_source_excerpt_with_oom_text_stays_findings() {
+  if ! pinned_ready; then
+    pass "SKIP (ShellCheck $REQUIRED not resolved): OOM-text source excerpt check"
+    return
+  fi
+  local tmp fixture out rc reason
+  tmp=$(fm_test_tmproot fm-lint-oom-text-excerpt)
+  fixture="$tmp/excerpt.sh"
+  # The finding's echoed source excerpt reads like a runtime OOM error; the
+  # root still exits with ordinary findings and must be reported as findings.
+  cat > "$fixture" <<'SH'
+#!/usr/bin/env bash
+x=$1
+shellcheck: out of memory $x
+SH
+  rc=0
+  out=$("$LINT" --telemetry "$tmp/lint.tsv" "$fixture" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "a root with an ordinary finding exited $rc, expected 1"$'\n'"$out"
+  assert_contains "$out" "shellcheck: out of memory" "the source excerpt was not echoed with the finding"
+  assert_contains "$out" "SC2086" "the ordinary finding was not reported"
+  reason=$(awk -F '\t' '$1 == "end" && $3 ~ /excerpt\.sh$/ { print $10 }' "$tmp/lint.roots.tsv")
+  [ "$reason" = findings ] \
+    || fail "a source excerpt quoting OOM text was classified '$reason', expected findings"$'\n'"$out"
+
+  # A root whose path contains OOM words and cannot be opened fails with an
+  # ordinary file error that names the path on stderr; it is an error, not a
+  # memory death.
+  rc=0
+  out=$("$LINT" --telemetry "$tmp/missing.tsv" "$tmp/out of memory.sh" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a missing root unexpectedly passed"$'\n'"$out"
+  assert_contains "$out" "out of memory.sh" "the missing root's file error did not name its path"
+  reason=$(awk -F '\t' '$1 == "end" && $3 ~ /out of memory\.sh$/ { print $10 }' "$tmp/missing.roots.tsv")
+  case "$reason" in
+    error:*) ;;
+    *) fail "a missing root named with OOM words was classified '$reason', expected error"$'\n'"$out" ;;
+  esac
+  pass "OOM words in a source excerpt or a root path never classify a root as memory"
+}
+
+test_require_bounds_refuses_when_enforcement_is_missing() {
+  local tmp fakebin stub_log fixture out rc lone_dir
+  tmp=$(fm_test_tmproot fm-lint-require-bounds)
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_shellcheck "$fakebin" "$tmp/stub.log"
+  stub_log="$tmp/stub.log"
+  fixture="$tmp/clean.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fixture"
+
+  # A script copied without its sibling watchdog library cannot enforce the
+  # wall deadline, so a required-bounds run must refuse before ShellCheck.
+  lone_dir="$tmp/lone"
+  mkdir -p "$lone_dir"
+  cp "$LINT" "$lone_dir/fm-lint.sh"
+  chmod +x "$lone_dir/fm-lint.sh"
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_LINT_REQUIRE_BOUNDS=1 \
+    "$lone_dir/fm-lint.sh" "$fixture" 2>&1) || rc=$?
+  [ "$rc" -eq 2 ] || fail "a watchdog-less run under REQUIRE_BOUNDS exited $rc, expected 2"
+  assert_contains "$out" "fm-timeout-lib.sh" "the refusal did not name the missing watchdog library"
+  assert_contains "$out" "refusing to lint uncapped" "the refusal did not explain itself"
+  [ ! -s "$stub_log" ] \
+    || fail "a watchdog-refused run still invoked ShellCheck"
+
+  if ( ulimit -v 65536 ) 2>/dev/null; then
+    # The host accepts the memory limit, so a required-bounds run proceeds and
+    # still lints the root.
+    rc=0
+    out=$(PATH="$fakebin:$PATH" FM_LINT_REQUIRE_BOUNDS=1 \
+      "$LINT" "$fixture" 2>&1) || rc=$?
+    [ "$rc" -eq 0 ] || fail "an enforceable bounded run was refused"$'\n'"$out"
+    [ -s "$stub_log" ] || fail "an enforceable bounded run never invoked ShellCheck"
+  else
+    # The host rejects the address-space limit outright (macOS), so the run
+    # must refuse by name rather than lint uncapped.
+    rc=0
+    out=$(PATH="$fakebin:$PATH" FM_LINT_REQUIRE_BOUNDS=1 \
+      "$LINT" "$fixture" 2>&1) || rc=$?
+    [ "$rc" -eq 2 ] || fail "an unenforceable memory limit under REQUIRE_BOUNDS exited $rc, expected 2"
+    assert_contains "$out" "FM_LINT_ROOT_MEMORY_KIB" \
+      "the refusal did not name the unenforceable memory limit"
+    assert_contains "$out" "refusing to lint uncapped" "the refusal did not explain itself"
+    [ ! -s "$stub_log" ] \
+      || fail "a bound-refused run still invoked ShellCheck"
+  fi
+  pass "FM_LINT_REQUIRE_BOUNDS refuses missing enforcement and proceeds when enforceable"
+}
+
+test_pinned_shellcheck_memory_limit() {
+  if ! pinned_ready; then
+    pass "SKIP (ShellCheck $REQUIRED not resolved): pinned memory-envelope check"
+    return
+  fi
+  if ! fm_lint_bounds_supported; then
+    pass "SKIP (host cannot enforce the bounded envelope): pinned memory-envelope check"
+    return
+  fi
+  local tmp telemetry roots_log out rc fixture
+  tmp=$(fm_test_tmproot fm-lint-pinned-memory)
+  telemetry="$tmp/lint.tsv"
+  roots_log="$tmp/lint.roots.tsv"
+  fixture="$tmp/small.sh"
+  printf '#!/usr/bin/env bash\nprintf ok\n' > "$fixture"
+
+  # The pinned ShellCheck must start and lint under the configured memory
+  # limit - this is what proves the address-space cap leaves GHC enough head
+  # room instead of discovering the conflict mid-partition in CI.
+  rc=0
+  out=$(FM_LINT_REQUIRE_BOUNDS=1 "$LINT" \
+    --telemetry "$telemetry" "$fixture" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "pinned ShellCheck did not lint under the default memory limit"$'\n'"$out"
+  grep -q $'^meta\tbounds_enforced\t1$' "$roots_log" \
+    || fail "the sidecar did not record enforced bounds"
+  grep -q $'^meta\troot_memory_limit_kib\t12582912$' "$roots_log" \
+    || fail "the sidecar did not record the applied memory limit"
+  awk -F '\t' '$1 == "end" && $3 ~ /small\.sh$/ && $10 == "ok" { found=1 } END { exit !found }' \
+    "$roots_log" || fail "the pinned root did not complete ok under the memory limit"
+
+  # A limit below the pinned binary's own mapped size must bind the same
+  # pinned root: it is refused or killed and named, never silently uncapped.
+  # GHC shrinks its heap reservation to fit a larger cap, so a small file can
+  # still lint under a few hundred MiB; only a cap under the binary itself
+  # binds on every Linux architecture.
+  rc=0
+  out=$(FM_LINT_REQUIRE_BOUNDS=1 FM_LINT_ROOT_MEMORY_KIB=8192 \
+    "$LINT" --telemetry "$tmp/tiny.tsv" "$fixture" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "pinned ShellCheck ignored an 8 MiB address-space limit"
+  assert_contains "$out" "small.sh" "the memory-bound pinned root was not named"
+  awk -F '\t' '$1 == "end" && $3 ~ /small\.sh$/ && $10 != "ok" && $10 != "findings" { found=1 } END { exit !found }' \
+    "$tmp/tiny.roots.tsv" || fail "the over-limit pinned root was not recorded as an abnormal end"$'\n'"$out"
+  pass "the pinned ShellCheck both respects and survives under the memory envelope"
+}
+
+test_sidecar_result_exit_reflects_final_status() {
+  local tmp fakebin log telemetry roots_log out rc
+  tmp=$(fm_test_tmproot fm-lint-sidecar-result)
+  fakebin=$(fm_fakebin "$tmp")
+  log="$tmp/shellcheck.log"
+  telemetry="$tmp/lint.tsv"
+  roots_log="$tmp/lint.roots.tsv"
+  mkdir -p "$tmp/repo/bin/backends" "$tmp/repo/tests" "$tmp/repo/.github/workflows"
+  cp "$LINT" "$tmp/repo/bin/fm-lint.sh"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$tmp/repo/bin/fm-timeout-lib.sh"
+  cat > "$tmp/repo/bin/fm-lint-workflows.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$tmp/repo/bin/backends/noop.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$tmp/repo/tests/noop.test.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  printf '#!/usr/bin/env bash\nbd close fm-example\n' > "$tmp/repo/bin/direct-beads.sh"
+  chmod +x "$tmp/repo/bin/fm-lint.sh" "$tmp/repo/bin/fm-lint-workflows.sh"
+  fm_lint_stub_shellcheck "$fakebin" "$log"
+
+  # Every ShellCheck root passes, then the backend-purity check fails the run:
+  # the retained records must carry that final status, not the clean lint exit.
+  rc=0
+  out=$(cd "$tmp/repo" && CI=true PATH="$fakebin:$PATH" \
+    "$tmp/repo/bin/fm-lint.sh" --telemetry "$telemetry" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "a backend-purity failure did not fail the lint run (exit $rc)"$'\n'"$out"
+  assert_contains "$out" "direct Beads CLI invocation bypasses tasks-axi" \
+    "the run did not report its backend-purity failure"
+  grep -q $'^meta\tresult_exit\t1$' "$roots_log" \
+    || fail "the sidecar recorded the pre-check status instead of the final exit"
+  grep -q $'^result_exit\t1$' "$telemetry" \
+    || fail "telemetry recorded the pre-check status instead of the final exit"
+  pass "the roots sidecar and telemetry record the run's final exit status"
+}
+
+test_roots_sidecar_records_per_root_lifecycle() {
+  local tmp fakebin stub_log telemetry roots_log out rc
+  local alpha beta gamma
+  tmp=$(fm_test_tmproot fm-lint-roots-log)
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_shellcheck "$fakebin" "$tmp/stub.log"
+  stub_log="$tmp/stub.log"
+  telemetry="$tmp/lint.tsv"
+  roots_log="$tmp/lint.roots.tsv"
+  alpha="$tmp/alpha.sh"; beta="$tmp/beta.sh"; gamma="$tmp/gamma.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$alpha"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$beta"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$gamma"
+
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_TEST_STUB_LOG="$stub_log" \
+    "$LINT" --telemetry "$telemetry" "$alpha" "$beta" "$gamma" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a clean bounded run failed"$'\n'"$out"
+  [ -f "$roots_log" ] || fail "the run wrote no per-root sidecar beside telemetry"
+  grep -q $'^format\tfm-lint-roots-v1$' "$roots_log" \
+    || fail "the sidecar is missing its format header"
+  grep -q $'^meta\tbounds_enforced\t0$' "$roots_log" \
+    || fail "the sidecar did not record the unenforced bounds state"
+  grep -q $'^meta\ttiming_mechanism\tnone$' "$roots_log" \
+    || fail "the sidecar did not record the timing mechanism"
+  grep -q $'^meta\troot_deadline_seconds\tunbounded$' "$roots_log" \
+    || fail "the sidecar did not record the unbounded deadline state"
+  grep -q $'^meta\troot_memory_limit_kib\tunbounded$' "$roots_log" \
+    || fail "the sidecar did not record the unbounded memory state"
+  grep -q $'^meta\troots_completed\t3$' "$roots_log" \
+    || fail "the sidecar did not count three completed roots"
+  [ "$(grep -c '^begin' "$roots_log")" -eq 3 ] \
+    || fail "the sidecar did not log a begin record per root"
+  [ "$(awk -F '\t' '$1 == "end" && $10 == "ok" { n++ } END { print n + 0 }' "$roots_log")" -eq 3 ] \
+    || fail "the sidecar did not log an ok end record per root"
+  [ "$(awk -F '\t' '$1 == "end" && ($8 == "" || $8 !~ /^[0-9]+$/) { n++ } END { print n + 0 }' "$roots_log")" -eq 0 ] \
+    || fail "an end record is missing its exit status"
+  pass "the retained sidecar records each root's lifecycle with a mode, reason, and duration"
+}
+
 test_seeded_module_boundary_parity() {
   if ! pinned_ready; then
     pass "SKIP (ShellCheck $REQUIRED not resolved): seeded source-boundary parity check"
@@ -1424,125 +1886,6 @@ SH
   pass "seeded dispatcher, adapter, production-owner, and test-local diagnostics preserve parity"
 }
 
-# fm_lint_stub_overlap_shellcheck <fakebin>: a ShellCheck stand-in that
-# appends "start <root>" and "end <root>" around a short hold to
-# FM_TEST_OVERLAP_LOG, so a test can see which roots ran at the same time.
-fm_lint_stub_overlap_shellcheck() {
-  local fakebin=$1
-  cat > "$fakebin/shellcheck" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = --version ]; then
-  printf 'ShellCheck - shell script analysis tool\nversion: 0.11.0\n'
-  exit 0
-fi
-while [ "$#" -gt 0 ] && [ "$1" != -- ]; do shift; done
-[ "$#" -eq 0 ] || shift
-printf 'start %s\n' "$*" >> "$FM_TEST_OVERLAP_LOG"
-sleep "${FM_TEST_HOLD:-0.2}"
-printf 'end %s\n' "$*" >> "$FM_TEST_OVERLAP_LOG"
-exit 0
-SH
-  chmod +x "$fakebin/shellcheck"
-}
-
-# fm_lint_overlaps <log>: print "<a> <b>" for every pair of roots that ran at
-# the same time, and "multi <roots>" for any process given more than one root.
-fm_lint_overlaps() {
-  awk '
-    $1 == "start" {
-      if (NF > 2) print "multi", $0
-      for (r in running) print r, $2
-      running[$2] = 1
-    }
-    $1 == "end" { delete running[$2] }
-  ' "$1"
-}
-
-# The regression: roots whose own bytes are tiny but whose followed source
-# trees are heavy used to be packed by their own bytes, so two memory-heavy
-# roots could share one ShellCheck process or run at the same time on one
-# runner. A root heavier than a quarter of the heaviest root must run alone,
-# whether it follows its libraries through directives or through undirected
-# `. "$VAR/path"` lines, and padding any file's bytes must not change that.
-test_heavy_roots_run_alone() {
-  local tmp rel fakebin log overlaps pad i
-  tmp=$(mktemp -d "$ROOT/.fm-lint-weight.XXXXXX")
-  if [ "${#FM_TEST_CLEANUP_DIRS[@]}" -eq 0 ]; then
-    trap fm_test_cleanup EXIT
-  fi
-  FM_TEST_CLEANUP_DIRS+=("$tmp")
-  rel=${tmp#"$ROOT/"}
-  fakebin=$(fm_fakebin "$tmp")
-  fm_lint_stub_overlap_shellcheck "$fakebin"
-  log="$tmp/overlap.log"
-  # Two 20400-byte libraries: heavy-a follows lib three times (about 61 KB),
-  # heavy-b twice, and heavy-c follows both without directives (each about
-  # 41 KB, more than a quarter of heavy-a), while each light root stays under
-  # a quarter.
-  awk 'BEGIN { for (i = 0; i < 400; i++) printf "# %048d\n", i }' > "$tmp/lib.sh"
-  cp "$tmp/lib.sh" "$tmp/lib2.sh"
-  # shellcheck disable=SC2016 # The fixture must keep $LIBS literal.
-  printf '#!/usr/bin/env bash\nLIBS=.\n. "$LIBS/%s/lib.sh"\n. "$LIBS/%s/lib2.sh"\n' "$rel" "$rel" > "$tmp/heavy-c.sh"
-  # A source cycle must stop at the include stack instead of recursing.
-  printf '#!/usr/bin/env bash\n# shellcheck source=%s/cycle-b.sh\n. ./cycle-b.sh\n' "$rel" > "$tmp/cycle-a.sh"
-  printf '#!/usr/bin/env bash\n# shellcheck source=%s/cycle-a.sh\n. ./cycle-a.sh\n' "$rel" > "$tmp/cycle-b.sh"
-  {
-    printf '#!/usr/bin/env bash\n'
-    for i in 1 2 3; do printf '# shellcheck source=%s/lib.sh\n. ./lib.sh\n' "$rel"; done
-  } > "$tmp/heavy-a.sh"
-  {
-    printf '#!/usr/bin/env bash\n'
-    for i in 1 2; do printf '# shellcheck source=%s/lib.sh\n. ./lib.sh\n' "$rel"; done
-  } > "$tmp/heavy-b.sh"
-  for i in 1 2 3 4; do
-    printf '#!/usr/bin/env bash\nprintf "%%s\\n" light-%s\n' "$i" > "$tmp/light-$i.sh"
-  done
-  for pad in 0 2000 4000 8000; do
-    # Pad light roots only, cumulatively; each stays under a quarter of heavy-a's weight.
-    for i in 1 2; do
-      awk -v n="$pad" 'BEGIN { for (j = 0; j < n / 50; j++) printf "# %047d\n", j }' >> "$tmp/light-$i.sh"
-    done
-    : > "$log"
-    PATH="$fakebin:$PATH" FM_LINT_JOBS=2 FM_TEST_OVERLAP_LOG="$log" \
-      "$LINT" "$tmp/light-1.sh" "$tmp/heavy-b.sh" "$tmp/light-2.sh" "$tmp/heavy-a.sh" \
-      "$tmp/light-3.sh" "$tmp/heavy-c.sh" "$tmp/light-4.sh" "$tmp/cycle-a.sh" > "$tmp/out" 2>&1 \
-      || fail "weighted lint failed at pad $pad: $(cat "$tmp/out")"
-    [ "$(grep -c '^start ' "$log")" -eq 8 ] || fail "pad $pad did not lint every root exactly once"
-    overlaps=$(fm_lint_overlaps "$log")
-    assert_not_contains "$overlaps" "multi" "pad $pad gave one ShellCheck process several roots"
-    assert_not_contains "$overlaps" "heavy-a" "pad $pad ran the heaviest root beside another root"
-    assert_not_contains "$overlaps" "heavy-b" "pad $pad ran a root over a quarter of the heaviest beside another root"
-    assert_not_contains "$overlaps" "heavy-c" "pad $pad weighed a root without its undirected sources"
-    assert_contains "$overlaps" "light-" "pad $pad stopped sharing workers between light roots"
-  done
-  pass "roots heavier than a quarter of the heaviest source tree run alone at any file size while light roots share workers"
-}
-
-test_partitions_run_their_heaviest_root_alone() {
-  local tmp fakebin part log telemetry heaviest weight own overlaps
-  tmp=$(fm_test_tmproot fm-lint-partition-weight)
-  fakebin=$(fm_fakebin "$tmp")
-  fm_lint_stub_overlap_shellcheck "$fakebin"
-  for part in 1of2 2of2; do
-    log="$tmp/$part.log"
-    telemetry="$tmp/$part.tsv"
-    : > "$log"
-    PATH="$fakebin:$PATH" FM_TEST_HOLD=0.01 FM_TEST_OVERLAP_LOG="$log" \
-      "$LINT" --partition "$part" --telemetry "$telemetry" > "$tmp/$part.out" 2>&1 \
-      || fail "partition $part failed under the observing stand-in: $(cat "$tmp/$part.out")"
-    heaviest=$(awk -F '\t' '$1 == "heaviest_root" {print $2}' "$telemetry")
-    weight=$(awk -F '\t' '$1 == "heaviest_root_weight_bytes" {print $2}' "$telemetry")
-    [ -n "$heaviest" ] && [ -f "$ROOT/$heaviest" ] || fail "partition $part did not name its heaviest root"
-    own=$(wc -c < "$ROOT/$heaviest" | tr -d '[:space:]')
-    [ "$weight" -gt "$own" ] || fail "partition $part weighed $heaviest by its own bytes, not its source tree"
-    overlaps=$(fm_lint_overlaps "$log")
-    assert_not_contains "$overlaps" "multi" "partition $part gave one ShellCheck process several roots"
-    [ -z "$(printf '%s\n' "$overlaps" | awk -v r="$heaviest" '$1 == r || $2 == r')" ] \
-      || fail "partition $part ran its heaviest root beside another root"
-  done
-  pass "each canonical partition weighs roots by followed sources and runs its heaviest root alone"
-}
-
 test_help_reports_the_complete_interface
 test_list_files_reports_the_shell_inventory
 test_canonical_partitions_preserve_full_lint
@@ -1566,9 +1909,15 @@ test_ignores_ambient_shellcheck_opts
 test_clean_fixture_passes
 test_jobs_are_deterministic_and_complete
 test_worker_trees_stop_on_signal
+test_root_deadline_names_the_root_and_reaps_the_tree
+test_root_memory_limit_reports_a_named_death
+test_memory_evidence_outranks_findings_and_signal_reasons
+test_source_excerpt_with_oom_text_stays_findings
+test_require_bounds_refuses_when_enforcement_is_missing
+test_pinned_shellcheck_memory_limit
+test_sidecar_result_exit_reflects_final_status
+test_roots_sidecar_records_per_root_lifecycle
 test_seeded_module_boundary_parity
-test_heavy_roots_run_alone
-test_partitions_run_their_heaviest_root_alone
 test_changed_mode_lints_only_the_changed_file
 test_ci_forces_full_lint_even_with_empty_diff
 test_main_branch_forces_full_lint
