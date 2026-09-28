@@ -912,19 +912,27 @@ exit 1
 SH
   chmod +x "$fakebin/gh"
 
+  # A declared login whose check fails stands for the login probe.
+  # A codex crew keeps the probe off this machine's real Claude login.
+  printf '%s\n' 'fixture login | * | false | sign in to the fixture' > "$case_dir/home/config/logins"
+  printf '%s\n' codex > "$case_dir/home/config/crew-harness"
+  export FM_LOGIN_CHECK=on
   all_out=$(PATH="$fakebin:$(fm_test_base_path_sans "$BASE_PATH" node)" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   assert_contains "$all_out" "MISSING: node (install:" "the unsplit run lost its local diagnostic"
   assert_contains "$all_out" "NEEDS_GH_AUTH" "the unsplit run lost its network diagnostic"
+  assert_contains "$all_out" "NEEDS_LOGIN: fixture login" "the unsplit run lost its login diagnostic"
 
   skip_out=$(PATH="$fakebin:$(fm_test_base_path_sans "$BASE_PATH" node)" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=skip "$ROOT/bin/fm-bootstrap.sh")
   assert_contains "$skip_out" "MISSING: node (install:" "the local half lost its own diagnostic"
   assert_not_contains "$skip_out" "NEEDS_GH_AUTH" "the local half still made a network call"
+  assert_not_contains "$skip_out" "NEEDS_LOGIN" "the local half still probed logins"
 
   only_out=$(PATH="$fakebin:$(fm_test_base_path_sans "$BASE_PATH" node)" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=only "$ROOT/bin/fm-bootstrap.sh")
   assert_contains "$only_out" "NEEDS_GH_AUTH" "the network half lost its own diagnostic"
+  assert_contains "$only_out" "NEEDS_LOGIN: fixture login" "the network half lost the login probe"
   assert_not_contains "$only_out" "MISSING: node" "the network half repeated the local half's work"
 
   combined=$(printf '%s\n%s\n' "$skip_out" "$only_out" | LC_ALL=C sort)
@@ -936,6 +944,7 @@ SH
   [ "$(PATH="$fakebin:$(fm_test_base_path_sans "$BASE_PATH" node)" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=sikp "$ROOT/bin/fm-bootstrap.sh")" = "$all_out" ] \
     || fail "an unrecognized FM_BOOTSTRAP_NETWORK value did not fall back to the complete run"
+  export FM_LOGIN_CHECK=off
   pass "bootstrap: FM_BOOTSTRAP_NETWORK partitions one run into local and network halves"
 }
 
@@ -1013,6 +1022,7 @@ test_network_phases_record_per_step_elapsed_times() {
 
   assert_present "$log" "the network phase recorded no elapsed times at all"
   assert_timing_record "$log" phase gh-auth '' "the GitHub auth probe was not timed"
+  assert_timing_record "$log" phase logins '' "the login probe was not timed"
   assert_timing_record "$log" phase secondmate-liveness '' "the dead-secondmate relaunch sweep was not timed"
   assert_timing_record "$log" phase secondmate-sync '' "the secondmate convergence sweep was not timed"
   assert_timing_record "$log" phase handoff-delivery '' "the pending handoff sweep was not timed"
