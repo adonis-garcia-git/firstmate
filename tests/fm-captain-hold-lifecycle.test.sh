@@ -1243,7 +1243,7 @@ test_external_wait_never_reads_as_a_captain_call() {
     || fail "a reclassified row could not become a captain call again"
   rc=0; run_captain "$home" open sample-misfiled-call >/dev/null 2>&1 || rc=$?
   expect_code 0 "$rc" "open sample-misfiled-call"
-  tasks_in "$home" done sample-teammate-wait >/dev/null || fail "could not close the wait fixture"
+  tasks_in "$home" "done" sample-teammate-wait >/dev/null || fail "could not close the wait fixture"
   if run_captain "$home" wait sample-teammate-wait --reason "Waiting on a teammate again" \
     > "$home/closed.out" 2> "$home/closed.err"; then
     fail "wait reopened a closed task"
