@@ -40,7 +40,6 @@
 #                                    state directory is unusable
 #        fm-keepawake.sh status      print `held pid=<pid> anchor=<pid>` or
 #                                    `released`
-#        fm-keepawake.sh release     drop this home's assertion, if any
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -169,7 +168,6 @@ with_lock() {
 
 case "${1:-}" in
   reconcile) with_lock reconcile ;;
-  release) with_lock release_recorded "$(assertion_tool || true)" ;;
   status)
     tool=$(assertion_tool) || tool=
     pid=$(record_value pid)

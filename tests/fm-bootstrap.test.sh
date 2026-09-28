@@ -1049,6 +1049,35 @@ test_network_phases_record_per_step_elapsed_times() {
   pass "bootstrap: each deferred network phase, secondmate, and clone records its own elapsed time"
 }
 
+# A slow login check must not spend the deferred stage's shared bound before the
+# safety sweeps start: the probe overlaps them, and its line is still replayed.
+test_login_probe_overlaps_the_network_sweeps() {
+  local case_dir fakebin log out overlap
+  case_dir="$TMP_ROOT/login-overlap"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/state" "$case_dir/home/data" "$case_dir/home/projects"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' codex > "$case_dir/home/config/crew-harness"
+  printf '%s\n' 'slow login | * | sleep 2; false | sign in slowly' > "$case_dir/home/config/logins"
+  printf '%s\n' $$ > "$case_dir/home/state/.lock"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  fm_write_secondmate_meta "$case_dir/home/state/mate-a.meta" "$case_dir/home"
+
+  log="$case_dir/timings.tsv"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=only FM_LOGIN_CHECK=on \
+    FM_BOOTSTRAP_NETWORK_LOCK_PID=$$ FM_TIMING_LOG="$log" FM_TIMING_EPOCH_MS=0 \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_contains "$out" "NEEDS_LOGIN: slow login (for all work; sign in: sign in slowly)" \
+    "the overlapped login probe's line was not replayed"
+  assert_timing_record "$log" phase logins '' "the overlapped login probe was not timed"
+  overlap=$(awk -F'\t' '
+    $2 == "phase" && $3 == "logins" { lend = $4 + $5 }
+    $2 == "phase" && $3 == "secondmate-liveness" { sweep = $4 }
+    END { print (lend != "" && sweep != "" && sweep < lend) ? "yes" : "no" }' "$log")
+  assert_equals "$overlap" yes "the liveness sweep waited for the login probe"$'\n'"$(cat "$log")"
+  pass "bootstrap: the login probe overlaps the network sweeps and its line is replayed"
+}
+
 test_tasks_axi_verdict_handoff_is_consumed_once() {
   local case_dir fakebin log out
   case_dir="$TMP_ROOT/tasks-axi-handoff"
@@ -1274,6 +1303,7 @@ test_routine_bootstrap_contract_runs_under_system_bash
 test_network_phase_partitions_the_run
 test_network_sweeps_recheck_lock_ownership
 test_network_phases_record_per_step_elapsed_times
+test_login_probe_overlaps_the_network_sweeps
 test_tasks_axi_verdict_handoff_is_consumed_once
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation

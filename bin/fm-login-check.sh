@@ -30,9 +30,12 @@
 #     login.
 #   - Worker accounts, built in: the Claude worker account is checked when
 #     config/claude-account pins one or the crew harness is claude, and each
-#     provider config/pi-account declares is checked for Pi workers. Both reuse
-#     bin/fm-worker-account-lib.sh's launch-time sign-in check, so this reports
-#     exactly what a spawn would refuse.
+#     provider config/pi-account declares is checked for Pi workers. A pinned
+#     account reuses bin/fm-worker-account-lib.sh's launch-time sign-in check,
+#     so it reports exactly what a spawn would refuse. An unpinned Claude
+#     worker inherits this session's environment, so it is checked with
+#     `claude auth status` under that same environment, which counts API-key,
+#     OAuth-token, and Bedrock or Vertex sign-ins exactly as the worker will.
 # FM_LOGIN_CHECK=off skips every check (the test suites set it so fixtures
 # never probe the machine's real logins).
 # Every check is bounded: FM_LOGIN_CHECK_SECONDS (default 20) per config/logins
@@ -171,11 +174,11 @@ check_claude_worker_account() {
     fi
     declared=${resolved%%$'\t'*}
     root=${resolved#*$'\t'}; root=${root%%$'\t'*}
+    fm_worker_account_check claude "$declared" "$root" claude >/dev/null 2>&1 && return 0
   else
-    declared=${CLAUDE_CONFIG_DIR:-ordinary}
     root=${CLAUDE_CONFIG_DIR:-}
+    fm_run_timed "$FM_WORKER_ACCOUNT_CHECK_SECONDS" claude auth status </dev/null >/dev/null 2>&1 && return 0
   fi
-  fm_worker_account_check claude "$declared" "$root" claude >/dev/null 2>&1 && return 0
   if [ -n "$root" ]; then
     MISSING+=("Claude worker account $root (sign in: CLAUDE_CONFIG_DIR=$root claude, then /login)")
   else

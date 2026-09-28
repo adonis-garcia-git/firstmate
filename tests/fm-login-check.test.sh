@@ -110,6 +110,32 @@ SH
   pass "the Claude worker account is checked exactly as a spawn would check it"
 }
 
+test_unpinned_claude_worker_uses_the_inherited_environment() {
+  local home out
+  home=$(make_home claude-unpinned)
+  printf '%s\n' claude > "$home/config/crew-harness"
+  cat > "$home/fakebin/claude" <<'SH'
+#!/usr/bin/env bash
+[ "$1 $2" = "auth status" ] || exit 64
+[ -n "${ANTHROPIC_API_KEY:-}" ]
+SH
+  chmod +x "$home/fakebin/claude"
+  out=$(ANTHROPIC_API_KEY=test-key run_check "$home") || fail "the login probe failed with an API-key worker"
+  assert_equals "$out" "" "an unpinned worker signed in through the inherited environment was reported"
+  out=$(env -u ANTHROPIC_API_KEY PATH="$home/fakebin:$PATH" FM_LOGIN_CHECK=on FM_HOME="$home" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_CONFIG_OVERRIDE="$home/config" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" "$CHECK") || fail "the login probe failed with a signed-out worker"
+  assert_equals "$out" "NEEDS_LOGIN: Claude worker account (sign in: env -u CLAUDE_CONFIG_DIR claude, then /login)" \
+    "a signed-out unpinned Claude worker account was not asked for"
+  printf '%s\n' "$home/claude-pin" > "$home/config/claude-account"
+  mkdir -p "$home/claude-pin"
+  out=$(ANTHROPIC_API_KEY=test-key run_check "$home") || fail "the login probe failed with a Claude pin"
+  assert_contains "$out" "NEEDS_LOGIN: Claude worker account $home/claude-pin" \
+    "a pinned account was credited with the session's environment a pinned spawn drops"
+  pass "an unpinned Claude worker is checked with the environment it inherits, a pinned one without it"
+}
+
 test_only_todays_logins_are_checked_and_asked_in_one_line
 test_timeouts_are_unconfirmed_not_signed_in
 test_claude_worker_account_is_checked
+test_unpinned_claude_worker_uses_the_inherited_environment
