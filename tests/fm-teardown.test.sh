@@ -719,6 +719,13 @@ test_teardown_releases_the_idle_sleep_assertion() {
   ln -s "$(command -v bash)" "$case_dir/claude"
   "$case_dir/claude" -c 'sleep 300; :' </dev/null >/dev/null 2>&1 &
   anchor=$!
+  # Until the fork has exec'd it is still bash, not a harness the lock accepts.
+  i=0
+  while [ "$i" -lt 100 ]; do
+    case "$(ps -o args= -p "$anchor" 2>/dev/null)" in *"-c sleep 300"*) break ;; esac
+    sleep 0.05
+    i=$((i + 1))
+  done
   printf '%s\n' "$anchor" > "$case_dir/state/.lock"
   FM_KEEPAWAKE=on FM_KEEPAWAKE_BIN="$tool" FM_STATE_OVERRIDE="$case_dir/state" \
     "$ROOT/bin/fm-keepawake.sh" reconcile || fail "keepawake-release: could not take the assertion"

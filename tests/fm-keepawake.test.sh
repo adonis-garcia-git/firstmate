@@ -38,11 +38,22 @@ trap 'cleanup_spawned; fm_test_cleanup' EXIT
 # A live process whose command name is claude, standing in for the session.
 # Sets HARNESS_PID rather than printing it: a command substitution would record
 # the pid in a subshell's SPAWNED and leak the process past cleanup.
+# It returns only once the child has exec'd as claude: until then the fork
+# still carries this script's EXIT-trap signal handling, so a prompt kill is
+# swallowed (and `reap` would wait out the whole sleep), and a lock check would
+# see bash rather than a harness.
 HARNESS_PID=
 start_harness() {
+  local i=0
   "$HARNESS_BIN/claude" -c 'sleep 300; :' </dev/null >/dev/null 2>&1 &
   HARNESS_PID=$!
   SPAWNED+=("$HARNESS_PID")
+  while [ "$i" -lt 100 ]; do
+    case "$(ps -o args= -p "$HARNESS_PID" 2>/dev/null)" in *"-c sleep 300"*) return 0 ;; esac
+    sleep 0.05
+    i=$((i + 1))
+  done
+  fail "the fake session never started"
 }
 
 make_home() {  # <name> <anchor-pid-or-empty>
