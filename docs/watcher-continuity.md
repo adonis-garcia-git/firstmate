@@ -217,8 +217,10 @@ It mints a fresh generation so buried decisions still resurface once.
 
 ### Generation reuse
 
-Every watcher close and every durable queue append publishes downtime.
-So a downtime republication of any pending episode reuses its generation instead of minting a new one, and an already-announced generation stays announced.
+An ordinary watcher close attempts to publish downtime, and every durable queue append publishes it.
+A handling successor closing to resurface recovery preserves the existing marker instead.
+If EXIT cleanup cannot acquire the downtime-marker lock within its bound, it retains the stale singleton for the next arm to publish the missing downtime before clearing that lock (see [Grace, beacon, and stop signals](#grace-beacon-and-stop-signals)).
+A downtime republication of any pending episode reuses its generation instead of minting a new one, and an already-announced generation stays announced.
 That reuse keeps a watcher close inside the handling window from orphaning the acknowledgement already presented and from trapping later arms in repeated recovery presentation.
 
 ### What an acknowledgement retires
@@ -312,14 +314,16 @@ If a branch offer loses the claim race to main, it rejects its settlement so the
 
 [`pi-supervision-branch.md`](pi-supervision-branch.md#components-and-their-owners) owns branch eligibility, mixed-queue dispatch, the pre-drain recheck, and heartbeat's all-or-nothing rule.
 
-A check-kind row is main-owned in every mode, including a heartbeat review.
+While attended, a check-kind row is main-owned, including a heartbeat review.
 So it is never part of a branch claim and never defers one.
 Main is woken for it on that check's own triggering close.
+Under the away-posture record the exclusion lifts and a check row is offered to and claimed by the branch like every other actionable row.
 
 `fm-wake-drain.sh` never reclassifies a row itself.
 It filters the queue to the current actor's opaque claim before same-key deduplication, then presents and acknowledges only that actor-local view.
 A missing or empty branch snapshot is refused loudly rather than read as "nothing eligible", because reaching the drain without the non-empty handoff promised by the extension is a wiring bug.
-Because branch claims contain no check-kind rows, a branch acknowledgement skips check-specific receipt scans.
+A branch acknowledgement retires the check-row receipts - inactive-outcome, inactive-reconcile notice, and secondmate stall - of exactly the granted sequences it consumes, so a branch-consumed check is never re-queued by its producer.
+Attended, a grant names no check row and each scan finds nothing.
 
 ### Per-actor regression tests
 
@@ -336,6 +340,8 @@ The same suite pins the counted-equals-presentable invariant against `bin/fm-gua
 - A branch-held row raises the held advisory rather than the ordinary queued-wake warning for main.
 - That row is presented with its acknowledgement command - with the ordinary warning restored - as soon as the grant clears.
 - Structurally unusable rows are retired by main alone while every remaining row stays presentable and acknowledgeable.
+
+Branch acknowledgement retiring the check-row receipts of exactly its granted sequences is pinned by `tests/fm-wake-queue.test.sh` for the secondmate stall receipt and by `tests/fm-inactive-reconcile.test.sh` for the inactive-outcome receipt.
 
 `tests/fm-pi-branch-extension.test.sh` pins extension-side classification, claim publication and release, and the pre-drain recheck.
 
@@ -390,6 +396,9 @@ An arm whose own script path sits under a disposable no-mistakes validation chec
 Once per poll the watcher checks that its home, its state directory, and its own code root still exist, and exits with a logged reason when one is gone, scoped to itself alone, so a torn-down temporary home or a discarded checkout never leaves an orphan watcher behind.
 The watcher uses bash's native fatal handling for HUP and TERM, including during a blocked poll, so both run its EXIT cleanup.
 `watcher_stop_signals` in `bin/fm-watch.sh` owns the signal-handling rationale.
+The EXIT cleanup bounds its wait for `state/.watcher-down.lock` while persisting recovery state with `FM_WATCHER_CLEANUP_LOCK_BOUND` (default 2 seconds).
+Only positive decimal integers are accepted, including leading-zero forms such as `08`; empty, non-numeric, and zero values (including `00`) fall back to 2 seconds.
+A live foreign holder therefore cannot strand a TERM'd watcher in this marker-lock wait: on timeout the recovery transition fails without releasing the singleton, leaving dead-pid stale evidence for the next arm to republish and clear.
 
 ## Regression coverage
 
@@ -441,7 +450,8 @@ They also prove that a legacy or handoff-phase watcher marker from an absent rep
 - A handling successor that must surface a real crew event instead of going blind.
 
 `tests/fm-watch-triage.test.sh` proves TERM stops a watcher blocked inside a poll's pane capture and still releases its lock and records an acknowledgeable stop.
-It also checks that a newly appended keyed decision is classified without rereading earlier status bytes, so signal handling can return to the watcher's beacon refresh even when the status history is long.
+It also exercises a single TERM with a live foreign downtime-marker lock holder, retained stale singleton and subsequent arm-style recovery, including decimal `08` and zero `00` cleanup bounds.
+It checks that a newly appended keyed decision is classified without rereading earlier status bytes, so signal handling can return to the watcher's beacon refresh even when the status history is long.
 
 `tests/fm-watcher-lock.test.sh` covers:
 

@@ -71,7 +71,7 @@ Refresh the hints whenever the serial lane gains scripts, rather than waiting fo
 
 `bin/fm-test-run.sh` owns the per-shard packing, so its `--check-coverage` output is the current account of lane size and coverage rather than a copied inventory.
 Nine serial runners pack the refreshed measurements into a longest modeled script sum of 697969 ms (11m38s), with other shards near 10m36s.
-In this fork the seven fork-only serial scripts, six of them unhinted at that default weight, fill the other eight shards to within 0.1 s of that floor, so every fork shard models about 11m38s.
+In this fork the seven fork-only serial scripts, six of them unhinted at that default weight, add about 2m50s of modeled work that lifts every fork shard past that floor to about 11m53s, so in the fork the longest script below shares its shard with smaller scripts rather than occupying it alone.
 The longest script, `tests/fm-watch-triage.test.sh`, legitimately occupies one whole shard and is the indivisible floor for this layout.
 This is a packing estimate, not measured new-workflow execution or an end-to-end latency guarantee.
 Job timeouts remain hang tripwires under the policy in [Timeouts](#timeouts) below; they are not the desired healthy duration.
@@ -108,9 +108,10 @@ Portable shards, each portable serial shard, and the Herdr lane upload runner-ge
 
 ## Lint partitions and end-to-end latency
 
-`bin/fm-lint.sh` owns two canonical CI partitions, each running the same full source-aware ShellCheck analysis under the memory-bounded schedule its header owns, pinned versions, workflow validation, and backend-purity checks.
+`bin/fm-lint.sh` owns two canonical CI partitions, each running full source-aware ShellCheck analysis, workflow validation, and backend-purity checks.
+CI requires its per-root bounds, so an unenforceable deadline or address-space limit refuses lint rather than running uncapped; the script header owns the envelope and per-root execution contract.
 Its `--list-files` interface exposes partition membership; `tests/fm-lint.test.sh` verifies complete/disjoint executed roots and unchanged analysis flags.
-The workflow uploads each partition's quiet telemetry to distinguish analysis cost, memory use, and host contention.
+The workflow uploads each partition's quiet telemetry plus its per-root lifecycle sidecar to distinguish analysis cost, memory use, and host contention.
 No fast mode, path skips, reduced checks, or paid runner provisioning is part of this layout.
 
 The performance objective is a complete green run under fifteen minutes including start delay: roughly twelve minutes of longest-path execution, at most two minutes of runner delay, and less than one minute of other overhead.
