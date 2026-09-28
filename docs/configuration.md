@@ -875,7 +875,7 @@ A remote secondmate is launched on its host from its own home's configuration, s
 ## Session-start login check (config/logins)
 
 Each locked session start checks, in its deferred network stage, the logins the day's work needs and asks for every missing one in a single `NEEDS_LOGIN:` line, so a worker does not stop mid-task on an expired login.
-The Claude worker account is always part of that check when Claude workers are in use, as is each provider `config/pi-account` declares, using the same sign-in check a spawn performs.
+The Claude worker account is always part of that check when Claude workers are in use, as is each provider `config/pi-account` declares: a pinned account uses the same sign-in check a spawn performs, and an unpinned Claude worker is checked under the session environment it inherits.
 Other logins are declared per project in the optional, local, gitignored `config/logins`, one per line:
 
 ```text
