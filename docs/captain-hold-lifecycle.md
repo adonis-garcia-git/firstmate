@@ -374,6 +374,7 @@ It preserves every captain hold in the bounded queued inventory of the owning ho
 `--all-decisions` reveals every captain hold available within the remote-summary bound and drops its gate.
 An available hold is therefore never in both Captain's Call and Charted Next.
 An actively worked held task may also appear in Underway, which reports running work independently of those decision buckets.
+A task held through `bin/fm-captain-hold.sh wait` carries hold kind `external`, has no `hold_bucket`, and renders only as a Charted Next gate naming its reason, even under `--all-decisions`; `tests/fm-captain-hold-lifecycle.test.sh` pins that placement and the reclassification of a live captain hold.
 
 ### Accepted limits
 

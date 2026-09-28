@@ -9,7 +9,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | --- | --- |
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
-| Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
+| Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [session-start login check](#session-start-login-check-configlogins), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
@@ -871,6 +871,19 @@ Pins are not inherited into secondmate homes: a local secondmate agent launches 
 A remote secondmate is launched on its host from its own home's configuration, so create the file in that remote home.
 
 [`bin/fm-worker-account-lib.sh`](../bin/fm-worker-account-lib.sh) owns parsing, the sign-in check, and the full list of credentials a Claude launch unsets; [runtime backend verification](verification/runtime-backends.md#worker-account-pin-sign-in-check) records the check against the real runners.
+
+## Session-start login check (config/logins)
+
+Each locked session start checks, in its deferred network stage, the logins the day's work needs and asks for every missing one in a single `NEEDS_LOGIN:` line, so a worker does not stop mid-task on an expired login.
+The Claude worker account is always part of that check when Claude workers are in use, as is each provider `config/pi-account` declares: a pinned account uses the same sign-in check a spawn performs, and an unpinned Claude worker is checked under the session environment it inherits.
+Other logins are declared per project in the optional, local, gitignored `config/logins`, one per line:
+
+```text
+gcloud | heva-ai-backend,heva-web | gcloud auth print-access-token --quiet | gcloud auth login
+```
+
+A line is checked only when one of its projects has live or dispatch-ready work, or when its projects field is `*`.
+[`bin/fm-login-check.sh`](../bin/fm-login-check.sh) owns the line format, what counts as today's work, and the check bounds.
 
 ## Lavish server address (config/lavish-axi-host)
 
@@ -2301,7 +2314,9 @@ FM_STARTUP_NETWORK_TIMEOUT=120   # seconds bounding the deferred inactive-outcom
 FM_TASKS_AXI_COMPATIBLE=   # internal one-hop handoff of an already-computed tasks-axi compatibility verdict (0 or 1); consumed when bin/fm-tasks-axi-lib.sh is sourced
 FM_GUARD_READ_ONLY=0    # internal/read-only guard mode: keep alarms but suppress drain, supervision repair, and checkout repair commands
 FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the guarded operation WILL still run.'   # banner continuation line; fm-send.sh overrides it to name the requested message specifically
+FM_LOGIN_CHECK=on       # off skips the session-start login probe (bin/fm-login-check.sh); FM_LOGIN_CHECK_SECONDS=20 bounds each config/logins check
 FM_POLL=15              # seconds between watcher poll cycles
+FM_KEEPAWAKE=on         # off stops the watcher holding a macOS idle-sleep assertion (caffeinate -i) while this home has live work; FM_KEEPAWAKE_BIN substitutes the assertion tool in tests; bin/fm-keepawake.sh owns the contract
 FM_HOME_SUMMARY_INTERVAL=300   # seconds before a live watcher refreshes this home's state/home-summary.json even without a status signal; invalid or zero values use 300
 FM_HOME_SUMMARY_TIMEOUT=60     # seconds bounding the complete best-effort home-summary refresh, including lock acquisition, validation, atomic publication, and worker-side failure logging; invalid or zero values use 60
 FM_HOME_SUMMARY_ERROR_LOG_MAX_BYTES=65536   # approximate size cap for state/.home-summary-refresh.log before it is trimmed to the newest 200 lines; invalid or zero values use 65536

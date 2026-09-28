@@ -58,6 +58,17 @@ export FM_GATE_REFUSE_BYPASS=1
 # explicit epoch.
 export FM_SYSTEM_WAKE_EPOCH_OVERRIDE=0
 
+# Keep fixtures from taking a real idle-sleep assertion (bin/fm-keepawake.sh).
+# A watcher or cleanup fixture can record a live harness pid - the session
+# running this suite - as its lock owner, so a real caffeinate would outlive
+# the fixture home until that session exits. tests/fm-keepawake.test.sh turns
+# it back on against a fake assertion tool.
+export FM_KEEPAWAKE=off
+
+# Keep bootstrap fixtures from probing this machine's real logins
+# (bin/fm-login-check.sh); tests/fm-login-check.test.sh turns it back on.
+export FM_LOGIN_CHECK=off
+
 # The Pi/opencode extension suites import .ts modules with bare node. Node
 # 22.6-23.5 supports TypeScript type stripping only behind
 # --experimental-strip-types (default from 23.6), so on those versions every

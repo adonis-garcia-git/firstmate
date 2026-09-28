@@ -95,8 +95,8 @@
 #   .startup-network.timings  per-step elapsed times for the last run, in
 #                             bin/fm-timing-lib.sh's tab-separated format: the
 #                             stage total, one record per network phase (gh auth,
-#                             secondmate liveness, secondmate convergence, handoff
-#                             delivery, fleet sync), one per secondmate for the
+#                             logins, secondmate liveness, secondmate convergence,
+#                             handoff delivery, fleet sync), one per secondmate for the
 #                             remote-touching steps (id and host), and one per
 #                             project clone. Published for a timed-out or failed
 #                             run too, where a partial record is the answer.
@@ -223,8 +223,8 @@ worker_alive() {
 # confirmed yet" is always answerable from the status record alone.
 phase_label() {  # <phases>
   case "$1" in
-    probe) printf 'GitHub authentication' ;;
-    probe,sweeps) printf 'GitHub authentication, dead-secondmate relaunch, secondmate convergence, pending handoff delivery, project clone refresh with its drift reporting, and inactive terminal-outcome reconciliation' ;;
+    probe) printf 'GitHub authentication and login checks' ;;
+    probe,sweeps) printf 'GitHub authentication, login checks, dead-secondmate relaunch, secondmate convergence, pending handoff delivery, project clone refresh with its drift reporting, and inactive terminal-outcome reconciliation' ;;
     *) printf 'the deferred network checks' ;;
   esac
 }

@@ -8,6 +8,7 @@
 #          Lines: "MISSING: <tool> (install: <command>)",
 #                 "PRESENTATION_UNAVAILABLE: lavish-axi (requires >=<floor>; install: <command>) - nonvisual work may proceed with plain-text decisions and reports; install or upgrade before using Lavish",
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
+#                 "NEEDS_LOGIN: <login> (<detail>; sign in: <how>); ...",
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
@@ -121,14 +122,18 @@
 #                 step. Unrecognized values fall back here on purpose: a typo
 #                 must never silently skip a safety sweep.
 #            skip - every LOCAL step, and none of the network ones. Skips
-#                 `gh auth status`, secondmate_liveness_sweep, secondmate_sync,
+#                 `gh auth status`, the bin/fm-login-check.sh login probe,
+#                 secondmate_liveness_sweep, secondmate_sync,
 #                 secondmate_handoff_resume, fleet_sync, and pr_reconcile_sweep.
 #            only - ONLY those network steps and nothing else. No tool detection,
 #                 no version floors, no tangle check, no backlog
 #                 reconciliation, no x_mode_setup: those already ran on the
 #                 local pass.
 #          FM_BOOTSTRAP_DETECT_ONLY composes with it unchanged, so `only` plus
-#          detect-only is the read-only `gh auth status` probe on its own.
+#          detect-only is the read-only `gh auth status` and login probes on
+#          their own. The login probe prints at most one NEEDS_LOGIN line naming
+#          every login today's work needs that is not signed in;
+#          bin/fm-login-check.sh owns what it checks.
 #          bin/fm-startup-network.sh owns the deferral: it runs the `only` phase
 #          in a detached bounded worker and publishes the result. This file stays
 #          the single owner of every sweep, and the split changes only WHEN each
@@ -1541,11 +1546,24 @@ detect_home_summary_publication() {
 # The stamp variable is named for the library rather than `start` on purpose:
 # fleet_sync and others assign plain names like `start` without `local`, and
 # bash's dynamic scoping would let them overwrite a stamp held by a caller.
+# The login probe overlaps the sweeps too, so slow login checks never spend the
+# stage's shared bound before the safety sweeps start. It writes its single
+# line straight to stdout the moment it finishes, so its position varies and a
+# stage timeout cannot drop a line it already printed.
+login_probe() {
+  __fm_timing_stamp=$(fm_timing_now_ms)
+  FM_HOME="$FM_HOME" FM_CONFIG_OVERRIDE="$CONFIG" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    "$SCRIPT_DIR/fm-login-check.sh" </dev/null 2>/dev/null || true
+  fm_timing_record phase logins "$__fm_timing_stamp"
+}
 local_phase && detect_local_tools
+login_probe_pid=
 if network_phase; then
   __fm_timing_stamp=$(fm_timing_now_ms)
   gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
   fm_timing_record phase gh-auth "$__fm_timing_stamp"
+  login_probe &
+  login_probe_pid=$!
 fi
 local_phase && detect_local_config
 
@@ -1607,5 +1625,6 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
     fm_timing_record phase pr-reconcile "$__fm_timing_stamp"
   fi
 fi
+[ -z "$login_probe_pid" ] || wait "$login_probe_pid" || true
 local_phase && secondmate_handoff_detect
 exit 0

@@ -1158,6 +1158,132 @@ EOF
   pass "a deferred captain call leaves the live Captain's Call until its date and stays answerable"
 }
 
+# Work that waits on a teammate or an external event is filed through `wait`,
+# which records hold kind external: it never counts as a captain call on any
+# surface, and a live captain hold that turns out to wait on someone else is
+# reclassified with its evidence recorded rather than closed.
+test_external_wait_never_reads_as_a_captain_call() {
+  local home json show out rc origin=sample-waits-review
+  home=$(make_home external-wait)
+  tasks_in "$home" add sample-existing-work "Ship the sample export" --kind ship --repo sample >/dev/null \
+    || fail "could not create the existing work fixture"
+
+  out=$(run_captain "$home" wait sample-teammate-wait --title "Deploy the sample credential" \
+    --reason "Waiting on a teammate to publish the sample credential" --repo sample) \
+    || fail "wait could not create an external wait"
+  assert_equals "$out" "waiting: sample-teammate-wait" "wait did not report the new external wait"
+  run_captain "$home" wait sample-existing-work \
+    --reason "Waiting on the vendor sandbox to come back" --until 2026-08-01 >/dev/null \
+    || fail "wait could not hold existing work"
+  run_captain "$home" wait sample-existing-work \
+    --reason "Waiting on the vendor sandbox to come back" --until 2026-08-01 >/dev/null \
+    || fail "an idempotent wait retry failed"
+  show=$(tasks_in "$home" show sample-teammate-wait --full)
+  assert_contains "$show" "hold_kind: external" "the new wait was not held as external"
+  assert_not_contains "$show" "kind: captain" "the new wait was created as a captain row"
+  show=$(tasks_in "$home" show sample-existing-work --full)
+  assert_contains "$show" "hold_kind: external" "the existing work was not held as external"
+  assert_contains "$show" "hold_until: 2026-08-01" "the wait lost its date"
+  assert_not_contains "$show" "Captain hold set:" "an external wait was stamped as a captain hold"
+
+  if run_captain "$home" wait sample-bad-wait --title "Bad" --reason "Waiting on a teammate (soon)" \
+    > "$home/paren.out" 2> "$home/paren.err"; then
+    fail "wait accepted a reason tasks-axi cannot store"
+  fi
+  rc=0; run_captain "$home" open sample-teammate-wait >/dev/null 2>&1 || rc=$?
+  expect_code 1 "$rc" "open sample-teammate-wait"
+  printf 'Go ahead.\n' > "$home/decision.txt"
+  if run_captain "$home" answer sample-teammate-wait --decision-file "$home/decision.txt" \
+    > "$home/answer.out" 2> "$home/answer.err"; then
+    fail "answer recorded a captain decision on an external wait"
+  fi
+
+  # A live captain call that turns out to wait on someone else is reclassified.
+  mkdir -p "$home/data/$origin"
+  write_origin_meta "$home" "$origin"
+  run_captain "$home" hold sample-misfiled-call --title "Publish the sample image" \
+    --reason "captain call pending" --repo sample --origin "$origin" >/dev/null \
+    || fail "could not hold the misfiled captain call"
+  run_captain "$home" complete "$origin" sample-misfiled-call >/dev/null \
+    || fail "could not attest the misfiled call's inventory"
+  out=$(run_captain "$home" wait sample-misfiled-call \
+    --reason "Waiting on a teammate to repair the sample publisher") \
+    || fail "wait could not reclassify a live captain hold"
+  assert_equals "$out" "reclassified: sample-misfiled-call" "wait did not report the reclassification"
+  show=$(tasks_in "$home" show sample-misfiled-call --full)
+  assert_contains "$show" "hold_kind: external" "the reclassified call is still the captain's"
+  assert_contains "$show" "state: queued" "reclassification closed the task"
+  assert_contains "$show" "Resolution mode: reclassified" "reclassification left no record"
+  assert_contains "$show" "Reclassification evidence:" "the record reads as the captain's own words"
+  assert_not_contains "$show" "Captain decision:" "the record claims a captain decision"
+  assert_not_contains "$show" "Captain hold set:" "the reclassified row kept its captain hold stamp"
+  run_captain "$home" wait sample-misfiled-call \
+    --reason "Waiting on a teammate to repair the sample publisher" >/dev/null \
+    || fail "a repeated wait on the reclassified row failed"
+  [ "$(tasks_in "$home" show sample-misfiled-call --full | grep -c 'Resolution recorded by fm-captain-hold.')" = 1 ] \
+    || fail "a repeated wait wrote a second reclassification record"
+  rc=0; run_captain "$home" open sample-misfiled-call >/dev/null 2>&1 || rc=$?
+  expect_code 1 "$rc" "open sample-misfiled-call"
+  run_captain "$home" verify "$origin" >/dev/null \
+    || fail "the completion gate lost a reclassified inventory entry"
+
+  json=$(run_bearings "$home") || fail "Bearings failed with external waits"
+  printf '%s' "$json" | jq -e '
+    ([.decisions_open[] | select(.id == "sample-teammate-wait" or .id == "sample-existing-work"
+                                 or .id == "sample-misfiled-call")] | length) == 0
+      and (.gates | any(.id == "sample-teammate-wait"))
+      and (.gates | any(.id == "sample-misfiled-call"))
+  ' >/dev/null || fail "an external wait surfaced as a captain decision: $json"
+  json=$(run_bearings "$home" --all-decisions) || fail "Bearings --all-decisions failed"
+  printf '%s' "$json" | jq -e '
+    [.decisions_open[] | select(.id == "sample-teammate-wait" or .id == "sample-misfiled-call")] | length == 0
+  ' >/dev/null || fail "--all-decisions revealed an external wait as a captain call: $json"
+
+  run_captain "$home" hold sample-misfiled-call --reason "captain call pending again" >/dev/null \
+    || fail "a reclassified row could not become a captain call again"
+  rc=0; run_captain "$home" open sample-misfiled-call >/dev/null 2>&1 || rc=$?
+  expect_code 0 "$rc" "open sample-misfiled-call"
+  tasks_in "$home" "done" sample-teammate-wait >/dev/null || fail "could not close the wait fixture"
+  if run_captain "$home" wait sample-teammate-wait --reason "Waiting on a teammate again" \
+    > "$home/closed.out" 2> "$home/closed.err"; then
+    fail "wait reopened a closed task"
+  fi
+  pass "an external wait never reads as a captain call, and a misfiled call is reclassified with evidence"
+}
+
+# In a secondmate home, reclassifying resolves the open parent decision, and a
+# later captain re-hold opens a distinct one.
+test_secondmate_reclassification_resolves_the_parent_decision() {
+  local parent mate fakebin channel
+  parent=$(make_home reclassify-parent)
+  mate="$TMP_ROOT/reclassify-mate-home"
+  mkdir -p "$mate/data" "$mate/state" "$mate/config" "$mate/projects"
+  cp "$ROOT/.tasks.toml" "$mate/.tasks.toml"
+  printf '# Synthetic secondmate home\n' > "$mate/AGENTS.md"
+  printf 'reclassify-mate\n' > "$mate/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" \
+    > "$mate/.fm-secondmate-parent"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$mate/data/backlog.md"
+  fakebin=$(fm_fakebin "$mate")
+  fm_fake_exit0 "$fakebin" tmux treehouse no-mistakes gh gh-axi
+  channel="$parent/state/reclassify-mate.status"
+
+  run_captain "$mate" hold mate-misfiled --title "Publish the mate image" \
+    --reason "captain call pending" --repo sample >/dev/null || fail "mate hold failed"
+  run_captain "$mate" wait mate-misfiled --reason "Waiting on a teammate to fix the publisher" >/dev/null \
+    || fail "mate reclassification failed"
+  assert_grep 'resolved [key=captain-hold-mate-misfiled-1]: captain hold mate-misfiled: waiting on others: Waiting on a teammate to fix the publisher' \
+    <(sed -E 's/ \[at=[0-9]+\]//' "$channel") "reclassification did not resolve the parent decision"
+  run_captain "$mate" wait mate-new-wait --title "Wait on the mate vendor" \
+    --reason "Waiting on the vendor" --repo sample >/dev/null || fail "mate external wait failed"
+  assert_no_grep 'mate-new-wait' "$channel" "an external wait was published as a captain decision"
+  run_captain "$mate" hold mate-misfiled --reason "captain call pending again" >/dev/null \
+    || fail "mate re-hold failed"
+  assert_grep 'needs-decision [key=captain-hold-mate-misfiled-2]: captain hold mate-misfiled: captain call pending again' \
+    <(sed -E 's/ \[at=[0-9]+\]//' "$channel") "a re-hold after reclassification reused the resolved key"
+  pass "a secondmate reclassification resolves its parent decision and a re-hold opens a new one"
+}
+
 # The recorded-answer guard survives an out-of-band close: a bare tasks-axi done
 # fails verify until answer records the captain's word, and an ordinary finished
 # task can never be dressed up as an answered captain call.
@@ -4043,6 +4169,8 @@ test_release_frees_held_work
 test_hold_stamp_precedes_hold_visibility
 test_interrupted_answer_preserves_hold_age
 test_deferral_leaves_captains_call_until_due
+test_external_wait_never_reads_as_a_captain_call
+test_secondmate_reclassification_resolves_the_parent_decision
 test_out_of_band_close_is_recordable
 test_visual_review_uses_shared_completion_owner
 test_none_inventory_and_resolved_prose_do_not_create_holds

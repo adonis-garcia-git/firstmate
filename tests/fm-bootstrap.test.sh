@@ -912,19 +912,27 @@ exit 1
 SH
   chmod +x "$fakebin/gh"
 
+  # A declared login whose check fails stands for the login probe.
+  # A codex crew keeps the probe off this machine's real Claude login.
+  printf '%s\n' 'fixture login | * | false | sign in to the fixture' > "$case_dir/home/config/logins"
+  printf '%s\n' codex > "$case_dir/home/config/crew-harness"
+  export FM_LOGIN_CHECK=on
   all_out=$(PATH="$fakebin:$(fm_test_base_path_sans "$BASE_PATH" node)" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   assert_contains "$all_out" "MISSING: node (install:" "the unsplit run lost its local diagnostic"
   assert_contains "$all_out" "NEEDS_GH_AUTH" "the unsplit run lost its network diagnostic"
+  assert_contains "$all_out" "NEEDS_LOGIN: fixture login" "the unsplit run lost its login diagnostic"
 
   skip_out=$(PATH="$fakebin:$(fm_test_base_path_sans "$BASE_PATH" node)" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=skip "$ROOT/bin/fm-bootstrap.sh")
   assert_contains "$skip_out" "MISSING: node (install:" "the local half lost its own diagnostic"
   assert_not_contains "$skip_out" "NEEDS_GH_AUTH" "the local half still made a network call"
+  assert_not_contains "$skip_out" "NEEDS_LOGIN" "the local half still probed logins"
 
   only_out=$(PATH="$fakebin:$(fm_test_base_path_sans "$BASE_PATH" node)" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=only "$ROOT/bin/fm-bootstrap.sh")
   assert_contains "$only_out" "NEEDS_GH_AUTH" "the network half lost its own diagnostic"
+  assert_contains "$only_out" "NEEDS_LOGIN: fixture login" "the network half lost the login probe"
   assert_not_contains "$only_out" "MISSING: node" "the network half repeated the local half's work"
 
   combined=$(printf '%s\n%s\n' "$skip_out" "$only_out" | LC_ALL=C sort)
@@ -936,6 +944,7 @@ SH
   [ "$(PATH="$fakebin:$(fm_test_base_path_sans "$BASE_PATH" node)" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=sikp "$ROOT/bin/fm-bootstrap.sh")" = "$all_out" ] \
     || fail "an unrecognized FM_BOOTSTRAP_NETWORK value did not fall back to the complete run"
+  export FM_LOGIN_CHECK=off
   pass "bootstrap: FM_BOOTSTRAP_NETWORK partitions one run into local and network halves"
 }
 
@@ -1013,6 +1022,7 @@ test_network_phases_record_per_step_elapsed_times() {
 
   assert_present "$log" "the network phase recorded no elapsed times at all"
   assert_timing_record "$log" phase gh-auth '' "the GitHub auth probe was not timed"
+  assert_timing_record "$log" phase logins '' "the login probe was not timed"
   assert_timing_record "$log" phase secondmate-liveness '' "the dead-secondmate relaunch sweep was not timed"
   assert_timing_record "$log" phase secondmate-sync '' "the secondmate convergence sweep was not timed"
   assert_timing_record "$log" phase handoff-delivery '' "the pending handoff sweep was not timed"
@@ -1037,6 +1047,63 @@ test_network_phases_record_per_step_elapsed_times() {
     "$ROOT/bin/fm-bootstrap.sh" >/dev/null 2>&1
   assert_absent "$log" "a run that never asked for timings recorded them anyway"
   pass "bootstrap: each deferred network phase, secondmate, and clone records its own elapsed time"
+}
+
+# A slow login check must not spend the deferred stage's shared bound before the
+# safety sweeps start: the probe overlaps them and still prints its line.
+test_login_probe_overlaps_the_network_sweeps() {
+  local case_dir fakebin log out overlap
+  case_dir="$TMP_ROOT/login-overlap"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/state" "$case_dir/home/data" "$case_dir/home/projects"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' codex > "$case_dir/home/config/crew-harness"
+  printf '%s\n' 'slow login | * | sleep 2; false | sign in slowly' > "$case_dir/home/config/logins"
+  printf '%s\n' $$ > "$case_dir/home/state/.lock"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  fm_write_secondmate_meta "$case_dir/home/state/mate-a.meta" "$case_dir/home"
+
+  log="$case_dir/timings.tsv"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=only FM_LOGIN_CHECK=on \
+    FM_BOOTSTRAP_NETWORK_LOCK_PID=$$ FM_TIMING_LOG="$log" FM_TIMING_EPOCH_MS=0 \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_contains "$out" "NEEDS_LOGIN: slow login (for all work; sign in: sign in slowly)" \
+    "the overlapped login probe's line was not printed"
+  assert_timing_record "$log" phase logins '' "the overlapped login probe was not timed"
+  overlap=$(awk -F'\t' '
+    $2 == "phase" && $3 == "logins" { lend = $4 + $5 }
+    $2 == "phase" && $3 == "secondmate-liveness" { sweep = $4 }
+    END { print (lend != "" && sweep != "" && sweep < lend) ? "yes" : "no" }' "$log")
+  assert_equals "$overlap" yes "the liveness sweep waited for the login probe"$'\n'"$(cat "$log")"
+  pass "bootstrap: the login probe overlaps the network sweeps and prints its line"
+}
+
+# The deferred stage is killed as a group at its bound and publishes what was
+# already printed, so a login line the probe finished must survive a sweep that
+# runs past that bound.
+test_login_line_survives_a_stage_timeout() {
+  local case_dir fakebin fake_root out
+  case_dir="$TMP_ROOT/login-stage-timeout"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/state" "$case_dir/home/projects"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' codex > "$case_dir/home/config/crew-harness"
+  printf '%s\n' 'fast login | * | false | sign in quickly' > "$case_dir/home/config/logins"
+  printf '%s\n' $$ > "$case_dir/home/state/.lock"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  fake_root="$case_dir/root"
+  mkdir -p "$fake_root/bin"
+  printf '#!/usr/bin/env bash\nsleep 30\n' > "$fake_root/bin/fm-fleet-sync.sh"
+  chmod +x "$fake_root/bin/fm-fleet-sync.sh"
+
+  out="$case_dir/stage.out"
+  ( . "$ROOT/bin/fm-timeout-lib.sh"
+    PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$fake_root" \
+      FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=only FM_LOGIN_CHECK=on \
+      FM_BOOTSTRAP_NETWORK_LOCK_PID=$$ FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=60 \
+      fm_run_timed 5 "$ROOT/bin/fm-bootstrap.sh" > "$out" 2>/dev/null ) && fail "the stage finished before its bound"
+  assert_contains "$(cat "$out")" "NEEDS_LOGIN: fast login (for all work; sign in: sign in quickly)" \
+    "a finished login probe's line was lost when the stage hit its bound"
+  pass "bootstrap: a finished login line survives the deferred stage hitting its bound"
 }
 
 test_tasks_axi_verdict_handoff_is_consumed_once() {
@@ -1264,6 +1331,8 @@ test_routine_bootstrap_contract_runs_under_system_bash
 test_network_phase_partitions_the_run
 test_network_sweeps_recheck_lock_ownership
 test_network_phases_record_per_step_elapsed_times
+test_login_probe_overlaps_the_network_sweeps
+test_login_line_survives_a_stage_timeout
 test_tasks_axi_verdict_handoff_is_consumed_once
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation

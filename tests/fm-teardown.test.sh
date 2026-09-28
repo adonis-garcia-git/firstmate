@@ -704,6 +704,44 @@ test_local_only_fork_remote_allows() {
   pass "local-only worktree with HEAD on a fork remote is torn down and the home summary is refreshed"
 }
 
+# Cleaning up the last live task drops the home's idle-sleep assertion at once,
+# because no watcher may be armed afterwards to notice the empty fleet.
+test_teardown_releases_the_idle_sleep_assertion() {
+  local case_dir anchor tool held i
+  case_dir=$(make_case keepawake-release)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+  tool="$case_dir/fake-caffeinate"
+  # shellcheck disable=SC2016 # The fake tool expands its own argument.
+  printf '%s\n' '#!/usr/bin/env bash' 'while kill -0 "$3" 2>/dev/null; do sleep 0.1; done' > "$tool"
+  chmod +x "$tool"
+  ln -s "$(command -v bash)" "$case_dir/claude"
+  "$case_dir/claude" -c 'sleep 300; :' </dev/null >/dev/null 2>&1 &
+  anchor=$!
+  # Until the fork has exec'd it is still bash, not a harness the lock accepts.
+  i=0
+  while [ "$i" -lt 100 ]; do
+    case "$(ps -o args= -p "$anchor" 2>/dev/null)" in *"-c sleep 300"*) break ;; esac
+    sleep 0.05
+    i=$((i + 1))
+  done
+  printf '%s\n' "$anchor" > "$case_dir/state/.lock"
+  FM_KEEPAWAKE=on FM_KEEPAWAKE_BIN="$tool" FM_STATE_OVERRIDE="$case_dir/state" \
+    "$ROOT/bin/fm-keepawake.sh" reconcile || fail "keepawake-release: could not take the assertion"
+  held=$(sed -n 's/^pid=//p' "$case_dir/state/.keepawake")
+  kill -0 "${held:-0}" 2>/dev/null || { kill "$anchor"; fail "keepawake-release: no assertion to release"; }
+
+  FM_KEEPAWAKE=on FM_KEEPAWAKE_BIN="$tool" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || { kill "$anchor"; fail "keepawake-release: teardown failed: $(cat "$case_dir/stderr")"; }
+  i=0
+  while [ "$i" -lt 50 ] && kill -0 "$held" 2>/dev/null; do sleep 0.1; i=$((i + 1)); done
+  kill "$anchor" 2>/dev/null || true; wait "$anchor" 2>/dev/null || true
+  ! kill -0 "$held" 2>/dev/null || { kill "$held"; fail "keepawake-release: the assertion outlived the last task's cleanup"; }
+  assert_absent "$case_dir/state/.keepawake" "keepawake-release: cleanup left the assertion record"
+  pass "cleaning up the last live task releases the idle-sleep assertion"
+}
+
 test_teardown_closes_the_backlog_item_itself() {
   local case_dir out
   case_dir=$(make_case tasks-axi-close)
@@ -4065,6 +4103,7 @@ test_forced_child_missing_adapter_sibling_refuses_before_cleanup
 test_forced_secondmate_own_missing_adapter_sibling_refuses_before_child_cleanup
 test_retained_sources_still_reach_the_ordinary_refusal
 test_local_only_fork_remote_allows
+test_teardown_releases_the_idle_sleep_assertion
 test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
