@@ -729,7 +729,7 @@ test_teardown_releases_the_idle_sleep_assertion() {
     || { kill "$anchor"; fail "keepawake-release: teardown failed: $(cat "$case_dir/stderr")"; }
   i=0
   while [ "$i" -lt 50 ] && kill -0 "$held" 2>/dev/null; do sleep 0.1; i=$((i + 1)); done
-  kill "$anchor" 2>/dev/null; wait "$anchor" 2>/dev/null
+  kill "$anchor" 2>/dev/null || true; wait "$anchor" 2>/dev/null || true
   ! kill -0 "$held" 2>/dev/null || { kill "$held"; fail "keepawake-release: the assertion outlived the last task's cleanup"; }
   assert_absent "$case_dir/state/.keepawake" "keepawake-release: cleanup left the assertion record"
   pass "cleaning up the last live task releases the idle-sleep assertion"
