@@ -1546,9 +1546,10 @@ detect_home_summary_publication() {
 # The stamp variable is named for the library rather than `start` on purpose:
 # fleet_sync and others assign plain names like `start` without `local`, and
 # bash's dynamic scoping would let them overwrite a stamp held by a caller.
-# The login probe overlaps the sweeps the same way, so slow login checks never
-# spend the stage's shared bound before the safety sweeps start; its line is
-# replayed once they finish.
+# The login probe overlaps the sweeps too, so slow login checks never spend the
+# stage's shared bound before the safety sweeps start. It writes its single
+# line straight to stdout the moment it finishes, so its position varies and a
+# stage timeout cannot drop a line it already printed.
 login_probe() {
   __fm_timing_stamp=$(fm_timing_now_ms)
   FM_HOME="$FM_HOME" FM_CONFIG_OVERRIDE="$CONFIG" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
@@ -1557,18 +1558,12 @@ login_probe() {
 }
 local_phase && detect_local_tools
 login_probe_pid=
-login_probe_out=
 if network_phase; then
   __fm_timing_stamp=$(fm_timing_now_ms)
   gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
   fm_timing_record phase gh-auth "$__fm_timing_stamp"
-  login_probe_out=$(mktemp "${TMPDIR:-/tmp}/fm-bootstrap-logins.XXXXXX") || login_probe_out=
-  if [ -n "$login_probe_out" ]; then
-    login_probe >"$login_probe_out" 2>&1 &
-    login_probe_pid=$!
-  else
-    login_probe
-  fi
+  login_probe &
+  login_probe_pid=$!
 fi
 local_phase && detect_local_config
 
@@ -1630,10 +1625,6 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
     fm_timing_record phase pr-reconcile "$__fm_timing_stamp"
   fi
 fi
-if [ -n "$login_probe_pid" ]; then
-  wait "$login_probe_pid" || true
-  cat "$login_probe_out"
-  rm -f "$login_probe_out"
-fi
+[ -z "$login_probe_pid" ] || wait "$login_probe_pid" || true
 local_phase && secondmate_handoff_detect
 exit 0

@@ -1050,7 +1050,7 @@ test_network_phases_record_per_step_elapsed_times() {
 }
 
 # A slow login check must not spend the deferred stage's shared bound before the
-# safety sweeps start: the probe overlaps them, and its line is still replayed.
+# safety sweeps start: the probe overlaps them and still prints its line.
 test_login_probe_overlaps_the_network_sweeps() {
   local case_dir fakebin log out overlap
   case_dir="$TMP_ROOT/login-overlap"
@@ -1068,14 +1068,42 @@ test_login_probe_overlaps_the_network_sweeps() {
     FM_BOOTSTRAP_NETWORK_LOCK_PID=$$ FM_TIMING_LOG="$log" FM_TIMING_EPOCH_MS=0 \
     "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
   assert_contains "$out" "NEEDS_LOGIN: slow login (for all work; sign in: sign in slowly)" \
-    "the overlapped login probe's line was not replayed"
+    "the overlapped login probe's line was not printed"
   assert_timing_record "$log" phase logins '' "the overlapped login probe was not timed"
   overlap=$(awk -F'\t' '
     $2 == "phase" && $3 == "logins" { lend = $4 + $5 }
     $2 == "phase" && $3 == "secondmate-liveness" { sweep = $4 }
     END { print (lend != "" && sweep != "" && sweep < lend) ? "yes" : "no" }' "$log")
   assert_equals "$overlap" yes "the liveness sweep waited for the login probe"$'\n'"$(cat "$log")"
-  pass "bootstrap: the login probe overlaps the network sweeps and its line is replayed"
+  pass "bootstrap: the login probe overlaps the network sweeps and prints its line"
+}
+
+# The deferred stage is killed as a group at its bound and publishes what was
+# already printed, so a login line the probe finished must survive a sweep that
+# runs past that bound.
+test_login_line_survives_a_stage_timeout() {
+  local case_dir fakebin fake_root out
+  case_dir="$TMP_ROOT/login-stage-timeout"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/state" "$case_dir/home/projects"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' codex > "$case_dir/home/config/crew-harness"
+  printf '%s\n' 'fast login | * | false | sign in quickly' > "$case_dir/home/config/logins"
+  printf '%s\n' $$ > "$case_dir/home/state/.lock"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  fake_root="$case_dir/root"
+  mkdir -p "$fake_root/bin"
+  printf '#!/usr/bin/env bash\nsleep 30\n' > "$fake_root/bin/fm-fleet-sync.sh"
+  chmod +x "$fake_root/bin/fm-fleet-sync.sh"
+
+  out="$case_dir/stage.out"
+  ( . "$ROOT/bin/fm-timeout-lib.sh"
+    PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$fake_root" \
+      FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_NETWORK=only FM_LOGIN_CHECK=on \
+      FM_BOOTSTRAP_NETWORK_LOCK_PID=$$ FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=60 \
+      fm_run_timed 5 "$ROOT/bin/fm-bootstrap.sh" > "$out" 2>/dev/null ) && fail "the stage finished before its bound"
+  assert_contains "$(cat "$out")" "NEEDS_LOGIN: fast login (for all work; sign in: sign in quickly)" \
+    "a finished login probe's line was lost when the stage hit its bound"
+  pass "bootstrap: a finished login line survives the deferred stage hitting its bound"
 }
 
 test_tasks_axi_verdict_handoff_is_consumed_once() {
@@ -1304,6 +1332,7 @@ test_network_phase_partitions_the_run
 test_network_sweeps_recheck_lock_ownership
 test_network_phases_record_per_step_elapsed_times
 test_login_probe_overlaps_the_network_sweeps
+test_login_line_survives_a_stage_timeout
 test_tasks_axi_verdict_handoff_is_consumed_once
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation
