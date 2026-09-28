@@ -22,6 +22,8 @@
 # Usage:
 #   fm-captain-hold.sh hold <task-id> --reason <reason> \
 #     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD]
+#   fm-captain-hold.sh wait <task-id> --reason <who or what it waits on> \
+#     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD]
 #   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release]
 #   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] --source <provenance>   (keyed answers on stdin)
 #   fm-captain-hold.sh reconcile-requests --source-id <source-id> --source <provenance>   (task ids on stdin)
@@ -52,6 +54,21 @@
 # `--until` records the captain's own deferral date through `tasks-axi hold
 # --until`, so a "revisit later" answer is stored as a date instead of a live
 # card.
+#
+# `wait` is the one filing path for work that waits on a teammate or an
+# external event rather than on the captain. It takes the same row arguments as
+# `hold` but records tasks-axi hold kind `external`, which no captain surface
+# counts as a decision: Bearings shows it as a Charted Next gate naming its
+# reason, and `open`, `answer`, and the decision digest all treat it as not the
+# captain's. A row it creates carries no task kind. On a task that is a live
+# captain hold, `wait` reclassifies instead of closing: it writes a
+# `reclassified` resolution record whose `Reclassification evidence:` is the
+# reason, re-holds the task as external, drops the hold-set stamp, and resolves
+# the open parent-channel decision; an exact retry finishes an interrupted
+# reclassification. That record keeps the completion gate's inventory durable
+# and gives a later captain re-hold its own occurrence. A closed task is
+# refused, and re-running `wait` on an external wait only updates its reason
+# and date.
 #
 # `answer` records the captain's exact words and resolves the call in the same
 # act. It requires a non-empty captain decision file of at most 8192 bytes and
@@ -186,8 +203,8 @@
 # one captain call. See "record divergence" beside command_diverged below.
 #
 # Resolution records: the block written into the body names this script, the
-# decision digest, and a `Resolution mode:` of answered, released, repaired, or
-# reconciled. Records written by the retired fm-decision-hold.sh (routed,
+# decision digest, and a `Resolution mode:` of answered, released, repaired,
+# reconciled, or reclassified. Records written by the retired fm-decision-hold.sh (routed,
 # declined, answered, repaired) are recognized everywhere a record is read, so
 # nothing already closed needs rewriting.
 #
@@ -455,6 +472,7 @@ body_has_resolution_record() {  # <task-body>
     *"Resolution recorded by fm-captain-hold."*"Captain decision:"*) return 0 ;;
     *"Resolution recorded by fm-decision-hold."*"Captain decision:"*) return 0 ;;
     *"Resolution recorded by fm-captain-hold."*"Reconciliation evidence:"*) return 0 ;;
+    *"Resolution recorded by fm-captain-hold."*"Reclassification evidence:"*) return 0 ;;
   esac
   return 1
 }
@@ -502,10 +520,15 @@ closed_answer_replay_mode_compatible() {  # <mode> <task-body>
 
 # The record's label is what keeps an evidence-backed reconciliation from
 # reading as the captain's own words. `reconciled` closes a call that went moot
-# and carries verified evidence; every other mode carries what the captain said.
+# and carries verified evidence, `reclassified` records why a hold turned out to
+# wait on someone other than the captain, and every other mode carries what the
+# captain said.
 resolution_block() {  # <mode>
   local label='Captain decision:'
-  [ "$1" != reconciled ] || label='Reconciliation evidence:'
+  case "$1" in
+    reconciled) label='Reconciliation evidence:' ;;
+    reclassified) label='Reclassification evidence:' ;;
+  esac
   printf 'Resolution recorded by fm-captain-hold.\nDecision digest: %s\nResolution mode: %s\n\n%s\n%s\n' \
     "$DECISION_DIGEST" "$1" "$label" "$DECISION_TEXT"
 }
@@ -905,6 +928,104 @@ command_hold() {
     || fail "task $id lost its hold-set stamp while being held"
   publish_parent_hold "$id" "$occurrence" needs-decision "$reason"
   printf '%s\n' "$id"
+}
+
+# Hold work that waits on a teammate or an external event rather than on the
+# captain. The row handling matches `hold`, but the tasks-axi hold kind is
+# `external`, so the wait never reads as a captain call. A live captain hold is
+# reclassified, not closed: its reason is recorded as reclassification
+# evidence, the open parent-channel decision resolves, and the task stays held.
+command_wait() {
+  local id=${1:-} title='' reason='' repo='' origin='' until='' show existing_title body='' hold_kind occurrence
+  local -a hold_args=()
+  [ "$#" -ge 1 ] || { usage >&2; exit 2; }
+  shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --title) shift; title=${1:-} ;;
+      --reason) shift; reason=${1:-} ;;
+      --repo) shift; repo=${1:-} ;;
+      --origin) shift; origin=${1:-} ;;
+      --until) shift; until=${1:-} ;;
+      *) usage >&2; exit 2 ;;
+    esac
+    shift
+  done
+  validate_slug task-id "$id"
+  validate_one_line reason "$reason"
+  case "$reason" in *'('*|*')'*) fail "reason must not contain parentheses (tasks-axi hold contract)" ;; esac
+  [ -z "$origin" ] || validate_slug origin-id "$origin"
+  hold_args=(--reason "$reason" --kind external)
+  if [ -n "$until" ]; then
+    case "$until" in
+      [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) hold_args+=(--until "$until") ;;
+      *) fail "--until must be a YYYY-MM-DD date: $until" ;;
+    esac
+  fi
+  acquire_task_control_lock "$id"
+  require_tasks_axi
+  if task_show "$id"; then
+    show=$TASK_SHOW_OUTPUT
+    [ "$(show_field "$show" state)" != "done" ] \
+      || fail "task $id is already closed; a new wait needs its own task"
+    if [ -n "$title" ]; then
+      existing_title=$(show_field_value "$show" title)
+      [ "$existing_title" = "$title" ] || fail "existing task $id has a different title"
+    fi
+  else
+    [ -n "$title" ] || fail "--title is required to create task $id"
+    validate_one_line title "$title"
+    if [ -z "$repo" ] && [ -n "$origin" ] && [ -f "$STATE/$origin.meta" ]; then
+      repo=$(meta_value "$STATE/$origin.meta" project)
+      repo=${repo%/}
+      repo=${repo##*/}
+    fi
+    [ -n "$repo" ] || repo=firstmate
+    validate_one_line repo "$repo"
+    [ -z "$origin" ] || body=$(printf 'Origin: %s' "$origin")
+    if [ -n "$body" ]; then
+      BD_DUE_REQUIRED=false tasks_axi add "$id" "$title" --repo "$repo" --body "$body" >/dev/null \
+        || fail "could not create task $id"
+    else
+      BD_DUE_REQUIRED=false tasks_axi add "$id" "$title" --repo "$repo" >/dev/null \
+        || fail "could not create task $id"
+    fi
+    task_show_or_fail "$id" "task $id disappeared after it was created"
+  fi
+  hold_kind=$(show_field_value "$show" hold_kind)
+  body=$(show_field "$show" body)
+  if [ "$hold_kind" != captain ]; then
+    tasks_axi hold "$id" "${hold_args[@]}" >/dev/null \
+      || fail "could not hold task $id as an external wait"
+    task_show_or_fail "$id" "task $id disappeared while holding it"
+    [ "$(show_field_value "$show" hold_kind)" = external ] \
+      || fail "task $id did not retain its external hold"
+    printf 'waiting: %s\n' "$id"
+    return 0
+  fi
+  # A live captain call turns out to wait on someone else. The evidence record
+  # goes first so an interrupted run is finished by an exact retry, and the
+  # hold-set stamp goes last because the row is no longer the captain's call.
+  DECISION_TEXT=$reason
+  DECISION_DIGEST=$(sha256_text "$reason")
+  occurrence=$(( $(resolution_record_count "$body") + 1 ))
+  if body_has_resolution_record "$body" \
+    && [ "$(recorded_decision_digest "$body" || true)" = "$DECISION_DIGEST" ] \
+    && [ "$(recorded_resolution_mode "$body" || true)" = reclassified ]; then
+    occurrence=$((occurrence - 1))
+  else
+    write_resolution_record "$id" reclassified "$body"
+  fi
+  tasks_axi hold "$id" "${hold_args[@]}" >/dev/null \
+    || fail "could not reclassify captain-held task $id as an external wait"
+  remove_interrupted_answer_stamp "$id"
+  task_show_or_fail "$id" "task $id disappeared while reclassifying it"
+  [ "$(show_field_value "$show" hold_kind)" = external ] \
+    || fail "task $id did not retain its external hold"
+  body_has_resolution_record "$(show_field "$show" body)" \
+    || fail "task $id did not retain its reclassification record"
+  publish_parent_resolution_then_retire "$id" "$occurrence" "waiting on others: $reason"
+  printf 'reclassified: %s\n' "$id"
 }
 
 # Record a resolution block beneath any leading active hold-set stamp,
@@ -1925,6 +2046,7 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
 
 case "${1:-}" in
   hold) shift; command_hold "$@" ;;
+  wait) shift; command_wait "$@" ;;
   answer) shift; command_answer "$@" ;;
   answers) shift; command_answers "$@" ;;
   reconcile-requests) shift; command_reconcile_requests "$@" ;;
