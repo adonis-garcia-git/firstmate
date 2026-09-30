@@ -6,9 +6,10 @@
 # either signal. This guard launches real Claude Code in an isolated Herdr lab
 # and requires fm_backend_herdr_send_text_submit to report empty for a landed
 # idle steer, to submit a long multi-line message and short messages with a
-# paragraph break (helm's text-plus-attachment shape) whole, as Claude's own
-# session transcript records it, and to refuse a composer that shows only part
-# of the payload. It fails naming the harness and version rather than
+# paragraph break (helm's text-plus-attachment shape, whose attachment line
+# ends in ` |`) whole, as Claude's own session transcript records it, both
+# idle and while Claude is mid-turn, and to refuse a composer that shows only
+# part of the payload. It fails naming the harness and version rather than
 # degrading quietly.
 #
 # Run explicitly with FM_HERDR_SUBMIT_CONFIRM_LIVE=1 after a Herdr or Claude
@@ -97,15 +98,17 @@ wait_idle() {  # <seconds>
 # submitted_shape: print "whole" when Claude's session transcript records a
 # submitted prompt containing <message> byte-for-byte, "fragment:<chars>" when
 # the prompt carrying <token> holds less, and nothing when no prompt carries
-# <token> within 30 seconds.
+# <token> within 30 seconds. A prompt queued during a tool call is recorded
+# as a queued_command attachment rather than a user message.
 submitted_shape() {  # <message> <token>
   local shape='' i=0
   while [ "$i" -lt 30 ]; do
     if [ -f "$TRANSCRIPT" ] && grep -q "$2" "$TRANSCRIPT"; then
       shape=$(jq -j --arg m "$1" --arg t "$2" '
-        select(.type == "user") | .message.content
-        | if type == "string" then . else ([.[]? | select(.type == "text") | .text] | join("")) end
-        | select(contains($t))
+        ((select(.type == "user") | .message.content
+          | if type == "string" then . else ([.[]? | select(.type == "text") | .text] | join("")) end),
+         (select(.type == "attachment" and .attachment.type == "queued_command") | .attachment.prompt))
+        | select(type == "string") | select(contains($t))
         | if contains($m) then "whole" else "fragment:" + (length | tostring) end
       ' "$TRANSCRIPT" 2>/dev/null)
     fi
@@ -240,14 +243,21 @@ pass "live Herdr long message: Claude Code ($VERSION) on $HERDR_VER submits the 
 PNG="$TMP_ROOT/helm-attachment.png"
 printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==' \
   | base64 -d > "$PNG" 2>/dev/null || printf 'png' > "$PNG"
+PNG2="$TMP_ROOT/helm-attachment-second.png"
+cp "$PNG" "$PNG2"
 PARA_TOKEN="FMPARA$$x$RANDOM"
 HELM_TOKEN="FMHELM$$x$RANDOM"
-for shape in paragraphs attachment; do
+HELM2_TOKEN="FMHELMTWO$$x$RANDOM"
+# helm ends its attachment line with ` |` (never on a bare image path), so a
+# wrapped row of the two-attachment line starts or ends with `|`.
+for shape in paragraphs attachment attachments; do
   case "$shape" in
     paragraphs) token=$PARA_TOKEN
       msg="First paragraph ${token}A of a short message."$'\n\n'"Second paragraph ${token}END - reply with only the word OK." ;;
     attachment) token=$HELM_TOKEN
-      msg="1. ${token}END this screenshot shows the report. Reply with only the word OK."$'\n\n'"ATTACHMENTS: $PNG" ;;
+      msg="1. ${token}END this screenshot shows the report. Reply with only the word OK."$'\n\n'"ATTACHMENTS: $PNG |" ;;
+    attachments) token=$HELM2_TOKEN
+      msg="${token}END both screenshots. Reply with only the word OK."$'\n\n'"ATTACHMENTS: $PNG | $PNG2 |" ;;
   esac
   wait_idle 60 || true
   verdict=$(fm_backend_herdr_send_text_submit "$TARGET" "$msg" 3 0.4 0.3) \
@@ -259,6 +269,37 @@ for shape in paragraphs attachment; do
     || fail "Claude Code ($VERSION) on $HERDR_VER: the ${#msg}-char $shape message was not submitted whole (${submitted:-absent})"
   pass "live Herdr paragraph break: Claude Code ($VERSION) on $HERDR_VER submits the whole ${#msg}-char $shape message byte-for-byte"
 done
+
+# The captain sends from helm while firstmate is mid-turn: the same attachment
+# shape must land in a busy Claude, which queues it, and be submitted whole.
+wait_idle 60 || true
+BUSY_TOKEN="FMBUSY$$x$RANDOM"
+lab pane send-text "$PANE" "Use the Bash tool once, in the foreground and not in the background, to run exactly: for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do sleep 1; done. Then reply with only the word OK." >/dev/null \
+  || fail "could not type the busy-turn prompt into the lab composer"
+sleep 0.4
+lab pane send-keys "$PANE" enter >/dev/null || fail "could not submit the busy-turn prompt"
+busy=0
+i=0
+while [ "$i" -lt 30 ]; do
+  st=$(lab agent get "$PANE" 2>/dev/null | jq -r '.result.agent.agent_status // empty')
+  if [ "$st" = working ] || [ "$(fm_backend_herdr_rendered_busy_state "$TARGET")" = busy ]; then
+    busy=1
+    break
+  fi
+  i=$((i + 1))
+  sleep 1
+done
+[ "$busy" = 1 ] || fail "Claude Code ($VERSION) on $HERDR_VER never showed a busy turn for the busy-send case"
+msg="${BUSY_TOKEN}END sent while you work. Reply with only the word OK."$'\n\n'"ATTACHMENTS: $PNG | $PNG2 |"
+verdict=$(fm_backend_herdr_send_text_submit "$TARGET" "$msg" 3 0.4 0.3) \
+  || fail "send_text_submit failed to run the busy attachment message against Claude Code ($VERSION) on $HERDR_VER"
+[ "$verdict" = empty ] \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: a ${#msg}-char attachment message sent mid-turn must confirm empty, got '$verdict'"
+wait_idle 90 || true
+submitted=$(submitted_shape "$msg" "$BUSY_TOKEN")
+[ "$submitted" = whole ] \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: the ${#msg}-char attachment message sent mid-turn was not submitted whole (${submitted:-absent})"
+pass "live Herdr busy send: Claude Code ($VERSION) on $HERDR_VER queues and submits the whole ${#msg}-char attachment message sent mid-turn"
 
 # The payload proof must still refuse a composer that shows only part of the
 # message. Type just the tail, and then just the head, of a two-paragraph

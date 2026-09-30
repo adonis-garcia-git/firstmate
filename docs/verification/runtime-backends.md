@@ -1201,6 +1201,29 @@ With the read-back stopping at the first blank row, the same guard failed:
 not ok - Claude Code (2.1.283 (Claude Code)) on herdr 0.8.2: a 124-char paragraphs message with a blank line must confirm empty, got 'send-failed'
 ```
 
+### Attachment lines in short composer text
+
+Measured 2026-09-30 against Herdr 0.8.2 and Claude Code 2.1.285 in an isolated `fm-lab-` session.
+
+helm ends every attachment line with ` |` (`ATTACHMENTS: <a> | <b> |`), so the row holding it, or a wrapped row of it, starts or ends with an ASCII `|`.
+`fm_composer_row_has_edge` reads such a row as a box side, so the bare composer's read-back stopped above it and the pre-Enter payload proof refused every raw-typed helm message with an attachment, idle or mid-turn, as "herdr send failed".
+`bin/fm-composer-lib.sh` now keeps a row whose only edge is an ASCII `|` or `+` inside a ruled bare composer when a horizontal rule closes that composer below it, and keeps that row's pipes in the extracted content; `test_ruled_bare_composer_keeps_typed_ascii_pipes` in `tests/fm-composer-lib.test.sh` pins that boundary.
+A prompt queued while Claude runs a tool is recorded in its session transcript as a `queued_command` attachment, which the live guard also reads.
+Observed 2026-09-30:
+
+```text
+ok - live Herdr paragraph break: Claude Code (2.1.285 (Claude Code)) on herdr 0.8.2 submits the whole 215-char attachment message byte-for-byte
+ok - live Herdr paragraph break: Claude Code (2.1.285 (Claude Code)) on herdr 0.8.2 submits the whole 320-char attachments message byte-for-byte
+ok - live Herdr busy send: Claude Code (2.1.285 (Claude Code)) on herdr 0.8.2 queues and submits the whole 321-char attachment message sent mid-turn
+ok - live Herdr payload proof: Claude Code (2.1.285 (Claude Code)) on herdr 0.8.2 refuses a composer showing only the head or only the tail
+```
+
+With the pre-fix read-back, the same guard failed:
+
+```text
+not ok - Claude Code (2.1.285 (Claude Code)) on herdr 0.8.2: a 214-char attachment message with a blank line must confirm empty, got 'send-failed'
+```
+
 ### Prune and respawn
 
 The real label-collision reproduction is owned by:

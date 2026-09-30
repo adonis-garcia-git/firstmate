@@ -1125,9 +1125,10 @@ _fm_composer_screen_row() {  # <n> <screen>
 
 # _fm_composer_row_content: extract the classification content of one raw row:
 # ghost-strip when styled, plain otherwise, normalize-trim, and strip one
-# matching pair of side border glyphs.
-_fm_composer_row_content() {  # <raw-row> <styled> -> content on stdout
-  local raw=$1 styled=$2 stripped
+# matching pair of side border glyphs. <ascii-sides> 0 keeps an ASCII `|`
+# pair: a bare composer has no sides, so there it is typed text.
+_fm_composer_row_content() {  # <raw-row> <styled> [ascii-sides] -> content on stdout
+  local raw=$1 styled=$2 ascii_sides=${3:-1} stripped
   if [ "$styled" = 1 ]; then
     stripped=$(printf '%s\n' "$raw" | fm_composer_strip_ghost)
   else
@@ -1138,7 +1139,7 @@ _fm_composer_row_content() {  # <raw-row> <styled> -> content on stdout
     '│'*'│') stripped=${stripped#│}; stripped=${stripped%│} ;;
     '┃'*'┃') stripped=${stripped#┃}; stripped=${stripped%┃} ;;
     '║'*'║') stripped=${stripped#║}; stripped=${stripped%║} ;;
-    '|'*'|') stripped=${stripped#|}; stripped=${stripped%|} ;;
+    '|'*'|') [ "$ascii_sides" = 0 ] || { stripped=${stripped#|}; stripped=${stripped%|}; } ;;
   esac
   fm_composer_normalize_trim_var stripped
   printf '%s' "$stripped"
@@ -1427,6 +1428,42 @@ _fm_composer_locate_footer_zone() {  # <plain>
     && [ "$FM_COMPOSER_SCAN_BARE_ROW" -le "$FM_COMPOSER_FOOTER_LAST" ]
 }
 
+# _fm_composer_bare_ruled_close: print the row of the horizontal rule that
+# closes a bare composer ruled like Claude Code's (a horizontal rule directly
+# above its glyph row <first>). 1 when no rule sits above <first> or no rule
+# closes the composer within the capture.
+_fm_composer_bare_ruled_close() {  # <plain-screen> <first>
+  local plain=$1 first=$2 rows row trimmed
+  [ "$first" -gt 0 ] || return 1
+  trimmed=$(_fm_composer_screen_row "$((first - 1))" "$plain")
+  fm_composer_normalize_trim_var trimmed
+  case "$trimmed" in '─'*|'━'*|'═'*) ;; *) return 1 ;; esac
+  rows=$(printf '%s\n' "$plain" | wc -l | tr -d ' ')
+  row=$((first + 1))
+  while [ "$row" -lt "$rows" ]; do
+    trimmed=$(_fm_composer_screen_row "$row" "$plain")
+    fm_composer_normalize_trim_var trimmed
+    case "$trimmed" in '─'*|'━'*|'═'*) printf '%s' "$row"; return 0 ;; esac
+    row=$((row + 1))
+  done
+  return 1
+}
+
+# _fm_composer_row_edge_is_typed_ascii: 0 when <row> reads as an edge only
+# through an ASCII `|` or `+` at its start or end. A ruled bare composer draws
+# no ASCII box, so between its two rules such a row is typed text: helm ends
+# every attachment line with ` |`, a wrap can leave that `|` alone on the last
+# row, and a typed `+3 new tests` starts with `+`. Callers ask only for rows
+# above the closing rule; a box-drawing edge still reads as structure.
+_fm_composer_row_edge_is_typed_ascii() {  # <trimmed-row>
+  local row=$1
+  fm_composer_normalize_trim_var row
+  case "$row" in [\|+]*|*[\|+]) ;; *) return 1 ;; esac
+  while :; do case "$row" in [\|+]*) row=${row#?} ;; *) break ;; esac; done
+  while :; do case "$row" in *[\|+]) row=${row%?} ;; *) break ;; esac; done
+  ! fm_composer_row_has_edge "$row"
+}
+
 # _fm_composer_bare_blank_is_interior: 0 when the blank row at <row> sits
 # inside a ruled bare composer's typed text rather than below it. A typed blank
 # line (a paragraph break) renders as a blank composer row, so the extent must
@@ -1449,7 +1486,10 @@ _fm_composer_bare_blank_is_interior() {  # <plain-screen> <first> <row>
       case "$trimmed" in
         '─'*|'━'*|'═'*) [ "$resumed" = 1 ]; return ;;
       esac
-      fm_composer_row_has_edge "$trimmed" && return 1
+      if fm_composer_row_has_edge "$trimmed" \
+         && ! _fm_composer_row_edge_is_typed_ascii "$trimmed"; then
+        return 1
+      fi
       _fm_composer_row_is_omp_status "$trimmed" && return 1
       _fm_composer_row_is_braille_furniture "$trimmed" && return 1
       resumed=1
@@ -1460,7 +1500,7 @@ _fm_composer_bare_blank_is_interior() {  # <plain-screen> <first> <row>
 }
 
 _fm_composer_select_cursorless() {
-  local plain=$1 generic=-1 next boundary raw trimmed glyph bare footer=0
+  local plain=$1 generic=-1 next boundary raw trimmed glyph bare footer=0 close
   FM_COMPOSER_SELECTED_KIND=
   FM_COMPOSER_SELECTED_FIRST=-1
   FM_COMPOSER_SELECTED_LAST=-1
@@ -1522,6 +1562,7 @@ _fm_composer_select_cursorless() {
     return 1
   fi
   if [ "$FM_COMPOSER_SELECTED_KIND" = bare ]; then
+    close=$(_fm_composer_bare_ruled_close "$plain" "$FM_COMPOSER_SELECTED_FIRST") || close=-1
     next=$((FM_COMPOSER_SELECTED_LAST + 1))
     while :; do
       raw=$(_fm_composer_screen_row "$next" "$plain")
@@ -1532,7 +1573,10 @@ _fm_composer_select_cursorless() {
         next=$((next + 1))
         continue
       fi
-      fm_composer_row_has_edge "$trimmed" && break
+      if fm_composer_row_has_edge "$trimmed" \
+         && ! { [ "$next" -lt "$close" ] && _fm_composer_row_edge_is_typed_ascii "$trimmed"; }; then
+        break
+      fi
       _fm_composer_row_is_omp_status "$trimmed" && break
       _fm_composer_row_is_braille_furniture "$trimmed" && break
       FM_COMPOSER_SELECTED_LAST=$next
@@ -1586,7 +1630,11 @@ EOF
   row=$FM_COMPOSER_SELECTED_FIRST
   while [ "$row" -le "$FM_COMPOSER_SELECTED_LAST" ]; do
     raw=$(_fm_composer_screen_row "$row" "$screen")
-    content=$(_fm_composer_row_content "$raw" "$styled")
+    if [ "$FM_COMPOSER_SELECTED_KIND" = bare ]; then
+      content=$(_fm_composer_row_content "$raw" "$styled" 0)
+    else
+      content=$(_fm_composer_row_content "$raw" "$styled")
+    fi
     placeholder_position=0
     case "$FM_COMPOSER_SELECTED_KIND" in
       bare)
