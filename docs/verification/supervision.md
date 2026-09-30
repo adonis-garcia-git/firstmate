@@ -228,7 +228,7 @@ Blocking behavior:
 | exit 2 with `blocked by test` on stderr | `Compaction blocked by PreCompact hook: [<command>]: blocked by test`, no compaction |
 | exit 1, alongside a second hook with `timeout: 3` that slept 8 seconds and was killed | compaction proceeded and wrote its `compact_boundary` record |
 
-In the same version's transcripts, a genuine captain turn is a `user` record with `origin.kind` `human`, while wake injections carry `origin.kind` `task-notification`.
+In the same version's transcripts, a genuine captain turn is a `user` record with `origin.kind` `human`, and background-task wakes carry `origin.kind` `task-notification`. Firstmate's own typed operational input, such as a record-backed doorbell, is also recorded with `origin.kind` `human`, so the hook tells it apart through `bin/fm-operational-input.sh` rather than by origin.
 
 Refresh with the live guard:
 

@@ -46,10 +46,10 @@
 # reprints the work state from its own records.
 #
 # Captain turns are the transcript's `user` records whose `origin.kind` is
-# `human`. A transcript that carries no `origin` field at all (an older Claude
-# Code) falls back to the record shape: a plain user record that is not meta, a
-# compaction summary, a sidechain, or a tool result, and whose text does not
-# open with a harness tag other than a slash command.
+# `human`, minus firstmate's own typed operational input, which Claude Code also
+# records as human: whatever bin/fm-operational-input.sh classifies as
+# operational input, or recognizes as a record-backed doorbell. A transcript
+# with no `origin` field has no captain turns.
 #
 # Contract with the compaction: this hook must never block or fail it. Claude
 # Code blocks compaction on exit 2 or a `decision: block` JSON object, so the
@@ -101,6 +101,8 @@ esac
 . "$SCRIPT_DIR/fm-hook-host-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-operational-input.sh
+. "$SCRIPT_DIR/fm-operational-input.sh"
 
 TRIGGER=unknown
 SESSION_ID=
@@ -129,49 +131,60 @@ step_aside() {  # <reason>
   exit 0
 }
 
-# render_turns <transcript>: print TURNS=<n> on the first line, then the
-# markdown for the captain's recent turns. Each line parses on its own, so a
-# torn line from a concurrent append is skipped rather than failing the whole
-# read.
-render_turns() {
-  jq -Rrn \
-    --argjson max "$MAX_TURNS" \
-    --argjson turn_chars "$TURN_CHARS" '
+# human_turns <transcript>: print every human-origin turn, newest first, as a
+# NUL-terminated pair: its raw text, then the turn as a JSON object. Each line
+# parses on its own, so a torn line from a concurrent append is skipped rather
+# than failing the whole read.
+human_turns() {
+  jq -Rjn '
     def blocks: if (.message.content | type) == "array" then .message.content else [] end;
     def content_text:
       if (.message.content | type) == "string" then .message.content
       else [blocks[] | select(type == "object" and .type == "text") | .text | strings] | join("\n")
       end;
     def has_block($t): any(blocks[]; type == "object" and .type == $t);
-    def plain_user:
-      .type == "user" and .isMeta != true and .isCompactSummary != true
-      and .isSidechain != true and (has_block("tool_result") | not);
     def command_form:
       if test("<command-name>") then
         ((try capture("<command-name>(?<n>[^<]*)</command-name>").n catch "")
           + " " + (try capture("<command-args>(?<a>[\\s\\S]*?)</command-args>").a catch ""))
         | sub("\\s+$"; "")
       else . end;
+    [inputs | try fromjson catch null
+      | select(type == "object" and .type == "user" and .isMeta != true
+          and .isCompactSummary != true and .isSidechain != true
+          and (has_block("tool_result") | not)
+          and (.origin | type) == "object" and .origin.kind == "human")]
+    | reverse[]
+    | content_text as $t
+    | ($t | gsub("\u0000"; "")), "\u0000",
+      ({ts: (.timestamp // ""), text: ($t | command_form), image: has_block("image")} | tojson),
+      "\u0000"
+  ' < "$1"
+}
+
+# render_turns <transcript>: print TURNS=<n> on the first line, then the
+# markdown for the captain's most recent turns.
+render_turns() {
+  local pairs raw turn kind kept=() n=0 i
+  pairs=$(mktemp "$DATA/.precompact-turns.XXXXXX" 2>/dev/null) || return 1
+  if ! human_turns "$1" > "$pairs"; then
+    rm -f "$pairs"
+    return 1
+  fi
+  while [ "$n" -lt "$MAX_TURNS" ] && IFS= read -r -d '' raw && IFS= read -r -d '' turn; do
+    if fm_operational_input_classify "$raw" kind || fm_operational_doorbell_record_kind "$raw" kind; then
+      continue
+    fi
+    kept[n]=$turn
+    n=$((n + 1))
+  done < "$pairs"
+  rm -f "$pairs"
+  for ((i = n - 1; i >= 0; i--)); do printf '%s\n' "${kept[i]}"; done | jq -rs \
+    --argjson turn_chars "$TURN_CHARS" '
     def clip($n): if length > $n then .[0:$n] + " [...]" else . end;
     def safe: gsub("<!--"; "<! --");
     def quote: split("\n") | map("> " + .) | join("\n");
-    reduce (inputs | try fromjson catch null) as $e ({origin_seen: false, by_origin: [], by_shape: []};
-      if ($e | type) != "object" then .
-      else
-        (if ($e.origin | type) == "object" then .origin_seen = true else . end)
-        | if ($e | plain_user) then
-            ($e | content_text) as $t
-            | {ts: ($e.timestamp // ""), text: ($t | command_form),
-               image: ($e | has_block("image"))} as $turn
-            | (if ($e.origin | type) == "object" and $e.origin.kind == "human"
-               then .by_origin = (.by_origin + [$turn])[-$max:] else . end)
-            | (if $e.origin == null
-                 and (($t | test("^\\s*<") | not) or ($t | test("^\\s*<command-")))
-                 and (($t | length) > 0 or $turn.image)
-               then .by_shape = (.by_shape + [$turn])[-$max:] else . end)
-          else . end
-      end)
-    | (if .origin_seen then .by_origin else .by_shape end) as $turns
+    . as $turns
     | "TURNS=\($turns | length)",
       "### Captain'"'"'s recent words (verbatim, oldest first)",
       "",
@@ -182,7 +195,7 @@ render_turns() {
          ((if (.text | length) > 0 then .text else "(attachment only)" end) | clip($turn_chars) | safe | quote),
          "")
        end)
-  ' < "$1"
+  '
 }
 
 # render_workers: one line per state/*.meta task - its id, kind, and PR URL.

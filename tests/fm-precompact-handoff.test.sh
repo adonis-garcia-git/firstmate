@@ -29,7 +29,8 @@ install_hook_scripts() {
   local dir=$1 script
   mkdir -p "$dir/bin"
   for script in fm-precompact-handoff.sh fm-gate-refuse-lib.sh fm-primary-scope-lib.sh \
-    fm-session-lock-lib.sh fm-cursor-lib.sh fm-hook-host-lib.sh fm-timeout-lib.sh; do
+    fm-session-lock-lib.sh fm-cursor-lib.sh fm-hook-host-lib.sh fm-timeout-lib.sh \
+    fm-operational-input.sh; do
     cp "$ROOT/bin/$script" "$dir/bin/$script"
   done
   chmod +x "$dir/bin/fm-precompact-handoff.sh"
@@ -202,24 +203,44 @@ test_keeps_only_the_most_recent_turns() {
   pass "the block keeps only the most recent captain turns"
 }
 
-test_falls_back_to_record_shape_without_origin() {
-  local dir transcript block
-  dir=$(make_home "$TMP_ROOT/shape")
-  transcript="$TMP_ROOT/shape.jsonl"
-  {
-    jq -nc '{type:"user", message:{role:"user", content:"OLD-FORMAT-SENTINEL merge it"}}'
-    jq -nc '{type:"user", message:{role:"user", content:"<local-command-stdout>LOCAL-SENTINEL</local-command-stdout>"}}'
-    jq -nc '{type:"user", message:{role:"user", content:[{type:"tool_result", content:"TOOL-SENTINEL"}]}}'
-    jq -nc '{type:"user", isMeta:true, message:{role:"user", content:"META-SENTINEL"}}'
-  } > "$transcript"
+test_records_no_turns_without_origin() {
+  local dir transcript
+  dir=$(make_home "$TMP_ROOT/no-origin")
+  transcript="$TMP_ROOT/no-origin.jsonl"
+  jq -nc '{type:"user", message:{role:"user", content:"NO-ORIGIN-SENTINEL merge it"}}' > "$transcript"
   run_hook "$dir" "$(payload "$transcript")"
+  assert_not_contains "$(block_of "$dir")" "NO-ORIGIN-SENTINEL" "a record without origin was recorded as captain words"
+  assert_contains "$(block_of "$dir")" "(no captain turns found in the transcript)" "the block did not say no turns were found"
+  [ "$(record_field "$dir" status)" = ok ] || fail "a transcript without origin was not recorded as ok"
+  [ "$(record_field "$dir" turns)" = 0 ] || fail "expected 0 captain turns without origin, got $(record_field "$dir" turns)"
+  pass "a transcript with no origin field records no captain turns"
+}
+
+# Claude Code records firstmate's own typed operational input with
+# origin.kind "human": a record-backed doorbell and an envelope. Neither is the
+# captain's word, and neither may push the captain's turns out of the window.
+test_skips_firstmate_operational_input() {
+  local dir transcript doorbell envelope block i
+  dir=$(make_home "$TMP_ROOT/operational")
+  transcript="$TMP_ROOT/operational.jsonl"
+  doorbell=$(printf 'DOORBELL-BODY-SENTINEL' | FM_STATE_OVERRIDE="$dir/state" \
+    "$ROOT/bin/fm-operational-input.sh" record away-supervisor) || fail "could not write an operational record"
+  envelope=$(printf 'ENVELOPE-BODY-SENTINEL' | "$ROOT/bin/fm-operational-input.sh" encode watcher) \
+    || fail "could not encode an operational envelope"
+  {
+    jq -nc '{type:"user", origin:{kind:"human"}, timestamp:"T0", message:{role:"user", content:"AWAY-BRIEF-SENTINEL hold the fort"}}'
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+      jq -nc --arg d "$doorbell" '{type:"user", origin:{kind:"human"}, message:{role:"user", content:$d}}'
+    done
+    jq -nc --arg e "$envelope" '{type:"user", origin:{kind:"human"}, message:{role:"user", content:$e}}'
+  } > "$transcript"
+  run_hook "$dir" "$(payload "$transcript" auto)"
   block=$(block_of "$dir")
-  assert_contains "$block" "> OLD-FORMAT-SENTINEL merge it" "a transcript without origin lost the captain's words"
-  assert_not_contains "$block" "LOCAL-SENTINEL" "a harness tag was recorded as captain words"
-  assert_not_contains "$block" "TOOL-SENTINEL" "a tool result was recorded as captain words"
-  assert_not_contains "$block" "META-SENTINEL" "a meta record was recorded as captain words"
-  [ "$(record_field "$dir" turns)" = 1 ] || fail "expected 1 captain turn from the record shape"
-  pass "a transcript with no origin field falls back to the record shape"
+  assert_contains "$block" "> AWAY-BRIEF-SENTINEL hold the fort" "firstmate's doorbells pushed the captain's words out"
+  assert_not_contains "$block" "Firstmate operational input waiting" "a doorbell was recorded as captain words"
+  assert_not_contains "$block" "ENVELOPE-BODY-SENTINEL" "an operational envelope was recorded as captain words"
+  [ "$(record_field "$dir" turns)" = 1 ] || fail "expected 1 captain turn, got $(record_field "$dir" turns)"
+  pass "firstmate's own typed operational input is not recorded as captain words"
 }
 
 test_missing_transcript_still_writes_open_work() {
@@ -345,7 +366,8 @@ test_writes_verbatim_captain_words_and_open_work
 test_carries_no_dropped_fields
 test_replaces_its_block_in_place
 test_keeps_only_the_most_recent_turns
-test_falls_back_to_record_shape_without_origin
+test_records_no_turns_without_origin
+test_skips_firstmate_operational_input
 test_missing_transcript_still_writes_open_work
 test_failures_step_aside_without_blocking
 test_out_of_scope_sessions_never_write

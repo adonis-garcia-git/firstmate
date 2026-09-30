@@ -52,7 +52,8 @@ make_lab() {  # <dir>
   printf '# Firstmate lab\n' > "$lab/AGENTS.md"
   cp "$ROOT/.claude/settings.json" "$lab/.claude/settings.json"
   for script in fm-precompact-handoff.sh fm-gate-refuse-lib.sh fm-primary-scope-lib.sh \
-    fm-session-lock-lib.sh fm-cursor-lib.sh fm-hook-host-lib.sh fm-timeout-lib.sh; do
+    fm-session-lock-lib.sh fm-cursor-lib.sh fm-hook-host-lib.sh fm-timeout-lib.sh \
+    fm-operational-input.sh; do
     cp "$ROOT/bin/$script" "$lab/bin/$script"
   done
   for script in fm-sessionstart-run.sh fm-turnend-guard.sh fm-claude-stop-autoarm.sh \
