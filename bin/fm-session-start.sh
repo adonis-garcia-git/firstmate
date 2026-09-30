@@ -654,8 +654,8 @@ precompact_handoff_heading() {
 print_precompact_handoff() {
   local record="$STATE/.precompact-handoff" handoff="$DATA/session-handoff.md"
   local status at session transcript reason now age block
+  [ "$PRIMARY_HARNESS" = claude ] || return 0
   if [ ! -f "$record" ]; then
-    [ "$PRIMARY_HARNESS" = claude ] || return 0
     precompact_handoff_heading
     printf 'None recorded: the pre-compaction hook did not run in this home.\n'
     printf 'Decisions or open work that existed only in conversation before this compaction may be missing from the summary.\n'

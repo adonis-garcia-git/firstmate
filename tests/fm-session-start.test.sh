@@ -2391,7 +2391,7 @@ SH
 # (bin/fm-precompact-handoff.sh) recorded just before it, and says plainly when
 # none exists for this compaction rather than printing nothing.
 test_compact_digest_surfaces_the_precompact_handoff() {
-  local rec root home fakebin out section now
+  local rec root home fakebin out section now record
   rec=$(new_world precompact-handoff)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -2481,11 +2481,24 @@ EOF
   assert_contains "$section" "FAILED for this compaction: cannot replace the note" "a failed handoff was not reported"
   assert_contains "$section" "/t/s1.jsonl" "a failed handoff did not point at the pre-compaction transcript"
 
-  rm -f "$home/state/.precompact-handoff"
-  out=$(run_named_harness_session_start pi "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)
-  case "$out" in
-    *'PRE-COMPACTION HANDOFF'*) fail "a harness without the pre-compaction hook printed a handoff notice" ;;
-  esac
+  # A record a Claude compaction left in this home is not a notice for a
+  # harness without the pre-compaction hook, whatever its age or session.
+  for record in \
+    "status=ok\nat=$now\ntrigger=auto\nsession=s1\ntranscript=/t/s1.jsonl\nturns=1\nreason=\n" \
+    "status=ok\nat=$((now - 7200))\ntrigger=auto\nsession=s1\ntranscript=/t/s1.jsonl\nturns=1\nreason=\n" \
+    "status=failed\nat=$now\ntrigger=auto\nsession=s1\ntranscript=/t/s1.jsonl\nturns=0\nreason=boom\n" \
+    ''; do
+    if [ -n "$record" ]; then
+      printf '%b' "$record" > "$home/state/.precompact-handoff"
+    else
+      rm -f "$home/state/.precompact-handoff"
+    fi
+    out=$(run_named_harness_session_start pi "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)
+    case "$out" in
+      *'PRE-COMPACTION HANDOFF'*|*'None recorded'*|*CAPTAIN-WORDS-INSIDE-THE-BLOCK*)
+        fail "a harness without the pre-compaction hook printed a handoff notice for record: ${record:-none}" ;;
+    esac
+  done
 
   pass "compaction digest surfaces this session's fresh pre-compaction handoff and names a missing, stale, foreign, or failed one"
 }
