@@ -35,9 +35,11 @@
 #                            fresh snapshot exists for this compaction.
 #
 # The snapshot block holds, newest state at compaction time:
-#   - the /compact custom instructions, when the captain gave any;
+#   - the /compact custom instructions, when the captain gave any, clipped like
+#     a turn so they never push the newest turn out of a short preview;
 #   - the captain's most recent turns, newest first, verbatim and clipped, so a
-#     reader that keeps only the start of the block still gets the latest;
+#     reader that keeps only the start of the block still gets the latest; a
+#     slash command, recorded as nothing but its command tags, reads as typed;
 #   - the id and hold kind of every held backlog item, through
 #     bin/fm-tasks-axi.sh (captain decisions and external waits);
 #   - every state/*.meta task's id, kind, and recorded PR URL.
@@ -59,7 +61,8 @@
 # failure is recorded in the last-result record with its reason, logged to
 # stderr (Claude Code's debug log), and the compaction proceeds. The settings
 # entry bounds the whole hook with a timeout; a timed-out hook is a non-blocking
-# error, and the atomic replace means a kill never leaves a torn note.
+# error. The atomic replace means a kill never leaves a torn note, and an exit
+# trap removes every temporary file on a catchable kill.
 #
 # Scope: the same eligibility owners as bin/fm-sessionstart-run.sh - a
 # no-mistakes gate agent or a linked task worktree never writes a home's note -
@@ -109,21 +112,34 @@ esac
 TRIGGER=unknown
 SESSION_ID=
 TRANSCRIPT=
+# Every temporary file lives in WORK, a directory in DATA so the note's replace
+# stays a same-filesystem rename, or is RESULT_TMP; cleanup removes both on any
+# exit, including a kill at the settings timeout, so no copy of the captain's
+# turns is left behind.
+WORK=
+RESULT_TMP=
+# shellcheck disable=SC2329 # Invoked by the exit trap main sets.
+cleanup() {
+  [ -z "$WORK" ] || rm -rf "$WORK" 2>/dev/null
+  [ -z "$RESULT_TMP" ] || rm -f "$RESULT_TMP" 2>/dev/null
+  return 0
+}
 
 # write_result <status> <turns> <reason>: atomically replace the last-result
 # record. Best effort: a state directory that cannot be written is logged.
 write_result() {
-  local status=$1 turns=$2 reason=$3 tmp
-  tmp=$(mktemp "$STATE/.precompact-handoff.XXXXXX" 2>/dev/null) || {
+  local status=$1 turns=$2 reason=$3
+  RESULT_TMP=$(mktemp "$STATE/.precompact-handoff.XXXXXX" 2>/dev/null) || {
+    RESULT_TMP=
     printf 'fm-precompact-handoff: cannot record result in %s\n' "$STATE" >&2
     return 0
   }
   if printf 'status=%s\nat=%s\ntrigger=%s\nsession=%s\ntranscript=%s\nturns=%s\nreason=%s\n' \
-    "$status" "$(date +%s)" "$TRIGGER" "$SESSION_ID" "$TRANSCRIPT" "$turns" "$reason" > "$tmp" 2>/dev/null \
-    && mv -f "$tmp" "$RESULT" 2>/dev/null; then
+    "$status" "$(date +%s)" "$TRIGGER" "$SESSION_ID" "$TRANSCRIPT" "$turns" "$reason" > "$RESULT_TMP" 2>/dev/null \
+    && mv -f "$RESULT_TMP" "$RESULT" 2>/dev/null; then
+    RESULT_TMP=
     return 0
   fi
-  rm -f "$tmp" 2>/dev/null || true
   printf 'fm-precompact-handoff: cannot record result in %s\n' "$STATE" >&2
 }
 
@@ -145,12 +161,16 @@ human_turns() {
       else [blocks[] | select(type == "object" and .type == "text") | .text | strings] | join("\n")
       end;
     def has_block($t): any(blocks[]; type == "object" and .type == $t);
+    # A slash command is recorded as nothing but its command tags; it renders
+    # as the captain typed it. Any other text, even one quoting a tag, is kept
+    # verbatim.
+    def first_capture($re; $name): [capture($re)][0][$name] // null;
     def command_form:
-      if test("<command-name>") then
-        ((try capture("<command-name>(?<n>[^<]*)</command-name>").n catch "")
-          + " " + (try capture("<command-args>(?<a>[\\s\\S]*?)</command-args>").a catch ""))
-        | sub("\\s+$"; "")
-      else . end;
+      first_capture("<command-name>(?<n>[^<]*)</command-name>"; "n") as $n
+      | if $n != null and (gsub("<command-(?<k>message|name|args)>[\\s\\S]*?</command-\\k<k>>"; "") | test("\\A\\s*\\z"))
+        then ($n + " " + (first_capture("<command-args>(?<a>[\\s\\S]*?)</command-args>"; "a") // ""))
+          | sub("\\s+$"; "")
+        else . end;
     [inputs | try fromjson catch null
       | select(type == "object" and .type == "user" and .isMeta != true
           and .isCompactSummary != true and .isSidechain != true
@@ -167,12 +187,8 @@ human_turns() {
 # render_turns <transcript>: print TURNS=<n> on the first line, then the
 # markdown for the captain's most recent turns.
 render_turns() {
-  local pairs raw turn kind kept=() n=0 i
-  pairs=$(mktemp "$DATA/.precompact-turns.XXXXXX" 2>/dev/null) || return 1
-  if ! human_turns "$1" > "$pairs"; then
-    rm -f "$pairs"
-    return 1
-  fi
+  local pairs="$WORK/turns" raw turn kind kept=() n=0 i
+  human_turns "$1" > "$pairs" || return 1
   while [ "$n" -lt "$MAX_TURNS" ] && IFS= read -r -d '' raw && IFS= read -r -d '' turn; do
     if fm_operational_input_classify "$raw" kind || fm_operational_doorbell_path "$raw" kind; then
       continue
@@ -180,7 +196,6 @@ render_turns() {
     kept[n]=$turn
     n=$((n + 1))
   done < "$pairs"
-  rm -f "$pairs"
   for ((i = 0; i < n; i++)); do printf '%s\n' "${kept[i]}"; done | jq -rs \
     --argjson turn_chars "$TURN_CHARS" '
     def clip($n): if length > $n then .[0:$n] + " [...]" else . end;
@@ -248,6 +263,8 @@ render_holds() {
 }
 
 main() {
+  trap cleanup EXIT
+  trap 'exit 0' TERM INT HUP
   fm_is_gate_agent "$FM_ROOT" && exit 0
   fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
@@ -265,7 +282,8 @@ main() {
   TRIGGER=$(printf '%s' "$payload" | jq -r '.trigger // "unknown" | tostring' 2>/dev/null) || TRIGGER=unknown
   SESSION_ID=$(printf '%s' "$payload" | jq -r '.session_id // "" | tostring' 2>/dev/null) || SESSION_ID=
   TRANSCRIPT=$(printf '%s' "$payload" | jq -r '.transcript_path // "" | tostring' 2>/dev/null) || TRANSCRIPT=
-  custom=$(printf '%s' "$payload" | jq -r '.custom_instructions // "" | tostring' 2>/dev/null) || custom=
+  custom=$(printf '%s' "$payload" | jq -r --argjson n "$TURN_CHARS" \
+    '.custom_instructions // "" | tostring | if length > $n then .[0:$n] + " [...]" else . end' 2>/dev/null) || custom=
   # The record is line-oriented, so a newline in a vendor field must not forge
   # another key.
   TRIGGER=$(printf '%s' "$TRIGGER" | tr '\n' ' ')
@@ -273,6 +291,8 @@ main() {
   TRANSCRIPT=$(printf '%s' "$TRANSCRIPT" | tr '\n' ' ')
 
   [ -d "$DATA" ] || step_aside "the data directory $DATA does not exist"
+  WORK=$(mktemp -d "$DATA/.precompact-handoff.XXXXXX" 2>/dev/null) \
+    || step_aside "cannot create a temporary directory in $DATA"
 
   local turns_out turns=0 status=ok reason=
   if [ -z "$TRANSCRIPT" ] || [ ! -r "$TRANSCRIPT" ]; then
@@ -292,9 +312,7 @@ main() {
 (unavailable: $reason)"
   fi
 
-  local block_file tmp kind
-  block_file=$(mktemp "$DATA/.session-handoff-block.XXXXXX" 2>/dev/null) \
-    || step_aside "cannot create a temporary file in $DATA"
+  local block_file="$WORK/block" tmp="$WORK/note" kind
   {
     printf '%s\n' "$BEGIN_MARK"
     printf '## Pre-compaction snapshot\n\n'
@@ -321,15 +339,8 @@ main() {
     printf '\nTask records:\n\n'
     render_workers
     printf '%s\n' "$END_MARK"
-  } > "$block_file" 2>/dev/null || {
-    rm -f "$block_file" 2>/dev/null || true
-    step_aside "cannot write the snapshot in $DATA"
-  }
+  } > "$block_file" 2>/dev/null || step_aside "cannot write the snapshot in $DATA"
 
-  tmp=$(mktemp "$DATA/.session-handoff.XXXXXX" 2>/dev/null) || {
-    rm -f "$block_file" 2>/dev/null || true
-    step_aside "cannot create a temporary file in $DATA"
-  }
   local merged=1
   if [ -f "$HANDOFF" ] && grep -qxF "$BEGIN_MARK" "$HANDOFF" 2>/dev/null \
     && grep -qxF "$END_MARK" "$HANDOFF" 2>/dev/null; then
@@ -348,12 +359,10 @@ main() {
   else
     cat "$block_file" > "$tmp" 2>/dev/null || merged=0
   fi
-  rm -f "$block_file" 2>/dev/null || true
   if [ "$merged" -eq 1 ] && mv -f "$tmp" "$HANDOFF" 2>/dev/null; then
     write_result "$status" "${turns:-0}" "$reason"
     exit 0
   fi
-  rm -f "$tmp" 2>/dev/null || true
   step_aside "cannot replace $HANDOFF"
 }
 

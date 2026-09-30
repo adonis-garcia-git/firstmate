@@ -27,7 +27,8 @@
 # was bootstrap-then-lock):
 #
 #   0. pre-compaction handoff - on a compaction source only, the snapshot
-#                       bin/fm-precompact-handoff.sh recorded, printed before
+#                       bin/fm-precompact-handoff.sh recorded for this
+#                       session (--session), printed before
 #                       everything else so it survives a harness that keeps
 #                       only the first 2KB of an oversized hook output inline.
 #                       Read-only.
@@ -192,7 +193,7 @@
 # Hosts without timeout, gtimeout, or perl use the shared pure-Bash watchdog, so
 # the digest never runs without the same hard bound and process-group cleanup.
 #
-# Usage: fm-session-start.sh [--reemit] [--source <source>]
+# Usage: fm-session-start.sh [--reemit] [--source <source>] [--session <id>]
 #   Prints the full ordered digest to stdout and always exits 0: this is a
 #   reporting command, not a gate. A lock refusal is reported as a loud
 #   banner inline, never a silent failure or a non-zero exit that would make
@@ -230,6 +231,10 @@
 #             current AGENTS.md to print before the bulky digest. The baseline
 #             remains immutable so every later drifted compaction refreshes
 #             again, while an equal baseline emits no instruction refresh.
+#
+#   --session The native session id, supplied only by fm-sessionstart-run.sh
+#             from the hook payload. On a compaction source, the pre-compaction
+#             handoff is printed only when its record names this session.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -243,6 +248,7 @@ AGENTS_BASELINE_FILE="$STATE/.session-start-agents-baseline"
 
 REEMIT=0
 SESSION_SOURCE=
+SESSION_ID=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --reemit)
@@ -257,13 +263,21 @@ while [ "$#" -gt 0 ]; do
       SESSION_SOURCE=${1#--source=}
       shift
       ;;
+    --session)
+      SESSION_ID=${2:-}
+      if [ "$#" -ge 2 ]; then shift 2; else shift; fi
+      ;;
+    --session=*)
+      SESSION_ID=${1#--session=}
+      shift
+      ;;
     -h|--help)
       sed -n '2,/^set -u$/p' "$SCRIPT_DIR/fm-session-start.sh" | sed 's/^# \{0,1\}//; $d'
       exit 0
       ;;
     *)
       printf 'fm-session-start: unknown argument: %s\n' "$1" >&2
-      printf 'usage: fm-session-start.sh [--reemit] [--source <source>]\n' >&2
+      printf 'usage: fm-session-start.sh [--reemit] [--source <source>] [--session <id>]\n' >&2
       exit 2
       ;;
   esac
@@ -313,25 +327,13 @@ if [ -z "${FM_SESSION_START_STAGE_FILE:-}" ]; then
     # is lost, so the child still runs bounded.
     SESSION_START_STAGE_FILE=/dev/null
   fi
-  if [ "$REEMIT" -eq 1 ]; then
-    if [ -n "$SESSION_SOURCE" ]; then
-      fm_run_timed "$SESSION_START_BUDGET" \
-        env FM_SESSION_START_STAGE_FILE="$SESSION_START_STAGE_FILE" \
-        "$SCRIPT_DIR/fm-session-start.sh" --reemit --source "$SESSION_SOURCE"
-    else
-      fm_run_timed "$SESSION_START_BUDGET" \
-        env FM_SESSION_START_STAGE_FILE="$SESSION_START_STAGE_FILE" \
-        "$SCRIPT_DIR/fm-session-start.sh" --reemit
-    fi
-  elif [ -n "$SESSION_SOURCE" ]; then
-    fm_run_timed "$SESSION_START_BUDGET" \
-      env FM_SESSION_START_STAGE_FILE="$SESSION_START_STAGE_FILE" \
-      "$SCRIPT_DIR/fm-session-start.sh" --source "$SESSION_SOURCE"
-  else
-    fm_run_timed "$SESSION_START_BUDGET" \
-      env FM_SESSION_START_STAGE_FILE="$SESSION_START_STAGE_FILE" \
-      "$SCRIPT_DIR/fm-session-start.sh"
-  fi
+  SESSION_START_ARGS=()
+  [ "$REEMIT" -eq 0 ] || SESSION_START_ARGS+=(--reemit)
+  [ -z "$SESSION_SOURCE" ] || SESSION_START_ARGS+=(--source "$SESSION_SOURCE")
+  [ -z "$SESSION_ID" ] || SESSION_START_ARGS+=(--session "$SESSION_ID")
+  fm_run_timed "$SESSION_START_BUDGET" \
+    env FM_SESSION_START_STAGE_FILE="$SESSION_START_STAGE_FILE" \
+    "$SCRIPT_DIR/fm-session-start.sh" ${SESSION_START_ARGS[@]+"${SESSION_START_ARGS[@]}"}
   SESSION_START_RC=$?
   if [ "$SESSION_START_RC" -eq 124 ]; then
     SESSION_START_LAST_STAGE=$(cat "$SESSION_START_STAGE_FILE" 2>/dev/null) || SESSION_START_LAST_STAGE=
@@ -639,7 +641,10 @@ EOF
 # print_precompact_handoff: the pre-compaction handoff subsection. The producer's
 # header (bin/fm-precompact-handoff.sh) owns the record and block formats. A
 # record older than PRECOMPACT_HANDOFF_FRESH_SECONDS belongs to an earlier
-# compaction, so its block is not presented as this one's.
+# compaction, and a record naming another session (or with no session to
+# compare) belongs to another session's compaction, since a hook that stepped
+# aside or was killed leaves the last one in place; neither is presented as
+# this one's.
 PRECOMPACT_HANDOFF_FRESH_SECONDS=1800
 precompact_handoff_heading() {
   printf 'PRE-COMPACTION HANDOFF (data/session-handoff.md) - read first\n'
@@ -648,7 +653,7 @@ precompact_handoff_heading() {
 }
 print_precompact_handoff() {
   local record="$STATE/.precompact-handoff" handoff="$DATA/session-handoff.md"
-  local status at transcript reason now age block
+  local status at session transcript reason now age block
   if [ ! -f "$record" ]; then
     [ "$PRIMARY_HARNESS" = claude ] || return 0
     precompact_handoff_heading
@@ -659,6 +664,7 @@ print_precompact_handoff() {
   precompact_handoff_heading
   status=$(sed -n 's/^status=//p' "$record" 2>/dev/null | tail -n 1)
   at=$(sed -n 's/^at=//p' "$record" 2>/dev/null | tail -n 1)
+  session=$(sed -n 's/^session=//p' "$record" 2>/dev/null | tail -n 1)
   transcript=$(sed -n 's/^transcript=//p' "$record" 2>/dev/null | tail -n 1)
   reason=$(sed -n 's/^reason=//p' "$record" 2>/dev/null | tail -n 1)
   now=$(date +%s)
@@ -666,6 +672,12 @@ print_precompact_handoff() {
   age=$((now - at))
   if [ "$age" -gt "$PRECOMPACT_HANDOFF_FRESH_SECONDS" ]; then
     printf 'None recorded for this compaction: the last one is %s minutes old and belongs to an earlier compaction.\n' "$((age / 60))"
+    printf 'Decisions or open work that existed only in conversation before this compaction may be missing from the summary.\n'
+    return 0
+  fi
+  if [ -z "$SESSION_ID" ] || [ "$session" != "$SESSION_ID" ]; then
+    printf 'None recorded for this compaction: the last one was recorded for session %s, not this session (%s).\n' \
+      "${session:-unknown}" "${SESSION_ID:-unknown}"
     printf 'Decisions or open work that existed only in conversation before this compaction may be missing from the summary.\n'
     return 0
   fi

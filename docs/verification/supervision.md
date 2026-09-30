@@ -216,6 +216,7 @@ The `PreCompact` payload was:
 ```
 
 The hooks then fired in this order: `PreCompact`, `SessionStart` with `source` `compact`, and `PostCompact`, whose payload also carried the full `compact_summary`.
+The `SessionStart` `compact` payload carried the same `session_id` as the `PreCompact` payload, which is what the compaction digest matches the handoff record against.
 The `PreCompact` stdout did not appear in the summary; it appeared only in the command's own `<local-command-stdout>` record as `PreCompact [<command>] completed successfully: <stdout>`.
 
 An automatic compaction ran in one `claude -p --input-format stream-json` session with `CLAUDE_CODE_AUTO_COMPACT_WINDOW=100000 CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=5`; that window is the floor the binary enforces.
@@ -232,6 +233,7 @@ Transcript shape, in the same version:
 
 - In an interactive TUI session, a genuine captain turn is a `user` record with `origin.kind` `human`, and background-task wakes carry `origin.kind` `task-notification`.
 - Firstmate's own typed operational input, such as a record-backed doorbell, is also recorded with `origin.kind` `human`, so the hook tells it apart through `bin/fm-operational-input.sh` rather than by origin.
+- A typed slash command such as `/stow` is a `human` record holding only its `<command-message>` and `<command-name>` tags, plus `<command-args>` when the captain gave arguments.
 - A headless `claude -p` or stream-json session writes its transcript with no `origin` field at all, so the hook records no captain turns there; only the interactive primary carries them.
 - A session launched from inside another Claude session inherits `CLAUDE_CODE_CHILD_SESSION` and saves no transcript, so a lab must clear every inherited `CLAUDE*` variable.
 
@@ -243,7 +245,7 @@ Refresh with the live guard, which drives the interactive TUI through a Python p
 ```text
 $ FM_PRECOMPACT_HANDOFF_LIVE_E2E=1 tests/fm-precompact-handoff-live-e2e.test.sh
 # claude: 2.1.285 (Claude Code)
-ok - claude 2.1.285 (Claude Code): interactive /compact runs the committed hook with trigger=manual, quotes the captain verbatim, drops a doorbell, and proceeds
+ok - claude 2.1.285 (Claude Code): interactive /compact runs the committed hook with trigger=manual, quotes the captain and a typed /stow verbatim, drops a doorbell, proceeds, and reopens as the recorded session
 ok - claude 2.1.285 (Claude Code): an interactive automatic compaction runs the handoff first with trigger=auto and verbatim captain words
 ```
 

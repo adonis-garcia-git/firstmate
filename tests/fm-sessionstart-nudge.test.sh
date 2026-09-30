@@ -998,6 +998,25 @@ test_run_reads_source_from_the_hook_payload() {
   pass "run wrapper: the hook payload's source field drives routing with no explicit argument"
 }
 
+# The compaction digest prints the pre-compaction handoff only for the session
+# that recorded it, so the wrapper must forward the payload's session_id.
+test_run_forwards_the_payload_session_to_the_compact_digest() {
+  local root="$TMP_ROOT/run-payload-session" out
+  make_run_primary "$root"
+  run_hook "$root" --source startup </dev/null >/dev/null
+  printf '%s\n' '<!-- fm-precompact-handoff:begin -->' '> SESSION-S1-CAPTAIN-WORDS' '<!-- fm-precompact-handoff:end -->' \
+    > "$root/data/session-handoff.md"
+  printf 'status=ok\nat=%s\ntrigger=auto\nsession=s1\ntranscript=/t/s1.jsonl\nturns=1\nreason=\n' "$(date +%s)" \
+    > "$root/state/.precompact-handoff"
+  out=$(printf '{"session_id":"s1","hook_event_name":"SessionStart","source":"compact"}' | run_hook "$root")
+  assert_contains "$out" "SESSION-S1-CAPTAIN-WORDS" "the payload's session_id did not reach the compaction digest"
+  out=$(printf '{"session_id":"s2","hook_event_name":"SessionStart","source":"compact"}' | run_hook "$root")
+  assert_contains "$out" "None recorded for this compaction: the last one was recorded for session s1, not this session (s2)." \
+    "another session's compaction was handed session s1's snapshot"
+  assert_not_contains "$out" "SESSION-S1-CAPTAIN-WORDS" "another session's compaction printed session s1's snapshot"
+  pass "run wrapper: the hook payload's session_id reaches the compaction digest"
+}
+
 test_run_unknown_source_takes_the_helm() {
   local root="$TMP_ROOT/run-unknown" out status=0
   make_run_primary "$root"
@@ -1065,6 +1084,7 @@ test_run_clear_without_completion_finishes_startup
 test_run_clear_rejects_previous_owner_completion
 test_run_resume_delegates_to_the_nudge
 test_run_reads_source_from_the_hook_payload
+test_run_forwards_the_payload_session_to_the_compact_digest
 test_run_unknown_source_takes_the_helm
 test_run_gate_and_scope_are_silent
 test_run_reports_a_failed_session_start_as_digest_text

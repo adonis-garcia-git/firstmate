@@ -253,6 +253,67 @@ test_skips_firstmate_operational_input() {
   pass "firstmate's own typed operational input is not recorded as captain words"
 }
 
+# Claude Code records a slash command as nothing but its command tags, with no
+# <command-args> when the captain gave none. A captain turn that merely quotes a
+# tag is prose and must be kept whole, decision included.
+test_renders_slash_commands_and_keeps_quoted_tags() {
+  local dir transcript block
+  dir=$(make_home "$TMP_ROOT/commands")
+  transcript="$TMP_ROOT/commands.jsonl"
+  {
+    jq -nc '{type:"user", origin:{kind:"human"}, timestamp:"T1", message:{role:"user", content:"UNPAIRED-SENTINEL the <command-name> tag broke; DECISION-SENTINEL hold the migration until Friday"}}'
+    jq -nc '{type:"user", origin:{kind:"human"}, timestamp:"T2", message:{role:"user", content:"QUOTED-SENTINEL note <command-name>/deploy</command-name> in the log and DECISION-TWO-SENTINEL ship PR 7"}}'
+    jq -nc '{type:"user", origin:{kind:"human"}, timestamp:"T3", message:{role:"user", content:"<command-message>bearings</command-message>\n<command-name>/bearings</command-name>\n<command-args>fleet now</command-args>"}}'
+    jq -nc '{type:"user", origin:{kind:"human"}, timestamp:"T4", message:{role:"user", content:"<command-message>stow</command-message>\n<command-name>/stow</command-name>"}}'
+  } > "$transcript"
+  run_hook "$dir" "$(payload "$transcript")"
+  block=$(block_of "$dir")
+  assert_contains "$block" "$(printf -- '- T4\n\n> /stow\n')" "a bare slash command was not rendered as the captain typed it"
+  assert_contains "$block" "> /bearings fleet now" "a slash command with arguments was not rendered as the captain typed it"
+  assert_contains "$block" "> UNPAIRED-SENTINEL the <command-name> tag broke; DECISION-SENTINEL hold the migration until Friday" \
+    "a captain turn with an unpaired command tag was not kept verbatim"
+  assert_contains "$block" "> QUOTED-SENTINEL note <command-name>/deploy</command-name> in the log and DECISION-TWO-SENTINEL ship PR 7" \
+    "a captain turn quoting a command tag was not kept verbatim"
+  [ "$(record_field "$dir" turns)" = 4 ] || fail "expected 4 captain turns, got $(record_field "$dir" turns)"
+  pass "slash commands read as typed, and a turn that only quotes a command tag is kept whole"
+}
+
+# The settings entry kills a hook that outlives its timeout. A kill while the
+# hook reads the transcript must leave no temporary copy of the captain's turns,
+# nor of the block or note, in data/.
+test_a_killed_hook_leaves_no_temporary_files() {
+  local dir fifo pid tries=0 left tmp
+  dir=$(make_home "$TMP_ROOT/killed")
+  fifo="$TMP_ROOT/killed.jsonl"
+  mkfifo "$fifo"
+  # A transcript nobody writes to holds the hook inside its transcript read.
+  # Job control puts the hook in its own process group, as a harness kills it.
+  set -m
+  payload "$fifo" | env -u NO_MISTAKES_GATE FM_HOME="$dir" "$dir/bin/fm-precompact-handoff.sh" >/dev/null 2>&1 &
+  pid=$!
+  set +m
+  until [ -n "$(ls -A "$dir/data")" ]; do
+    tries=$((tries + 1))
+    [ "$tries" -lt 100 ] || { kill -KILL -- "-$pid" 2>/dev/null; fail "the hook never started reading the transcript"; }
+    sleep 0.1
+  done
+  kill -TERM -- "-$pid" 2>/dev/null || fail "could not signal the hook"
+  wait "$pid" 2>/dev/null || true
+  tries=0
+  while kill -0 -- "-$pid" 2>/dev/null; do
+    tries=$((tries + 1))
+    [ "$tries" -lt 50 ] || { kill -KILL -- "-$pid" 2>/dev/null; fail "the hook did not exit on SIGTERM"; }
+    sleep 0.1
+  done
+  rm -f "$fifo"
+  left=$(ls -A "$dir/data")
+  for tmp in "$dir"/state/.precompact-handoff.*; do
+    [ ! -e "$tmp" ] || left="$left ${tmp##*/}"
+  done
+  [ -z "$left" ] || fail "a killed hook left temporary files behind: $left"
+  pass "a hook killed mid-run leaves no temporary files behind"
+}
+
 test_missing_transcript_still_writes_open_work() {
   local dir
   dir=$(make_home "$TMP_ROOT/no-transcript")
@@ -388,6 +449,8 @@ test_replaces_its_block_in_place
 test_keeps_only_the_most_recent_turns
 test_records_no_turns_without_origin
 test_skips_firstmate_operational_input
+test_renders_slash_commands_and_keeps_quoted_tags
+test_a_killed_hook_leaves_no_temporary_files
 test_missing_transcript_still_writes_open_work
 test_failures_step_aside_without_blocking
 test_out_of_scope_sessions_never_write

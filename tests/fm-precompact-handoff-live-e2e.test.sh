@@ -11,10 +11,14 @@
 #       and the /compact instructions;
 #   (b) an interactive session's transcript marks the captain's typed turns
 #       with `origin.kind` `human`, so the hook can quote them verbatim, and
-#       marks a typed firstmate doorbell the same way, so the hook must drop it
-#       (tests/fm-precompact-handoff.test.sh pins the parsing portably against
-#       hand-built records of the same shape);
-#   (c) the compaction still proceeds after the hook ran;
+#       marks a typed firstmate doorbell the same way, so the hook must drop it,
+#       and records a typed slash command as its command tags, which the hook
+#       renders as typed (tests/fm-precompact-handoff.test.sh pins the parsing
+#       portably against hand-built records of the same shape);
+#   (c) the compaction still proceeds after the hook ran, and the SessionStart
+#       `compact` payload that follows carries the session_id the hook
+#       recorded, which the compaction digest requires before it prints the
+#       handoff;
 #   (d) the primary is the interactive TUI, and headless `claude -p` or
 #       stream-json transcripts carry no `origin` field at all, so this guard
 #       drives the real TUI through a pty rather than print mode.
@@ -22,7 +26,9 @@
 # It builds a throwaway Firstmate-shaped lab outside the repo carrying the
 # TRACKED Claude settings and the real hook copied with its committed mode, so a
 # registration that stops firing or a hook that lost its executable bit fails
-# here; the other tracked hook scripts get executable no-op stubs. Every
+# here; the other tracked hook scripts get executable no-op stubs, except that
+# the session-open stub keeps each payload it is handed. A lab-local `/stow`
+# command that only replies OK stands in for the real stow skill. Every
 # inherited CLAUDE* variable is cleared first: a session launched from inside
 # another Claude session inherits CLAUDE_CODE_CHILD_SESSION and saves no
 # transcript. The lab's workspace-trust dialog is answered "Yes" for that
@@ -73,7 +79,15 @@ make_lab() {  # <dir>
     mode=$(git -C "$ROOT" ls-files -s "bin/$script" | cut -d' ' -f1)
     [ "$mode" != 100755 ] || chmod +x "$lab/bin/$script"
   done
-  for script in fm-sessionstart-run.sh fm-turnend-guard.sh fm-claude-stop-autoarm.sh \
+  cat > "$lab/bin/fm-sessionstart-run.sh" <<'SH'
+#!/usr/bin/env bash
+{ cat; printf '\n'; } >> "$(dirname "$0")/../state/.sessionstart-payloads"
+exit 0
+SH
+  chmod +x "$lab/bin/fm-sessionstart-run.sh"
+  mkdir -p "$lab/.claude/commands"
+  printf 'Reply with just OK.\n' > "$lab/.claude/commands/stow.md"
+  for script in fm-turnend-guard.sh fm-claude-stop-autoarm.sh \
     fm-arm-pretool-check.sh fm-cd-pretool-check.sh fm-subagent-pretool-check.sh \
     fm-host-mirror.sh fm-tasks-axi.sh; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$lab/bin/$script"
@@ -231,6 +245,8 @@ PHRASE="Remember the manual codeword MANUAL-$NONCE and reply with just OK."
   printf 'await-reply\n'
   printf 'type %s\n' "$(doorbell "$MANUAL")"
   printf 'await-reply\n'
+  printf 'type /stow\n'
+  printf 'await-reply\n'
   printf 'type /compact keep ARG-%s\n' "$NONCE"
   printf 'await-file %s\n' "$MANUAL/state/.precompact-handoff"
   printf 'pause 20\n'
@@ -246,6 +262,7 @@ TRANSCRIPT=$(FM_LIVE_DRIVER_MODEL="$MODEL" python3 "$DRIVER" "$MANUAL" "$LAB/man
 NOTE=$(cat "$MANUAL/data/session-handoff.md")
 assert_contains "$NOTE" "> $PHRASE" "claude $VERSION: the captain's words were not quoted verbatim from the real transcript"
 assert_contains "$NOTE" "> keep ARG-$NONCE" "claude $VERSION: the /compact instructions did not reach the hook"
+assert_contains "$NOTE" "$(printf '\n> /stow\n')" "claude $VERSION: the typed /stow was not quoted as the captain typed it"
 assert_not_contains "$NOTE" "1790000000-$NONCE" "claude $VERSION: a typed firstmate doorbell was quoted as the captain's words"
 jq -e --arg n "1790000000-$NONCE" 'select(.type == "user" and .origin.kind == "human")
   | (.message.content | if type == "string" then . else ([.[]? | .text? // empty] | join(" ")) end)
@@ -253,7 +270,11 @@ jq -e --arg n "1790000000-$NONCE" 'select(.type == "user" and .origin.kind == "h
   || fail "claude $VERSION: the typed doorbell was not recorded as a human turn, so the exclusion went untested"
 grep -q '"compact_boundary"' "$TRANSCRIPT" 2>/dev/null \
   || fail "claude $VERSION: the compaction did not proceed after the hook ran"
-pass "claude $VERSION: interactive /compact runs the committed hook with trigger=manual, quotes the captain verbatim, drops a doorbell, and proceeds"
+[ -n "$(field "$MANUAL" session)" ] || fail "claude $VERSION: the hook recorded no session id"
+jq -e --arg s "$(field "$MANUAL" session)" 'select(.source == "compact" and .session_id == $s)' \
+  "$MANUAL/state/.sessionstart-payloads" >/dev/null 2>&1 \
+  || fail "claude $VERSION: no SessionStart compact payload carried the session id the hook recorded: $(cat "$MANUAL/state/.sessionstart-payloads" 2>/dev/null)"
+pass "claude $VERSION: interactive /compact runs the committed hook with trigger=manual, quotes the captain and a typed /stow verbatim, drops a doorbell, proceeds, and reopens as the recorded session"
 
 # --- automatic compaction ------------------------------------------------------
 AUTO="$LAB/auto"

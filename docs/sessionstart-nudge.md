@@ -126,14 +126,17 @@ The `bin/fm-session-start.sh` header is the single owner of those mechanics.
 A compaction keeps the session but replaces its conversation with a summary, and an automatic compaction happens with no `/stow` first.
 On Claude, `.claude/settings.json` registers one unmatched `PreCompact` hook, so `bin/fm-precompact-handoff.sh` runs just before every manual and automatic compaction.
 It writes a snapshot of what the summary could lose into the home's session handoff note, `data/session-handoff.md`: the `/compact` instructions, the captain's most recent turns verbatim and newest first, the id and hold kind of every held backlog item, and every task record's id, kind, and PR URL.
+The `/compact` instructions and each turn are clipped to the same length, and a slash command reads as the captain typed it.
 It never copies firstmate's replies, worker status lines, backlog titles, or hold reasons, because those can quote patient or worker text and the compaction digest reprints the work state from its own records anyway.
 It owns only its marked block in that note; every other line belongs to whoever wrote it, and the hook preserves it.
 It records and never judges: filing work and correcting records stays with `/stow` and the agent.
 
 The compaction's `compact` digest prints that block first, ahead of every other section.
 Claude Code keeps only a 2KB preview of an oversized hook output inline and saves the whole output to a file it names on a `Full output saved to` line, and a compaction digest is routinely larger than that.
-So the handoff's heading, its pointer to that saved file, and the newest captain turn all start inside the preview.
-When no result was recorded at all, or the recorded one is stale, the digest says so and warns that conversation-only decisions or open work may be missing from the summary.
+So the handoff's heading, its pointer to that saved file, and the newest captain turn all start inside the preview, even under long `/compact` instructions.
+`bin/fm-sessionstart-run.sh` forwards the `SessionStart` payload's `session_id`, and the digest presents a recorded result as this compaction's only when it is recent and names that same session.
+A hook that stepped aside or was killed leaves the previous result in place, so a result from another session, or one either side cannot name a session for, is not this compaction's.
+When no result was recorded at all, or the recorded one is stale or from another session, the digest says so and warns that conversation-only decisions or open work may be missing from the summary.
 When the hook failed for this compaction, or its result is fresh but the block is gone from the note, the digest says so and names the pre-compaction transcript the result recorded, to read instead, because the transcript file outlives the compaction.
 
 The hook never blocks or fails the compaction.
