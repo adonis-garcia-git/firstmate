@@ -74,6 +74,12 @@ else
   echo "wrapper requires trailing --session $SESSION" >&2
   exit 98
 fi
+# FM_LIVE_SEND_TEXT_DELAY injects a late render: the typed text reaches the
+# pane that many seconds after the adapter's send returns.
+if [ -n "\${FM_LIVE_SEND_TEXT_DELAY:-}" ] && [ "\${args[0]:-}" = pane ] && [ "\${args[1]:-}" = send-text ]; then
+  ( sleep "\$FM_LIVE_SEND_TEXT_DELAY"; exec env PATH="$ORIGINAL_PATH" "$LAB_HELPER" run "$SESSION" "\${args[@]}" ) >/dev/null 2>&1 &
+  exit 0
+fi
 exec env PATH="$ORIGINAL_PATH" "$LAB_HELPER" run "$SESSION" "\${args[@]}"
 EOF
 chmod +x "$FAKEBIN/herdr"
@@ -269,6 +275,23 @@ for shape in paragraphs attachment attachments; do
     || fail "Claude Code ($VERSION) on $HERDR_VER: the ${#msg}-char $shape message was not submitted whole (${submitted:-absent})"
   pass "live Herdr paragraph break: Claude Code ($VERSION) on $HERDR_VER submits the whole ${#msg}-char $shape message byte-for-byte"
 done
+
+# A late render: a large, busy Claude can draw typed text after the caller's
+# settle. The text reaches the pane 0.8 seconds after the send returns, past
+# the 0.3-second settle, and must still be proven and submitted once whole.
+wait_idle 60 || true
+LATE_TOKEN="FMLATE$$x$RANDOM"
+msg="${LATE_TOKEN}END I want you to launch a thorough investigation instead, to make sure that we actually understand the situation. Regarding the question you raised, based on what I know, I would say go with your recommendation. Reply with only the word OK."
+export FM_LIVE_SEND_TEXT_DELAY=0.8
+verdict=$(fm_backend_herdr_send_text_submit "$TARGET" "$msg" 3 0.4 0.3) \
+  || fail "send_text_submit failed to run the late-render message against Claude Code ($VERSION) on $HERDR_VER"
+unset FM_LIVE_SEND_TEXT_DELAY
+[ "$verdict" = empty ] \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: a ${#msg}-char message drawn 0.8s late must confirm empty, got '$verdict'"
+submitted=$(submitted_shape "$msg" "$LATE_TOKEN")
+[ "$submitted" = whole ] \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: the ${#msg}-char message drawn late was not submitted whole (${submitted:-absent})"
+pass "live Herdr late render: Claude Code ($VERSION) on $HERDR_VER re-reads a ${#msg}-char message drawn 0.8s after the send and submits it whole"
 
 # The captain sends from helm while firstmate is mid-turn: the same attachment
 # shape must land in a busy Claude, which queues it, and be submitted whole.

@@ -1224,6 +1224,26 @@ With the pre-fix read-back, the same guard failed:
 not ok - Claude Code (2.1.285 (Claude Code)) on herdr 0.8.2: a 214-char attachment message with a blank line must confirm empty, got 'send-failed'
 ```
 
+### Late composer render
+
+Measured 2026-09-30 against Herdr 0.8.2 and Claude Code 2.1.285 in an isolated `fm-lab-` session.
+
+The Claude payload proof read the composer once, 0.3 seconds after typing, so a session that drew the text later was refused and cleared although the text landed.
+`fm_backend_herdr_composer_payload_wait` now re-reads over `FM_BACKEND_HERDR_PROOF_BACKOFF`, about two seconds, and each refusal names its reason on stderr.
+`tests/fm-backend-herdr.test.sh` pins the late render, the refusal after the window, and the reasons.
+The live guard injects the late render by delivering the typed text 0.8 seconds after the adapter's send returns.
+Observed 2026-09-30:
+
+```text
+ok - live Herdr late render: Claude Code (2.1.285 (Claude Code)) on herdr 0.8.2 re-reads a 257-char message drawn 0.8s after the send and submits it whole
+```
+
+With the single read, the same guard failed:
+
+```text
+not ok - Claude Code (2.1.285 (Claude Code)) on herdr 0.8.2: a 258-char message drawn 0.8s late must confirm empty, got 'send-failed'
+```
+
 ### Prune and respawn
 
 The real label-collision reproduction is owned by:
