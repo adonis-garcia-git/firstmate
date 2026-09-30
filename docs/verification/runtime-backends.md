@@ -1244,6 +1244,32 @@ With the single read, the same guard failed:
 not ok - Claude Code (2.1.285 (Claude Code)) on herdr 0.8.2: a 258-char message drawn 0.8s late must confirm empty, got 'send-failed'
 ```
 
+### Scrolled composer
+
+Measured 2026-09-30 against Herdr 0.8.2 and Claude Code 2.1.285 in an isolated `fm-lab-` session with the lab viewer attached, which is what gives a split lab pane its real size.
+
+Claude's fullscreen view caps its composer at about half the pane's rows, never fewer than three: 13 visible rows in a 39-row pane and 3 in a 16-row pane.
+It scrolls a longer draft with the cursor, so a message that landed whole reads back as its own last rows, and the payload proof refused it as a draft that lost its head.
+Helm's 379-character single-paragraph chat message, sent through `bin/fm-send.sh` with an explicit pane target as Helm sends it, exited 1 in a 33-by-16 pane with "after 6 read(s) the Claude composer ... showed 49 of 312 characters of the message", although moving the cursor to the start showed the whole message was in the composer.
+The same proof refused it in a 94-by-16 pane, which showed 171 of 312 characters.
+A 20-row tail capture also cut the top off a composer taller than the capture.
+Herdr's `pane send-keys` rejects `home` and `end` as unsupported keys, and the raw sequences `ESC [ H` and `ESC [ F` typed through `pane send-text` move Claude's cursor one wrapped row per sequence, including several in one write.
+Home stops at the draft's start, while Up at the first row opened `History 1/1` and replaced the draft.
+`fm_backend_herdr_composer_scrolled_proof` in `bin/backends/herdr.sh` pages through such a composer, every proof read captures the whole screen, and `tests/fm-backend-herdr.test.sh` pins both through a stateful composer simulator.
+The live guard above refreshes the Claude proof in a split pane of about 16 rows.
+Observed 2026-09-30:
+
+```text
+ok - live Herdr scrolled composer: Claude Code (2.1.285 (Claude Code)) on herdr 0.8.2 pages a 370-char message its 14-row pane scrolls and submits it whole
+ok - live Herdr scrolled composer: Claude Code (2.1.285 (Claude Code)) on herdr 0.8.2 pages a scrolled draft missing its head and refuses it
+```
+
+With the pre-fix proof, the same guard failed:
+
+```text
+not ok - Claude Code (2.1.285 (Claude Code)) on herdr 0.8.2: a 369-char message that Claude's 14-row pane scrolls in its composer must confirm empty, got 'send-failed'
+```
+
 ### Prune and respawn
 
 The real label-collision reproduction is owned by:

@@ -9,8 +9,10 @@
 # paragraph break (helm's text-plus-attachment shape, whose attachment line
 # ends in ` |`) whole, as Claude's own session transcript records it, both
 # idle and while Claude is mid-turn, and to refuse a composer that shows only
-# part of the payload. It fails naming the harness and version rather than
-# degrading quietly.
+# part of the payload. In a pane short enough that Claude's composer scrolls a
+# long message, it requires the proof to page through the composer and submit
+# the whole message, and to refuse a scrolled draft that lost its head. It
+# fails naming the harness and version rather than degrading quietly.
 #
 # Run explicitly with FM_HERDR_SUBMIT_CONFIRM_LIVE=1 after a Herdr or Claude
 # upgrade, and before trusting a refreshed docs/verification/runtime-backends.md
@@ -350,5 +352,57 @@ for part in tail head; do
     || fail "Claude Code ($VERSION) on $HERDR_VER: could not clear the truncation probe's $part from the composer"
 done
 pass "live Herdr payload proof: Claude Code ($VERSION) on $HERDR_VER refuses a composer showing only the head or only the tail"
+
+# A composer too short for the message (Helm's long captain chat while
+# firstmate sat idle): Claude's fullscreen view caps its composer at about half
+# the pane's rows and scrolls a longer draft, so the read-back shows only the
+# message's last rows. A lab pane has its real size only while a client is
+# attached, so the viewer attaches before the pane is split to about 16 rows,
+# which leaves Claude three composer rows for a message that wraps over five.
+wait_idle 60 || true
+# The viewer runs `herdr --session <name>` from PATH, so it gets the real
+# Herdr rather than this guard's session-checking wrapper.
+env PATH="$ORIGINAL_PATH" "$LAB_HELPER" viewer start "$SESSION" >/dev/null \
+  || fail "could not attach the lab viewer that gives the Claude pane a real size"
+lab pane split "$PANE" --direction down --ratio 0.4 >/dev/null \
+  || fail "could not split the lab pane to shorten Claude's composer"
+rows=''
+i=0
+while [ "$i" -lt 20 ]; do
+  rows=$(lab pane get "$PANE" 2>/dev/null | jq -r '.result.pane.scroll.viewport_rows // empty')
+  case "$rows" in ''|*[!0-9]*) ;; *) [ "$rows" -le 16 ] && break ;; esac
+  i=$((i + 1))
+  sleep 0.5
+done
+case "$rows" in ''|*[!0-9]*) rows=99 ;; esac
+[ "$rows" -le 16 ] || fail "the split lab pane never shrank to 16 rows (viewport rows: $rows)"
+wait_idle 30 || true
+SCROLL_TOKEN="FMSCROLL$$x$RANDOM"
+msg="${SCROLL_TOKEN}END All right. Regarding the stuff you said, waiting on me for number one, look into it. Make sure that he didn't actually do anything, and that we have a better understanding of this situation before I ask anything. For number two and three, elaborate on them with your recommendation and how. Same thing for number five. Reply with only the word OK."
+verdict=$(fm_backend_herdr_send_text_submit "$TARGET" "$msg" 3 0.4 0.3) \
+  || fail "send_text_submit failed to run the scrolled-composer message against Claude Code ($VERSION) on $HERDR_VER"
+[ "$verdict" = empty ] \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: a ${#msg}-char message that Claude's $rows-row pane scrolls in its composer must confirm empty, got '$verdict'"
+submitted=$(submitted_shape "$msg" "$SCROLL_TOKEN")
+[ "$submitted" = whole ] \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: the ${#msg}-char message scrolled in the composer was not submitted whole (${submitted:-absent})"
+pass "live Herdr scrolled composer: Claude Code ($VERSION) on $HERDR_VER pages a ${#msg}-char message its $rows-row pane scrolls and submits it whole"
+
+# The same pane, with a draft that lost its first word: paging must reach the
+# draft's start, see that it is not the message's start, and refuse.
+wait_idle 60 || true
+typed=${msg#* }
+lab pane send-text "$PANE" "$typed" >/dev/null \
+  || fail "could not type the head-dropped draft into the lab composer"
+sleep 0.5
+if fm_backend_herdr_composer_payload_wait "$TARGET" "$msg" "$FM_BACKEND_HERDR_PROOF_CAPTURE_LINES"; then
+  fail "Claude Code ($VERSION) on $HERDR_VER: the payload proof accepted a scrolled draft missing the message's first word"
+fi
+[ "$FM_BACKEND_HERDR_PROOF_PROVEN" -ge 0 ] \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: the head-dropped draft was refused without paging, so this case proved nothing about the scrolled proof"
+fm_backend_herdr_composer_clear "$TARGET" "$typed" \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: could not clear the refused head-dropped draft"
+pass "live Herdr scrolled composer: Claude Code ($VERSION) on $HERDR_VER pages a scrolled draft missing its head and refuses it"
+env PATH="$ORIGINAL_PATH" "$LAB_HELPER" viewer stop "$SESSION" >/dev/null || true
 
 [ "$CHECKED" -gt 0 ] || fail "FM_HERDR_SUBMIT_CONFIRM_LIVE=1 checked no harness"

@@ -996,6 +996,28 @@ test_titled_bottom_requires_matching_width
 test_cursor_on_proven_box_bottom_classifies_content
 test_selected_content_is_composer_scoped_and_wrap_normalized
 
+test_selected_rows_counts_the_composer_rows_it_reads() {
+  # A Claude composer capped at three rows shows exactly its cap while it
+  # scrolls a longer draft, and a Herdr payload proof steps its paging by that
+  # count. A blank interior row is a composer row too.
+  local rule footer screen out
+  rule='──────────────────────────────'
+  footer=$'\n  Opus 5.5 | ctx: 8% used\n  ⏵⏵ bypass permissions on'
+  screen=$'transcript line\n❯ an earlier prompt\n'"$rule"$'\n❯ ring number one, look into\n  it. Make sure that he\n  didn\'t actually do anything\n'"$rule$footer"
+  out=$(fm_composer_selected_rows "$screen") || fail "a ruled three-row Claude composer should report its rows"
+  [ "$out" = 3 ] || fail "a ruled three-row Claude composer should report 3 rows, got '$out'"
+  screen=$'transcript line\n'"$rule"$'\n❯ a\n\n  b\n'"$rule$footer"
+  out=$(fm_composer_selected_rows "$screen") || fail "a composer with a paragraph break should report its rows"
+  [ "$out" = 3 ] || fail "a blank interior row should count as a composer row, got '$out'"
+  screen=$'transcript line\n'"$rule"$'\n❯\u00a0\n'"$rule$footer"
+  out=$(fm_composer_selected_rows "$screen") || fail "an empty ruled composer should report its row"
+  [ "$out" = 1 ] || fail "an empty ruled composer should report 1 row, got '$out'"
+  if out=$(fm_composer_selected_rows $'just some shell output\nwith no composer'); then
+    fail "a screen with no composer must not report rows, got '$out'"
+  fi
+  pass "fm_composer_selected_rows: counts the rows of the composer fm_composer_extract_selected_content reads"
+}
+
 test_ruled_bare_composer_keeps_text_past_a_blank_line() {
   # helm chat with an attachment types "<text>\n\nATTACHMENTS: <path>" into
   # the Claude composer on Herdr. Claude renders the typed blank line as a
@@ -1104,3 +1126,4 @@ test_queued_enter_verdict_idle_pending_stays_pending
 test_queued_enter_verdict_does_not_convert_other_states
 test_ruled_bare_composer_keeps_text_past_a_blank_line
 test_ruled_bare_composer_keeps_typed_ascii_pipes
+test_selected_rows_counts_the_composer_rows_it_reads

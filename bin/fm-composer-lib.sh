@@ -1695,6 +1695,18 @@ EOF
   printf '%s\n' "$joined" | LC_ALL=C awk '{$1=$1; printf "%s", $0}'
 }
 
+# fm_composer_selected_rows: how many screen rows the composer that
+# fm_composer_extract_selected_content reads occupies, blank interior rows
+# included. A harness that caps its composer height and scrolls the rest of a
+# long draft out of view shows exactly its cap here.
+fm_composer_selected_rows() {  # <screen>
+  local plain
+  plain=$(printf '%s\n' "$1" | fm_composer_strip_ansi)
+  _fm_composer_scan_screen "$plain" '' 1
+  _fm_composer_select_cursorless "$plain" || return 1
+  printf '%s' "$((FM_COMPOSER_SELECTED_LAST - FM_COMPOSER_SELECTED_FIRST + 1))"
+}
+
 fm_composer_classify_screen() {  # <caps> <screen> [cursor_row] [identity]
   local caps=$1 screen=$2 cy=${3:-} identity=${4:-}
   local styled=0 cursor=0 has_identity=0 kv plain

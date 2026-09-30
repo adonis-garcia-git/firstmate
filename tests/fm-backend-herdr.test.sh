@@ -4988,6 +4988,170 @@ herdr_wrapped_composer() {  # <text> <width> <drop>
   done
 }
 
+# herdr_insert_unscrolled_walk: a read-back that shows only the end of the
+# payload is paged through before it is refused. For a composer that already
+# shows everything it holds, that is two Home steps that redraw nothing and
+# one End step back, each a literal send followed by one read of the same
+# screen. Every canned response after call <slot> (the read-back) moves six
+# calls later, and the three new reads repeat call <slot>'s screen.
+herdr_insert_unscrolled_walk() {  # <resp-dir> <slot>
+  local resp=$1 slot=$2 n ext f sorted
+  local -a found=()
+  shopt -s nullglob
+  for f in "$resp"/*.out "$resp"/*.exit; do
+    n=$(basename "$f")
+    n=${n%%.*}
+    if [ "$n" -gt "$slot" ]; then found+=("$n"); fi
+  done
+  shopt -u nullglob
+  if [ "${#found[@]}" -gt 0 ]; then
+    sorted=$(printf '%s\n' "${found[@]}" | sort -rn -u)
+    while IFS= read -r n; do
+      for ext in out exit; do
+        if [ -f "$resp/$n.$ext" ]; then mv "$resp/$n.$ext" "$resp/$((n + 6)).$ext"; fi
+      done
+    done <<EOF
+$sorted
+EOF
+  fi
+  for n in 2 4 6; do cp "$resp/$slot.out" "$resp/$((slot + n)).out"; done
+}
+
+# make_herdr_claude_sim: a stateful `herdr` stand-in for one Claude Code 2.1.285
+# pane in its fullscreen view, for the payload proof's scrolled-composer cases
+# that a canned call sequence cannot model. It keeps the draft and cursor in
+# <dir>/sim.json and renders <rows> screen rows <columns> wide, with the
+# composer capped at max(3, rows / 2 - 5) visible rows and scrolled to keep the
+# cursor in view, as live Claude does. Typed text, the Home and End escape
+# sequences, Ctrl+U, and Enter follow Claude's own cursor rules: Home and Ctrl+U
+# reach back one wrapped row per press, End moves forward one. Every call is
+# logged like make_herdr_fakebin's. With <drop>, the first typed text loses its
+# first <drop> characters, a draft that lost its head. sim.json records each
+# submitted draft and whether the cursor stood at its end when Enter landed.
+make_herdr_claude_sim() {  # <dir> <columns> <rows> [drop] -> echoes fakebin dir
+  local dir=$1 fb="$1/fakebin"
+  command -v python3 >/dev/null 2>&1 || fail "python3 is required for the Claude composer simulator"
+  mkdir -p "$fb"
+  jq -n --argjson c "$2" --argjson r "$3" --argjson d "${4:-0}" \
+    '{columns:$c, rows:$r, drop:$d, buf:"", cur:0, top:0, status:"idle", submitted:[], cursor_at_end:[]}' > "$dir/sim.json"
+  cat > "$fb/herdr" <<'PY'
+#!/usr/bin/env python3
+import json, os, sys
+state_path = os.environ["FM_SIM_STATE"]
+args = sys.argv[1:]
+with open(os.environ["FM_HERDR_LOG"], "a") as log:
+    log.write("HERDR_SESSION=%s%s\n" % (os.environ.get("HERDR_SESSION", ""), "".join("\x1f" + a for a in args)))
+if len(args) >= 2 and args[-2] == "--session":
+    args = args[:-2]
+st = json.load(open(state_path))
+width = st["columns"] - 4
+cap = max(3, st["rows"] // 2 - 5)
+
+def rows_of():
+    rows, pos = [], 0
+    for line in st["buf"].split("\n"):
+        if not line:
+            rows.append((pos, pos))
+        for k in range(0, len(line), width):
+            rows.append((pos + k, pos + min(k + width, len(line))))
+        pos += len(line) + 1
+    return rows
+
+def where():
+    rows = rows_of()
+    at = 0
+    for i, (start, end) in enumerate(rows):
+        if start <= st["cur"] <= end:
+            at = i
+    return rows, at, st["cur"] - rows[at][0]
+
+def start_of_line():
+    rows, at, col = where()
+    return rows[at - 1][0] if col == 0 and at > 0 else rows[at][0]
+
+def end_of_line():
+    rows, at, col = where()
+    if col >= rows[at][1] - rows[at][0] and at < len(rows) - 1:
+        return rows[at + 1][1]
+    return rows[at][1]
+
+def scroll():
+    rows, at, _ = where()
+    if len(rows) <= cap:
+        st["top"] = 0
+        return
+    if at < st["top"]:
+        st["top"] = at
+    elif at >= st["top"] + cap:
+        st["top"] = at - cap + 1
+    st["top"] = max(0, min(st["top"], len(rows) - cap))
+
+def insert(text):
+    b, c = st["buf"], st["cur"]
+    st["buf"], st["cur"] = b[:c] + text + b[c:], c + len(text)
+
+def screen(ansi):
+    rows, _, _ = where()
+    rule = "─" * st["columns"]
+    if ansi:
+        rule = "\x1b[0m\x1b[38;5;7m" + rule + "\x1b[0m"
+    shown = [st["buf"][s:e] for s, e in rows[st["top"]:st["top"] + cap]]
+    comp = [("❯ " if i == 0 else "  ") + t for i, t in enumerate(shown)]
+    body = [rule] + comp + [rule, "  Opus 5.5 | ctx: 4% used", "  ⏵⏵ bypass permissions on (shift+tab to cycle)"]
+    head = [" Claude Code v2.1.285", "❯ an earlier prompt in the transcript", "  ⎿  Done."]
+    lines = head + [""] * max(0, st["rows"] - len(head) - len(body)) + body
+    return "\n".join(lines[-st["rows"]:])
+
+cmd = args[:2]
+if cmd == ["status", "--json"]:
+    print('{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}')
+elif args[:3] == ["terminal", "title", "clear"]:
+    print('{"result":{"reason":"no_foreground_client"}}')
+elif cmd == ["agent", "get"]:
+    print(json.dumps({"result": {"agent": {"agent": "claude", "agent_status": st["status"]}}}))
+elif cmd == ["pane", "read"]:
+    print(screen("ansi" in args))
+elif cmd == ["pane", "send-text"]:
+    text = args[3]
+    if st["drop"] and "\x1b" not in text:
+        text, st["drop"] = text[st["drop"]:], 0
+    while text:
+        if text.startswith("\x1b[H"):
+            st["cur"], text = start_of_line(), text[3:]
+        elif text.startswith("\x1b[F"):
+            st["cur"], text = end_of_line(), text[3:]
+        else:
+            n = text.find("\x1b")
+            n = len(text) if n < 0 else n
+            insert(text[:n])
+            text = text[n:]
+        scroll()
+elif cmd == ["pane", "send-keys"]:
+    for key in args[3:]:
+        if key == "enter" and st["buf"]:
+            st["submitted"].append(st["buf"])
+            st["cursor_at_end"].append(st["cur"] == len(st["buf"]))
+            st["buf"], st["cur"], st["top"], st["status"] = "", 0, 0, "working"
+        elif key == "ctrl+u":
+            b, c = st["buf"], st["cur"]
+            if c > 0 and b[c - 1] == "\n":
+                st["buf"], st["cur"] = b[:c - 1] + b[c:], c - 1
+            else:
+                s = start_of_line()
+                st["buf"], st["cur"] = b[:s] + b[c:], s
+        scroll()
+json.dump(st, open(state_path, "w"))
+PY
+  chmod +x "$fb/herdr"
+  printf '%s\n' "$fb"
+}
+
+# herdr_helm_message: the 379-character single-paragraph Helm chat message
+# that Helm reported as "could not be typed into firstmate's session".
+herdr_helm_message() {
+  printf '%s' "All right. Regarding the stuff you said, waiting on me for number one, look into it. Make sure that he didn't actually do anything, and that we have a better understanding of this situation before I ask anything. For number two and three, elaborate on them with your recommendation and how. Same thing for number five. Also elaborate on the stuff that are queued and ready to go."
+}
+
 test_send_text_submit_long_literal_submits_when_composer_holds_every_byte() {
   local dir log resp fb out enter_count text
   dir="$TMP_ROOT/submit-long-exact"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -5017,12 +5181,13 @@ test_send_text_submit_refuses_enter_when_composer_holds_only_the_suffix() {
   printf '  \xe2\x9d\xaf %s\n' "$suffix" > "$resp/4.out"
   printf '  \xe2\x9d\xaf\n' > "$resp/6.out"
   printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/7.out"
+  herdr_insert_unscrolled_walk "$resp" 4
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_BACKEND_HERDR_PROOF_BACKOFF='' \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" 2>"$err" )
   [ "$out" = send-failed ] || fail "a composer holding only the payload suffix, cleared back to empty, should report send-failed, got '$out'"
-  grep -F 'after 1 read(s) the Claude composer in w1:p2 showed 480 of 1500 characters of the message, so Enter was not pressed' "$err" >/dev/null \
-    || fail "a refused read-back must name how much of the message it showed: $(cat "$err")"
+  grep -F 'after 1 read(s) the Claude composer in w1:p2 showed only the last 480 of 1500 characters of the message, and scrolling back through it proved only the last 480, so Enter was not pressed' "$err" >/dev/null \
+    || fail "a refused read-back must name how much of the message it showed and proved: $(cat "$err")"
   enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
   [ "$enter_count" -eq 0 ] || fail "a suffix must not be submitted, sent $enter_count Enter(s)"
   [ "$(herdr_ctrl_u_count "$log")" -eq 1 ] || fail "the refused suffix should be cleared with one Ctrl+U, sent $(herdr_ctrl_u_count "$log")"
@@ -5061,16 +5226,17 @@ test_send_text_submit_rereads_a_late_claude_render_before_enter() {
 }
 
 test_send_text_submit_refuses_after_the_reread_window() {
-  local dir log resp fb out enter_count text suffix err n start elapsed
+  local dir log resp fb out enter_count text head err n start elapsed
   dir="$TMP_ROOT/submit-reread-window"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   err="$dir/stderr"
   text=$(herdr_long_payload 1492)
-  suffix=${text: -480}
+  head=${text:0:480}
   herdr_submit_claude_prefix "$resp" "$text"
-  # Every read in the default window (calls 4-9) still shows only the tail;
-  # 10 is the clearing Ctrl+U and 11 reads the composer empty again.
+  # Every read in the default window (calls 4-9) still shows only the head the
+  # composer has drawn so far; 10 is the clearing Ctrl+U and 11 reads the
+  # composer empty again.
   for n in 4 5 6 7 8 9; do
-    printf '  \xe2\x9d\xaf %s\n' "$suffix" > "$resp/$n.out"
+    printf '  \xe2\x9d\xaf %s\n' "$head" > "$resp/$n.out"
   done
   printf '  \xe2\x9d\xaf\n' > "$resp/11.out"
   fb=$(make_herdr_fakebin "$dir")
@@ -5121,6 +5287,7 @@ test_send_text_submit_clears_a_wrapped_suffix_one_row_per_press() {
   for drop in 0 1 2 3 4 5; do
     herdr_wrapped_composer "$suffix" 96 "$drop" > "$resp/$((4 + 2 * drop)).out"
   done
+  herdr_insert_unscrolled_walk "$resp" 4
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_BACKEND_HERDR_PROOF_BACKOFF='' \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" )
@@ -5145,6 +5312,7 @@ test_send_text_submit_refused_suffix_then_clean_retry_submits_only_the_message()
   printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/11.out"
   printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/13.out"
   herdr_paste_socket "$resp" 9
+  herdr_insert_unscrolled_walk "$resp" 4
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_BACKEND_HERDR_PROOF_BACKOFF='' \
     bash -c '. "$0/bin/backends/herdr.sh"
@@ -5189,6 +5357,7 @@ test_send_text_submit_refuses_suffix_when_transcript_still_shows_the_head() {
     printf '  \xe2\x9d\xaf %s\n' "$suffix"
   } > "$resp/4.out"
   printf '  \xe2\x9d\xaf\n' > "$resp/6.out"
+  herdr_insert_unscrolled_walk "$resp" 4
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_BACKEND_HERDR_PROOF_BACKOFF='' \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" )
@@ -5242,6 +5411,7 @@ test_send_text_submit_refuses_marked_digest_missing_its_head() {
   herdr_submit_claude_prefix "$resp" "$text"
   printf '  \xe2\x9d\xaf\xc2\xa0%s\n' "${shown: -480}" > "$resp/4.out"
   printf '  \xe2\x9d\xaf\n' > "$resp/6.out"
+  herdr_insert_unscrolled_walk "$resp" 4
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_BACKEND_HERDR_PROOF_BACKOFF='' \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" )
@@ -5250,6 +5420,70 @@ test_send_text_submit_refuses_marked_digest_missing_its_head() {
   [ "$enter_count" -eq 0 ] || fail "a marked digest tail must not be submitted, sent $enter_count Enter(s)"
   [ "$(herdr_ctrl_u_count "$log")" -eq 1 ] || fail "the refused marked digest tail should be cleared"
   pass "fm_backend_herdr_send_text_submit: dropping U+2063 does not let a marked digest missing its head be submitted"
+}
+
+# Live Claude Code 2.1.285 in its fullscreen view caps the composer at about
+# half the pane's rows and scrolls a longer draft with the cursor, so a long
+# wrapped message that landed whole reads back as its own last rows. Helm's
+# 379-character chat message was refused that way while firstmate sat idle.
+# The proof pages up through the composer before Enter, and the cursor is back
+# at the end of the draft when Enter lands.
+test_send_text_submit_pages_a_scrolled_claude_composer_before_enter() {
+  local geometry columns rows dir log fb out text
+  text=$(herdr_helm_message)
+  for geometry in 33x16 61x16 94x16 33x30; do
+    columns=${geometry%x*}
+    rows=${geometry#*x}
+    dir="$TMP_ROOT/submit-scrolled-$geometry"; mkdir -p "$dir"; log="$dir/log"; : > "$log"
+    fb=$(make_herdr_claude_sim "$dir" "$columns" "$rows")
+    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_SIM_STATE="$dir/sim.json" FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_BACKEND_HERDR_PROOF_BACKOFF='' \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" 2>"$dir/stderr" )
+    [ "$out" = empty ] || fail "a $geometry Claude composer scrolling the whole ${#text}-character Helm message should confirm delivery, got '$out': $(cat "$dir/stderr")"
+    [ "$(jq -r '.submitted | length' "$dir/sim.json")" = 1 ] && [ "$(jq -r '.submitted[0]' "$dir/sim.json")" = "$text" ] \
+      || fail "the $geometry composer did not submit the whole message exactly once: $(jq -c .submitted "$dir/sim.json")"
+    [ "$(jq -r '.cursor_at_end[0]' "$dir/sim.json")" = true ] \
+      || fail "Enter must land with the cursor back at the end of the $geometry draft"
+    grep -qF $'\x1f''send-text'$'\x1f''w1:p2'$'\x1f'$'\033''[H' "$log" \
+      || fail "the $geometry proof never paged up through the scrolled composer"
+    [ "$(herdr_ctrl_u_count "$log")" -eq 0 ] || fail "a proven $geometry draft must not be cleared"
+  done
+  pass "fm_backend_herdr_send_text_submit: Helm's 379-character message in a scrolling Claude composer is paged, proven, and submitted whole with the cursor back at the end"
+}
+
+# The paging must not prove a draft that really lost its head: its first page
+# starts where the draft starts, which is not where the message starts.
+test_send_text_submit_refuses_a_scrolled_claude_draft_that_lost_its_head() {
+  local dir log fb out text err
+  text=$(herdr_helm_message)
+  dir="$TMP_ROOT/submit-scrolled-headless"; mkdir -p "$dir"; log="$dir/log"; : > "$log"
+  err="$dir/stderr"
+  fb=$(make_herdr_claude_sim "$dir" 33 16 11)
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_SIM_STATE="$dir/sim.json" FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_BACKEND_HERDR_PROOF_BACKOFF='' \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" 2>"$err" )
+  [ "$out" = send-failed ] || fail "a scrolled draft missing its first 11 characters should report send-failed, got '$out': $(cat "$err")"
+  [ "$(jq -r '.submitted | length' "$dir/sim.json")" = 0 ] || fail "a draft missing its head must never be submitted: $(jq -c .submitted "$dir/sim.json")"
+  [ "$(jq -r '.buf' "$dir/sim.json")" = '' ] || fail "the refused draft should be cleared back to empty, left '$(jq -r .buf "$dir/sim.json")'"
+  grep -E 'showed only the last [0-9]+ of 312 characters of the message, and scrolling back through it proved only the last 303, so Enter was not pressed' "$err" >/dev/null \
+    || fail "the refusal must name what the scrolled composer showed and what paging proved: $(cat "$err")"
+  pass "fm_backend_herdr_send_text_submit: a scrolling Claude draft that lost its head is paged, refused, named, and cleared"
+}
+
+# A tall pane lets Claude's composer grow past any row estimate made from the
+# payload length, and a tail capture of that estimate cuts the composer's
+# first row off, which reads back as the truncation the proof refuses.
+test_send_text_submit_reads_a_tall_claude_composer_whole() {
+  local dir log fb out text
+  text="$(herdr_helm_message) $(herdr_helm_message | cut -c1-120)"
+  dir="$TMP_ROOT/submit-tall-composer"; mkdir -p "$dir"; log="$dir/log"; : > "$log"
+  fb=$(make_herdr_claude_sim "$dir" 30 60)
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_SIM_STATE="$dir/sim.json" FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_BACKEND_HERDR_PROOF_BACKOFF='' \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" 2>"$dir/stderr" )
+  [ "$out" = empty ] || fail "a ${#text}-character message filling a tall Claude composer should confirm delivery, got '$out': $(cat "$dir/stderr")"
+  [ "$(jq -r '.submitted[0]' "$dir/sim.json")" = "$text" ] || fail "the tall composer did not submit the whole message: $(jq -c .submitted "$dir/sim.json")"
+  if grep -qF $'\x1f''send-text'$'\x1f''w1:p2'$'\x1f'$'\033''[H' "$log"; then
+    fail "a composer that shows the whole message must not need paging"
+  fi
+  pass "fm_backend_herdr_send_text_submit: a 500-character message wrapped over 20 rows of a tall Claude composer is read whole and submitted"
 }
 
 test_send_text_submit_lone_paste_placeholder_submits_the_long_payload() {
@@ -6162,6 +6396,9 @@ test_send_text_submit_claude_refuses_to_type_into_a_nonempty_composer
 test_send_text_submit_refuses_suffix_when_transcript_still_shows_the_head
 test_send_text_submit_accepts_marked_payloads_whose_read_back_drops_u2063
 test_send_text_submit_refuses_marked_digest_missing_its_head
+test_send_text_submit_pages_a_scrolled_claude_composer_before_enter
+test_send_text_submit_refuses_a_scrolled_claude_draft_that_lost_its_head
+test_send_text_submit_reads_a_tall_claude_composer_whole
 test_send_text_submit_lone_paste_placeholder_submits_the_long_payload
 test_send_text_submit_multiline_paste_placeholder_submits_the_long_payload
 test_send_text_submit_refuses_placeholder_followed_by_a_literal_remainder
