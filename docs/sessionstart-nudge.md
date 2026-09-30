@@ -14,6 +14,7 @@ One term recurs throughout:
 | --- | --- |
 | Which harness runs the digest and which only nudges it | [Tier by harness](#tier-by-harness) |
 | What each session-open source triggers | [Source routing](#source-routing) |
+| What a compaction keeps that the summary could lose | [Pre-compaction handoff](#pre-compaction-handoff) |
 | How long the digest may block and what happens when it runs out of time | [Runtime bound](#runtime-bound) |
 | When the wrappers stay silent and which exit codes they use | [Shared wrapper and safety](#shared-wrapper-and-safety) |
 | How one harness wires its session-open hook | [Harness transports](#harness-transports) |
@@ -119,6 +120,25 @@ The requested session start remains idempotent.
 - Its supported stale-instruction refresh pairs.
 
 The `bin/fm-session-start.sh` header is the single owner of those mechanics.
+
+## Pre-compaction handoff
+
+A compaction keeps the session but replaces its conversation with a summary, and an automatic compaction happens with no `/stow` first.
+On Claude, `.claude/settings.json` registers one unmatched `PreCompact` hook, so `bin/fm-precompact-handoff.sh` runs just before every manual and automatic compaction.
+It writes a snapshot of what the summary could lose into the home's session handoff note, `data/session-handoff.md`: the `/compact` instructions, the captain's most recent turns verbatim with the reply each answered, firstmate's last reply, held backlog items, and every task record with its last status line.
+It owns only its marked block in that note, so conversation threads a `/stow` wrote there survive.
+It records and never judges: filing work and correcting records stays with `/stow` and the agent.
+
+The compaction's `compact` digest prints that block in its fleet-state stage.
+When no block was recorded for this compaction, the recorded one is stale, or the hook failed, the digest says so and names the pre-compaction transcript to read instead, because the transcript file outlives the compaction.
+
+The hook never blocks or fails the compaction.
+Claude Code blocks a compaction only on a `PreCompact` exit 2 or a `decision: block` object, and the hook always exits 0 with empty stdout, recording any failure with its reason.
+A timed-out or otherwise failing hook lets the compaction proceed.
+The entry stands down under Grok, Cursor, and pi-code, which also load the tracked Claude settings but write other transcript formats, and in a linked task worktree or a no-mistakes gate agent.
+Other harnesses have no pre-compaction hook, so their compaction digest prints no handoff notice.
+
+The `bin/fm-precompact-handoff.sh` header owns the block, result record, and eligibility contracts, and `bin/fm-session-start.sh` owns how the digest presents them.
 
 ## Runtime bound
 
@@ -228,6 +248,7 @@ Claude is a run-tier harness.
 `.claude/settings.json` registers one unmatched `SessionStart` hook, invoked through `CLAUDE_PROJECT_DIR` with a 180s timeout.
 The wrapper reads `source` from the hook payload.
 Native stdout context injection is supported.
+The same file registers the unmatched `PreCompact` hook described in [Pre-compaction handoff](#pre-compaction-handoff), with a 30s timeout.
 
 ### Codex exec
 
@@ -444,6 +465,10 @@ That mode proves both an immediate prompt and a completed-before-prompt control 
 Cursor uses the separate primary live guard named in [Cursor tests](#cursor-tests) because its source-free `sessionStart` and stop-hook park are validated together.
 
 `tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh` is the separate opt-in real-Pi guard for a post-start AGENTS.md update followed by compaction.
+
+`tests/fm-precompact-handoff-live-e2e.test.sh` is the opt-in real-Claude guard for the pre-compaction handoff.
+It proves the tracked `PreCompact` entry fires before a manual `/compact` and before an automatic compaction, quotes the captain's words from the real transcript, and lets the compaction proceed.
+`tests/fm-precompact-handoff.test.sh` pins the hook portably, and `tests/fm-session-start.test.sh` pins how the compaction digest presents it.
 
 ### Guard, monitoring, and away-mode tests
 

@@ -47,9 +47,10 @@
 #   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail,
 #                       the away posture (state/.afk-contract and the legacy
-#                       state/.afk daemon flag), and a cheap per-task
-#                       endpoint-liveness read:
-#                       read-only, always runs.
+#                       state/.afk daemon flag), a cheap per-task
+#                       endpoint-liveness read, and, on a compaction, the
+#                       pre-compaction handoff bin/fm-precompact-handoff.sh
+#                       recorded: read-only, always runs.
 #   7. network checks - the result of the deferred network stage started back at
 #                       step 1, harvested WITHOUT waiting for it.
 #   8. context digest - data/projects.md, data/secondmates.md, data/captain.md,
@@ -631,6 +632,57 @@ EOF
   fi
 }
 
+# print_precompact_handoff: the pre-compaction handoff subsection. The producer's
+# header (bin/fm-precompact-handoff.sh) owns the record and block formats. A
+# record older than PRECOMPACT_HANDOFF_FRESH_SECONDS belongs to an earlier
+# compaction, so its block is not presented as this one's.
+PRECOMPACT_HANDOFF_FRESH_SECONDS=1800
+print_precompact_handoff() {
+  local record="$STATE/.precompact-handoff" handoff="$DATA/session-handoff.md"
+  local status at transcript reason now age block
+  if [ ! -f "$record" ]; then
+    [ "$PRIMARY_HARNESS" = claude ] || return 0
+    subsection "Pre-compaction handoff (data/session-handoff.md)"
+    printf 'None recorded: the pre-compaction hook did not run in this home.\n'
+    printf 'Decisions or open work that existed only in conversation before this compaction may be missing from the summary.\n'
+    return 0
+  fi
+  subsection "Pre-compaction handoff (data/session-handoff.md)"
+  status=$(sed -n 's/^status=//p' "$record" 2>/dev/null | tail -n 1)
+  at=$(sed -n 's/^at=//p' "$record" 2>/dev/null | tail -n 1)
+  transcript=$(sed -n 's/^transcript=//p' "$record" 2>/dev/null | tail -n 1)
+  reason=$(sed -n 's/^reason=//p' "$record" 2>/dev/null | tail -n 1)
+  now=$(date +%s)
+  case "$at" in ''|*[!0-9]*) at=0 ;; esac
+  age=$((now - at))
+  if [ "$age" -gt "$PRECOMPACT_HANDOFF_FRESH_SECONDS" ]; then
+    printf 'None recorded for this compaction: the last one is %s minutes old and belongs to an earlier compaction.\n' "$((age / 60))"
+    printf 'Decisions or open work that existed only in conversation before this compaction may be missing from the summary.\n'
+    return 0
+  fi
+  case "$status" in
+    ok|partial)
+      [ "$status" = ok ] || printf 'Partial snapshot: %s\n\n' "${reason:-reason not recorded}"
+      block=$(awk '
+        $0 == "<!-- fm-precompact-handoff:begin -->" { inside = 1; next }
+        $0 == "<!-- fm-precompact-handoff:end -->" { if (inside) exit }
+        inside { print }
+      ' "$handoff" 2>/dev/null)
+      if [ -n "$block" ]; then
+        printf '%s\n' "$block"
+      else
+        printf 'The snapshot was recorded %s seconds ago but its block is no longer in %s.\n' "$age" "$handoff"
+        [ -z "$transcript" ] || printf 'Read the captain'"'"'s recent turns in the pre-compaction transcript instead: %s\n' "$transcript"
+      fi
+      ;;
+    *)
+      printf 'FAILED for this compaction: %s\n' "${reason:-reason not recorded}"
+      printf 'Decisions or open work that existed only in conversation may be missing from the summary.\n'
+      [ -z "$transcript" ] || printf 'Read the captain'"'"'s recent turns in the pre-compaction transcript before relying on the summary: %s\n' "$transcript"
+      ;;
+  esac
+}
+
 AGENTS_START_HASH=
 if [ "$REEMIT" -eq 0 ] && [ "$SESSION_SOURCE" = startup ]; then
   AGENTS_START_HASH=$(hash_file_sha256 "$FM_ROOT/AGENTS.md" 2>/dev/null || true)
@@ -830,7 +882,8 @@ cat <<'EOF'
 Everything below is printed in full for this session start: every state/*.meta,
 a compact data/backlog.md listing, a bounded tail of every state/*.status,
 data/projects.md, data/secondmates.md, data/captain.md, data/captain-shared.md,
-and data/learnings.md.
+and data/learnings.md, plus, after a compaction, the pre-compaction snapshot
+block of data/session-handoff.md.
 Do NOT re-read any of them after reading this digest, and do NOT bulk-read
 data/backlog.md or state/*.status: re-reading everything defeats the entire
 point of this command.
@@ -940,6 +993,16 @@ if fm_pf_relay_active "$FM_HOME" \
     printf '%s/bin/fm-public-followup.sh deliver <id>. Hand a delivered loop on with rechain, or close it with\n' "$FM_ROOT"
     printf '%s/bin/fm-public-followup.sh retire <id> --reason "...". Load fmx-respond for the procedure.\n' "$FM_ROOT"
   fi
+fi
+
+# After a compaction, the snapshot bin/fm-precompact-handoff.sh wrote just before
+# it (the Claude Code PreCompact hook) carries what the summary could lose: the
+# captain's recent words verbatim and the open work at that moment. It lives in
+# the fleet-state stage because it is exactly the conversation state recovery
+# depends on. A home whose harness has no such hook and never recorded one
+# prints nothing here.
+if [ "$SESSION_SOURCE" = compact ]; then
+  print_precompact_handoff
 fi
 
 # --- 7. network checks ------------------------------------------------------

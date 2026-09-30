@@ -203,6 +203,42 @@ The Ahoy first-message boundary was reverified on 2026-07-22 with Pi 0.81.1 and 
 Marked current operational input and the two exact legacy compatibility shapes selected Bearings, while genuine near-miss captain messages remained real boundaries.
 The detailed reconciliation and task chronology stay in the private audit report and PR evidence.
 
+### Claude PreCompact hook, 2026-09-30
+
+This supports the `bin/fm-precompact-handoff.sh` header and [Pre-compaction handoff](../sessionstart-nudge.md#pre-compaction-handoff).
+It was measured on Claude Code 2.1.285 on macOS arm64, in a scratch git project whose project settings registered one logging command hook each for `PreCompact`, `PostCompact`, and `SessionStart`.
+
+A manual compaction ran as `claude -p --model haiku --resume <session> "/compact keep the codeword"`.
+The `PreCompact` payload was:
+
+```json
+{"session_id":"<id>","transcript_path":"<transcript>.jsonl","cwd":"<lab>","prompt_id":"<id>","hook_event_name":"PreCompact","trigger":"manual","custom_instructions":"keep the codeword"}
+```
+
+The hooks then fired in this order: `PreCompact`, `SessionStart` with `source` `compact`, and `PostCompact`, whose payload also carried the full `compact_summary`.
+The `PreCompact` stdout did not appear in the summary; it appeared only in the command's own `<local-command-stdout>` record as `PreCompact [<command>] completed successfully: <stdout>`.
+
+An automatic compaction ran in one `claude -p --input-format stream-json` session with `CLAUDE_CODE_AUTO_COMPACT_WINDOW=100000 CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=5`; that window is the floor the binary enforces.
+`PreCompact` fired with `"trigger":"auto"` and `"custom_instructions":null` before each attempt, including attempts whose summary then failed with `compact_result` `failed` and `compact_error` `too_few_groups` because the lab session was small.
+
+Blocking behavior:
+
+| Hook behavior | Result |
+| --- | --- |
+| exit 2 with `blocked by test` on stderr | `Compaction blocked by PreCompact hook: [<command>]: blocked by test`, no compaction |
+| exit 1, alongside a second hook with `timeout: 3` that slept 8 seconds and was killed | compaction proceeded and wrote its `compact_boundary` record |
+
+In the same version's transcripts, a genuine captain turn is a `user` record with `origin.kind` `human`, while wake injections carry `origin.kind` `task-notification`.
+
+Refresh with the live guard:
+
+```text
+$ FM_PRECOMPACT_HANDOFF_LIVE_E2E=1 tests/fm-precompact-handoff-live-e2e.test.sh
+# claude: 2.1.285 (Claude Code)
+ok - claude 2.1.285 (Claude Code): /compact runs the handoff with trigger=manual, verbatim captain words, and proceeds
+ok - claude 2.1.285 (Claude Code): an automatic compaction runs the handoff first with trigger=auto
+```
+
 ## Semantic busy state
 
 The per-adapter semantic sources behind [`bin/fm-busy-lib.sh`](../../bin/fm-busy-lib.sh) were live-verified on 2026-07-28 against firstmate-launched workers wired exactly as `fm-spawn` writes them.

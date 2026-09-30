@@ -2387,6 +2387,85 @@ SH
   pass "instruction baselines require SHA-256 and successful startup completion"
 }
 
+# After a compaction, the digest surfaces the snapshot the PreCompact hook
+# (bin/fm-precompact-handoff.sh) recorded just before it, and says plainly when
+# none exists for this compaction rather than printing nothing.
+test_compact_digest_surfaces_the_precompact_handoff() {
+  local rec root home fakebin out section now
+  rec=$(new_world precompact-handoff)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  section_of() {
+    printf '%s\n' "$1" | awk '
+      /^Pre-compaction handoff \(data\/session-handoff.md\)$/ { flag = 1; print; next }
+      flag && /^(={10,}|Orphan status logs|AFK$|Public commitments)/ { exit }
+      flag { print }
+    '
+  }
+
+  out=$(run_named_harness_session_start claude "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)
+  section=$(section_of "$out")
+  assert_contains "$section" "None recorded: the pre-compaction hook did not run in this home." \
+    "a Claude compaction with no handoff record did not say so"
+
+  cat > "$home/data/session-handoff.md" <<'EOF'
+# Session handoff
+
+STOW-THREAD-OUTSIDE-THE-BLOCK
+
+<!-- fm-precompact-handoff:begin -->
+## Pre-compaction snapshot
+
+> CAPTAIN-WORDS-INSIDE-THE-BLOCK
+<!-- fm-precompact-handoff:end -->
+EOF
+  now=$(date +%s)
+  printf 'status=ok\nat=%s\ntrigger=auto\nsession=s1\ntranscript=/t/s1.jsonl\nturns=1\nreason=\n' "$now" \
+    > "$home/state/.precompact-handoff"
+  out=$(run_named_harness_session_start claude "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)
+  section=$(section_of "$out")
+  assert_contains "$section" "CAPTAIN-WORDS-INSIDE-THE-BLOCK" "a fresh handoff block was not surfaced after compaction"
+  case "$out" in
+    *STOW-THREAD-OUTSIDE-THE-BLOCK*) fail "the digest printed handoff content outside the snapshot block" ;;
+  esac
+  case "$section" in
+    *'fm-precompact-handoff:begin'*) fail "the digest printed the block markers" ;;
+  esac
+
+  out=$(run_named_harness_session_start claude "$home" "$root" "$fakebin:$BASE_PATH" --source startup)
+  case "$out" in
+    *CAPTAIN-WORDS-INSIDE-THE-BLOCK*|*'Pre-compaction handoff'*) fail "a startup digest surfaced the pre-compaction handoff" ;;
+  esac
+
+  printf 'status=ok\nat=%s\ntrigger=auto\nsession=s1\ntranscript=/t/s1.jsonl\nturns=1\nreason=\n' "$((now - 7200))" \
+    > "$home/state/.precompact-handoff"
+  out=$(run_named_harness_session_start claude "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)
+  section=$(section_of "$out")
+  assert_contains "$section" "None recorded for this compaction: the last one is 120 minutes old" \
+    "a stale handoff was not distinguished from this compaction's"
+  case "$section" in
+    *CAPTAIN-WORDS-INSIDE-THE-BLOCK*) fail "a stale handoff block was presented as this compaction's" ;;
+  esac
+
+  printf 'status=failed\nat=%s\ntrigger=manual\nsession=s1\ntranscript=/t/s1.jsonl\nturns=0\nreason=cannot replace the note\n' "$now" \
+    > "$home/state/.precompact-handoff"
+  out=$(run_named_harness_session_start claude "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)
+  section=$(section_of "$out")
+  assert_contains "$section" "FAILED for this compaction: cannot replace the note" "a failed handoff was not reported"
+  assert_contains "$section" "/t/s1.jsonl" "a failed handoff did not point at the pre-compaction transcript"
+
+  rm -f "$home/state/.precompact-handoff"
+  out=$(run_named_harness_session_start pi "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)
+  case "$out" in
+    *'Pre-compaction handoff'*) fail "a harness without the pre-compaction hook printed a handoff notice" ;;
+  esac
+
+  pass "compaction digest surfaces a fresh pre-compaction handoff and names a missing, stale, or failed one"
+}
+
 test_reemit_keeps_repair_ownership_with_the_lock_holder() {
   local rec root home fakebin reemit readonly_out holder_pid
   rec=$(new_world reemit-tangle)
@@ -2812,5 +2891,6 @@ test_read_only_pi_compact_refreshes_against_its_own_session_identity
 test_codex_unreachable_reset_sources_do_not_claim_instruction_refresh
 test_agents_baseline_requires_sha256_and_successful_completion
 test_reemit_keeps_repair_ownership_with_the_lock_holder
+test_compact_digest_surfaces_the_precompact_handoff
 
 echo "# fm-session-start.test.sh: all assertions passed"

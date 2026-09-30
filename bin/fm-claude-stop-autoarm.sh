@@ -160,12 +160,10 @@ fm_hook_payload_is_foreign_host "$PAYLOAD" && exit 0
 # #3343). Pi's own native extensions own Pi supervision, so stand down on a
 # pi-code-delivered payload. The signal is again the PAYLOAD, not the
 # environment: pi-code stamps every hook payload's transcript_path with Pi's
-# own session file under .pi/, which a Claude transcript path never contains.
+# own session file under .pi/ (bin/fm-hook-host-lib.sh owns the predicate).
 # Fail direction matches the guard above: no payload, no jq, or no
 # transcript_path means the hook RUNS.
-if [ -n "$PAYLOAD" ] && command -v jq >/dev/null 2>&1; then
-  printf '%s' "$PAYLOAD" | jq -e '(.transcript_path // "") | type == "string" and contains("/.pi/")' >/dev/null 2>&1 && exit 0
-fi
+fm_hook_payload_is_pi_code "$PAYLOAD" && exit 0
 
 # --- scope: genuine primary checkout only -----------------------------------
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
