@@ -1246,24 +1246,25 @@ not ok - Claude Code (2.1.285 (Claude Code)) on herdr 0.8.2: a 258-char message 
 
 ### Scrolled composer
 
-Measured 2026-09-30 against Herdr 0.8.2 and Claude Code 2.1.285 in an isolated `fm-lab-` session with the lab viewer attached, which is what gives a split lab pane its real size.
+Measured 2026-09-30 against Herdr 0.8.2 and Claude Code 2.1.285 and 2.1.286 in isolated `fm-lab-` sessions with the lab viewer attached, which is what gives a split lab pane its real size.
 
-Claude's fullscreen view caps its composer at about half the pane's rows, never fewer than three: 13 visible rows in a 39-row pane and 3 in a 16-row pane.
-It scrolls a longer draft with the cursor, so a message that landed whole reads back as its own last rows, and the payload proof refused it as a draft that lost its head.
-Helm's 379-character single-paragraph chat message, sent through `bin/fm-send.sh` with an explicit pane target as Helm sends it, exited 1 in a 33-by-16 pane with "after 6 read(s) the Claude composer ... showed 49 of 312 characters of the message", although moving the cursor to the start showed the whole message was in the composer.
-The same proof refused it in a 94-by-16 pane, which showed 171 of 312 characters.
+Claude's fullscreen view caps its composer at `max(3, rows / 2 - 5)` visible rows, as its bundled prompt input computes it, which was 3 visible rows in a 16-row pane.
+It shows the rows around the cursor, which are the draft's last rows while the cursor is at the end, so a message that landed whole reads back as its own end, and the payload proof refused it as a draft that lost its head.
+Helm's 379-character single-paragraph chat message, sent through `bin/fm-send.sh` with an explicit pane target as Helm sends it, exited 1 in a 33-by-16 pane with "after 6 read(s) the Claude composer ... showed 49 of 312 characters of the message", although the whole message was in the composer.
 A 20-row tail capture also cut the top off a composer taller than the capture.
-Claude's Ctrl+U deletes one wrapped row per press, and the refused-draft clear stopped at an estimate of 40 characters per row: a refused 770-character draft in a 33-by-39 pane was left in the composer, and `bin/fm-send.sh` reported "the refused draft could not be cleared from the composer ... which may still hold it".
-Herdr's `pane send-keys` rejects `home` and `end` as unsupported keys, and the raw sequences `ESC [ H` and `ESC [ F` typed through `pane send-text` move Claude's cursor one wrapped row per sequence, including several in one write.
-Home stops at the draft's start, while Up at the first row opened `History 1/1` and replaced the draft.
-`fm_backend_herdr_composer_scrolled_proof` in `bin/backends/herdr.sh` pages through such a composer, every proof read captures the whole screen, `fm_backend_herdr_composer_clear` keeps pressing Ctrl+U while each press changes the composer, and `tests/fm-backend-herdr.test.sh` pins all three through a stateful composer simulator.
-The live guard above refreshes the Claude proof in a split pane of about 16 rows, and the clear in a pane of about 33 columns.
-Observed 2026-09-30:
+A draft typed as `STALE-FRAGMENT rm the release branch` followed by four line breaks leaves the 3-row composer showing only blank rows, so a composer whose visible rows are blank is not empty, and a proof that only reads the rows it can see submits such hidden text ahead of the message.
+Claude's Ctrl+U deletes one wrapped row per press, or one line break, and a press on an empty composer does nothing.
+`fm_backend_herdr_composer_retype` in `bin/backends/herdr.sh` clears a draft that reads back as the message's end and types the message again in proven pieces with no cursor movement, `fm_backend_herdr_composer_view` treats only a one-row composer as empty, and `tests/fm-backend-herdr.test.sh` pins the pieces, each proof rule, and the hidden-draft refusal and clear through a stateful composer simulator.
+With the retype, Helm's exact call delivered that message once, byte for byte in Claude's session transcript, with `bin/fm-send.sh` exiting 0, in 12-, 20-, and 33-column panes 37 rows tall and in 94-, 33-, and 20-column panes 14 rows tall, taking 2.2 to 10.1 seconds.
+The live guard above refreshes the Claude proof in a split pane of about 16 rows, and the clear and a delivery in a pane of about 33 columns.
+Observed 2026-09-30 with Claude Code 2.1.286:
 
 ```text
-ok - live Herdr scrolled composer: Claude Code (2.1.285 (Claude Code)) on herdr 0.8.2 pages a 370-char message its 14-row pane scrolls and submits it whole
-ok - live Herdr scrolled composer: Claude Code (2.1.285 (Claude Code)) on herdr 0.8.2 pages a scrolled draft missing its head and refuses it
-ok - live Herdr composer clear: Claude Code (2.1.285 (Claude Code)) on herdr 0.8.2 clears a 700-char draft in a 33-column pane row by row
+ok - live Herdr scrolled composer: Claude Code (2.1.286 (Claude Code)) on herdr 0.8.2 types a 369-char message its 14-row pane scrolls again in proven pieces and submits it whole
+ok - live Herdr scrolled composer: Claude Code (2.1.286 (Claude Code)) on herdr 0.8.2 submits a 289-char multi-paragraph message its 14-row pane scrolls whole
+ok - live Herdr hidden draft: Claude Code (2.1.286 (Claude Code)) on herdr 0.8.2 refuses to type over a draft hidden above blank composer rows in its 14-row pane and clears it
+ok - live Herdr composer clear: Claude Code (2.1.286 (Claude Code)) on herdr 0.8.2 clears a 700-char draft in a 33-column pane row by row
+ok - live Herdr scrolled composer: Claude Code (2.1.286 (Claude Code)) on herdr 0.8.2 submits a 255-char message whole in a 33-column pane
 ```
 
 With the pre-fix proof, the same guard failed:

@@ -4924,7 +4924,10 @@ test_send_text_submit_unconfirmed_paste_that_will_not_clear_is_unknown() {
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_BACKEND_HERDR_PROOF_BACKOFF='' \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$msg" 2>/dev/null )
   [ "$out" = unknown ] || fail "an unconfirmed paste that stays in the composer must not claim nothing was typed, got '$out'"
-  [ "$(herdr_ctrl_u_count "$log")" -eq 4 ] || fail "a leftover that never changes should stop after four Ctrl+U presses, sent $(herdr_ctrl_u_count "$log")"
+  # One press, then the message's ten line breaks plus three presses that
+  # change nothing, because deleting a blank line of a scrolled draft can
+  # leave the rows the composer shows unchanged.
+  [ "$(herdr_ctrl_u_count "$log")" -eq 14 ] || fail "a leftover that never changes should stop after fourteen Ctrl+U presses, sent $(herdr_ctrl_u_count "$log")"
   [ "$(grep -cE $'\x1f''pane'$'\x1f''send-text|'$'\x1f''enter$' "$log")" -eq 0 ] \
     || fail "an unconfirmed paste must not fall back to raw send-text or press Enter: $(cat "$log")"
   pass "fm_backend_herdr_send_text_submit: an unconfirmed paste whose clear cannot be verified reports unknown, not send-failed"
@@ -4969,8 +4972,10 @@ herdr_long_payload() {  # <middle-length>
   awk -v n="$1" 'BEGIN { printf "HEAD"; for (i = 0; i < n; i++) printf "m"; printf "TAIL" }'
 }
 
+# herdr_ctrl_u_count: the Ctrl+U presses sent to w1:p2, counting each key of
+# a batched send-keys call.
 herdr_ctrl_u_count() {  # <log>
-  grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''ctrl+u' "$1"
+  grep $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f' "$1" | grep -o $'\x1f''ctrl+u' | wc -l | tr -d ' '
 }
 
 # herdr_wrapped_composer: a Claude composer holding <text> wrapped at <width>
@@ -4988,52 +4993,31 @@ herdr_wrapped_composer() {  # <text> <width> <drop>
   done
 }
 
-# herdr_insert_unscrolled_walk: a read-back that shows only the end of the
-# payload is paged through before it is refused. For a composer that already
-# shows everything it holds, that is two Home steps that redraw nothing and
-# one End step back, each a literal send followed by one read of the same
-# screen. Every canned response after call <slot> (the read-back) moves six
-# calls later, and the three new reads repeat call <slot>'s screen.
-herdr_insert_unscrolled_walk() {  # <resp-dir> <slot>
-  local resp=$1 slot=$2 n ext f sorted
-  local -a found=()
-  shopt -s nullglob
-  for f in "$resp"/*.out "$resp"/*.exit; do
-    n=$(basename "$f")
-    n=${n%%.*}
-    if [ "$n" -gt "$slot" ]; then found+=("$n"); fi
-  done
-  shopt -u nullglob
-  if [ "${#found[@]}" -gt 0 ]; then
-    sorted=$(printf '%s\n' "${found[@]}" | sort -rn -u)
-    while IFS= read -r n; do
-      for ext in out exit; do
-        if [ -f "$resp/$n.$ext" ]; then mv "$resp/$n.$ext" "$resp/$((n + 6)).$ext"; fi
-      done
-    done <<EOF
-$sorted
-EOF
-  fi
-  for n in 2 4 6; do cp "$resp/$slot.out" "$resp/$((slot + n)).out"; done
-}
-
-# make_herdr_claude_sim: a stateful `herdr` stand-in for one Claude Code 2.1.285
+# make_herdr_claude_sim: a stateful `herdr` stand-in for one Claude Code 2.1.286
 # pane in its fullscreen view, for the payload proof's scrolled-composer cases
 # that a canned call sequence cannot model. It keeps the draft and cursor in
-# <dir>/sim.json and renders <rows> screen rows <columns> wide, with the
-# composer capped at max(3, rows / 2 - 5) visible rows and scrolled to keep the
-# cursor in view, as live Claude does. Typed text, the Home and End escape
-# sequences, Ctrl+U, and Enter follow Claude's own cursor rules: Home and Ctrl+U
-# reach back one wrapped row per press, End moves forward one. Every call is
-# logged like make_herdr_fakebin's. With <drop>, the first typed text loses its
-# first <drop> characters, a draft that lost its head. sim.json records each
-# submitted draft and whether the cursor stood at its end when Enter landed.
-make_herdr_claude_sim() {  # <dir> <columns> <rows> [drop] -> echoes fakebin dir
+# <dir>/sim.json and renders <rows> screen rows <columns> wide. As Claude's own
+# prompt input does, it word-wraps the draft, caps the composer at
+# max(3, rows / 2 - 5) visible rows, and shows the rows around the cursor
+# (getViewportStartLine), which are the last rows while the cursor is at the
+# end. Typed text lands at the cursor, Ctrl+U deletes back to the start of the
+# cursor's wrapped row or one line break, and Enter submits the draft. It
+# models no cursor movement, because the proof never moves the cursor. Every
+# call is logged like make_herdr_fakebin's. <mangles> is a JSON list of faults
+# applied to typed text, each once unless it has "always": true, and each
+# after letting its first "skip" matching texts through -
+# {"kind":"drop","n":N} loses the first N characters, {"kind":"prefix",
+# "text":T} lands T first, {"kind":"dup","text":T} doubles T, and
+# {"kind":"wipe","before":T} empties the draft before text T is typed.
+# <draft> is text the composer already holds, with the cursor at its end.
+# sim.json records each submitted draft, whether the cursor stood at its end
+# when Enter landed, and the byte length of every typed text.
+make_herdr_claude_sim() {  # <dir> <columns> <rows> [mangles] [draft] -> echoes fakebin dir
   local dir=$1 fb="$1/fakebin"
   command -v python3 >/dev/null 2>&1 || fail "python3 is required for the Claude composer simulator"
   mkdir -p "$fb"
-  jq -n --argjson c "$2" --argjson r "$3" --argjson d "${4:-0}" \
-    '{columns:$c, rows:$r, drop:$d, buf:"", cur:0, top:0, status:"idle", submitted:[], cursor_at_end:[]}' > "$dir/sim.json"
+  jq -n --argjson c "$2" --argjson r "$3" --argjson m "${4:-[]}" --arg b "${5:-}" \
+    '{columns:$c, rows:$r, mangles:$m, buf:$b, cur:($b | length), status:"idle", submitted:[], cursor_at_end:[], typed:[]}' > "$dir/sim.json"
   cat > "$fb/herdr" <<'PY'
 #!/usr/bin/env python3
 import json, os, sys
@@ -5050,10 +5034,16 @@ cap = max(3, st["rows"] // 2 - 5)
 def rows_of():
     rows, pos = [], 0
     for line in st["buf"].split("\n"):
-        if not line:
-            rows.append((pos, pos))
-        for k in range(0, len(line), width):
-            rows.append((pos + k, pos + min(k + width, len(line))))
+        start = 0
+        while True:
+            end = len(line)
+            if end - start > width:
+                space = line.rfind(" ", start, start + width + 1)
+                end = space + 1 if space >= start else start + width
+            rows.append((pos + start, pos + end))
+            start = end
+            if start >= len(line):
+                break
         pos += len(line) + 1
     return rows
 
@@ -5065,40 +5055,50 @@ def where():
             at = i
     return rows, at, st["cur"] - rows[at][0]
 
-def start_of_line():
-    rows, at, col = where()
-    return rows[at - 1][0] if col == 0 and at > 0 else rows[at][0]
-
-def end_of_line():
-    rows, at, col = where()
-    if col >= rows[at][1] - rows[at][0] and at < len(rows) - 1:
-        return rows[at + 1][1]
-    return rows[at][1]
-
-def scroll():
-    rows, at, _ = where()
+def viewport(rows, at):
     if len(rows) <= cap:
-        st["top"] = 0
-        return
-    if at < st["top"]:
-        st["top"] = at
-    elif at >= st["top"] + cap:
-        st["top"] = at - cap + 1
-    st["top"] = max(0, min(st["top"], len(rows) - cap))
+        return 0
+    top = max(0, at - cap // 2)
+    bottom = min(len(rows), top + cap)
+    if bottom - top < cap:
+        top = max(0, bottom - cap)
+    return top
 
-def insert(text):
-    b, c = st["buf"], st["cur"]
-    st["buf"], st["cur"] = b[:c] + text + b[c:], c + len(text)
+def mangle(text):
+    for m in st["mangles"]:
+        if m.get("spent"):
+            continue
+        hit, saved, buf, cur = True, text, st["buf"], st["cur"]
+        if m["kind"] == "drop":
+            text = text[m["n"]:]
+        elif m["kind"] == "prefix":
+            text = m["text"] + text
+        elif m["kind"] == "dup" and m["text"] in text:
+            text = text.replace(m["text"], m["text"] * 2, 1)
+        elif m["kind"] == "wipe" and text == m["before"]:
+            st["buf"], st["cur"] = "", 0
+        else:
+            hit = False
+        if not hit:
+            continue
+        m["matched"] = m.get("matched", 0) + 1
+        if m["matched"] <= m.get("skip", 0):
+            text, st["buf"], st["cur"] = saved, buf, cur
+            continue
+        if not m.get("always"):
+            m["spent"] = True
+    return text
 
 def screen(ansi):
-    rows, _, _ = where()
+    rows, at, _ = where()
+    top = viewport(rows, at)
     rule = "─" * st["columns"]
     if ansi:
         rule = "\x1b[0m\x1b[38;5;7m" + rule + "\x1b[0m"
-    shown = [st["buf"][s:e] for s, e in rows[st["top"]:st["top"] + cap]]
-    comp = [("❯ " if i == 0 else "  ") + t for i, t in enumerate(shown)]
+    shown = [st["buf"][s:e] for s, e in rows[top:top + cap]]
+    comp = [("❯ " if i == 0 else "  ") + t for i, t in enumerate(shown)]
     body = [rule] + comp + [rule, "  Opus 5.5 | ctx: 4% used", "  ⏵⏵ bypass permissions on (shift+tab to cycle)"]
-    head = [" Claude Code v2.1.285", "❯ an earlier prompt in the transcript", "  ⎿  Done."]
+    head = [" Claude Code v2.1.286", "❯ an earlier prompt in the transcript", "  ⎿  Done."]
     lines = head + [""] * max(0, st["rows"] - len(head) - len(body)) + body
     return "\n".join(lines[-st["rows"]:])
 
@@ -5112,38 +5112,41 @@ elif cmd == ["agent", "get"]:
 elif cmd == ["pane", "read"]:
     print(screen("ansi" in args))
 elif cmd == ["pane", "send-text"]:
-    text = args[3]
-    if st["drop"] and "\x1b" not in text:
-        text, st["drop"] = text[st["drop"]:], 0
-    while text:
-        if text.startswith("\x1b[H"):
-            st["cur"], text = start_of_line(), text[3:]
-        elif text.startswith("\x1b[F"):
-            st["cur"], text = end_of_line(), text[3:]
-        else:
-            n = text.find("\x1b")
-            n = len(text) if n < 0 else n
-            insert(text[:n])
-            text = text[n:]
-        scroll()
+    st["typed"].append(len(args[3].encode()))
+    text = mangle(args[3])
+    b, c = st["buf"], st["cur"]
+    st["buf"], st["cur"] = b[:c] + text + b[c:], c + len(text)
 elif cmd == ["pane", "send-keys"]:
     for key in args[3:]:
         if key == "enter" and st["buf"]:
             st["submitted"].append(st["buf"])
             st["cursor_at_end"].append(st["cur"] == len(st["buf"]))
-            st["buf"], st["cur"], st["top"], st["status"] = "", 0, 0, "working"
+            st["buf"], st["cur"], st["status"] = "", 0, "working"
         elif key == "ctrl+u":
             b, c = st["buf"], st["cur"]
             if c > 0 and b[c - 1] == "\n":
                 st["buf"], st["cur"] = b[:c - 1] + b[c:], c - 1
             else:
-                s = start_of_line()
+                rows, at, col = where()
+                s = rows[at - 1][0] if col == 0 and at > 0 else rows[at][0]
                 st["buf"], st["cur"] = b[:s] + b[c:], s
-        scroll()
 json.dump(st, open(state_path, "w"))
 PY
   chmod +x "$fb/herdr"
   printf '%s\n' "$fb"
+}
+
+# herdr_sim_submit: fm_backend_herdr_send_text_submit for <text> against the
+# Claude composer simulator in <dir>, whose fakebin is <fakebin>. It prints
+# the verdict and leaves stderr in <dir>/stderr.
+herdr_sim_submit() {  # <dir> <fakebin> <text>
+  PATH="$2:$PATH" FM_HERDR_LOG="$1/log" FM_SIM_STATE="$1/sim.json" FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_BACKEND_HERDR_PROOF_BACKOFF='' \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$3" 2>"$1/stderr"
+}
+
+# herdr_sim_buf: the draft the simulator in <dir> holds now.
+herdr_sim_buf() {  # <dir>
+  jq -r '.buf' "$1/sim.json"
 }
 
 # herdr_helm_message: the 379-character single-paragraph Helm chat message
@@ -5178,21 +5181,24 @@ test_send_text_submit_refuses_enter_when_composer_holds_only_the_suffix() {
   text=$(herdr_long_payload 1492)
   suffix=${text: -480}
   herdr_submit_claude_prefix "$resp" "$text"
+  # 4: the read-back shows only the suffix, so the draft is cleared (5-6) and
+  # typed again in pieces (7), whose first piece never shows (8); the refused
+  # piece is cleared too (9-10), and a later working status (11) proves
+  # nothing.
   printf '  \xe2\x9d\xaf %s\n' "$suffix" > "$resp/4.out"
-  printf '  \xe2\x9d\xaf\n' > "$resp/6.out"
-  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/7.out"
-  herdr_insert_unscrolled_walk "$resp" 4
+  for n in 6 8 10; do printf '  \xe2\x9d\xaf\n' > "$resp/$n.out"; done
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/11.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_BACKEND_HERDR_PROOF_BACKOFF='' \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" 2>"$err" )
   [ "$out" = send-failed ] || fail "a composer holding only the payload suffix, cleared back to empty, should report send-failed, got '$out'"
-  grep -F 'after 1 read(s) the Claude composer in w1:p2 showed only the last 480 of 1500 characters of the message, and scrolling back through it proved only the last 480, so Enter was not pressed' "$err" >/dev/null \
-    || fail "a refused read-back must name how much of the message it showed and proved: $(cat "$err")"
+  grep -F 'after 1 read(s) the Claude composer in w1:p2 showed only the last 480 of 1500 characters of the message, and typing it again in pieces proved only the first 0, so Enter was not pressed' "$err" >/dev/null \
+    || fail "a refused read-back must name how much of the message it showed and how much typing it again proved: $(cat "$err")"
   enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
   [ "$enter_count" -eq 0 ] || fail "a suffix must not be submitted, sent $enter_count Enter(s)"
-  [ "$(herdr_ctrl_u_count "$log")" -eq 1 ] || fail "the refused suffix should be cleared with one Ctrl+U, sent $(herdr_ctrl_u_count "$log")"
+  [ "$(herdr_ctrl_u_count "$log")" -eq 2 ] || fail "the suffix and the unproven piece should each be cleared with one Ctrl+U, sent $(herdr_ctrl_u_count "$log")"
   [ "$(grep -c $'\x1f''agent'$'\x1f''get' "$log")" -eq 1 ] || fail "a refused suffix must not be confirmed by a later working status"
-  pass "fm_backend_herdr_send_text_submit: a long payload whose Claude composer kept only the tail is not submitted, is cleared, and reports send-failed"
+  pass "fm_backend_herdr_send_text_submit: a long payload whose Claude composer kept only the tail, and whose first piece typed again never shows, is not submitted, is cleared, and reports send-failed"
 }
 
 # A large, busy Claude can draw typed text later than the caller's settle. The
@@ -5278,24 +5284,26 @@ test_send_text_submit_refused_suffix_that_will_not_clear_is_unknown() {
   pass "fm_backend_herdr_send_text_submit: a refused suffix whose clear cannot be verified reports unknown, not send-failed"
 }
 
-test_send_text_submit_clears_a_wrapped_suffix_one_row_per_press() {
+test_send_text_submit_clears_a_wrapped_unconfirmed_paste_one_row_per_press() {
   local dir log resp fb out enter_count text suffix drop
-  dir="$TMP_ROOT/submit-long-suffix-wrapped"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  dir="$TMP_ROOT/submit-unconfirmed-wrapped"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   text=$(herdr_long_payload 1492)
   suffix=${text: -480}
-  herdr_submit_claude_prefix "$resp" "$text"
-  for drop in 0 1 2 3 4 5; do
-    herdr_wrapped_composer "$suffix" 96 "$drop" > "$resp/$((4 + 2 * drop)).out"
+  # 1: agent get - codex identity; 2: session list - silent socket; then each
+  # Ctrl+U (3, 5, ...) reads back one wrapped row shorter (4, 6, ...).
+  printf '{"result":{"agent":{"agent":"codex","agent_status":"idle"}}}\n' > "$resp/1.out"
+  herdr_paste_socket "$resp" 2 silent
+  for drop in 1 2 3 4 5; do
+    herdr_wrapped_composer "$suffix" 96 "$drop" > "$resp/$((2 + 2 * drop)).out"
   done
-  herdr_insert_unscrolled_walk "$resp" 4
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_BACKEND_HERDR_PROOF_BACKOFF='' \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" )
-  [ "$out" = send-failed ] || fail "a refused suffix wrapped over five rows, cleared row by row, should report send-failed, got '$out'"
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" 2>/dev/null )
+  [ "$out" = send-failed ] || fail "an unconfirmed paste wrapped over five rows, cleared row by row, should report send-failed, got '$out'"
   enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
-  [ "$enter_count" -eq 0 ] || fail "a suffix must not be submitted, sent $enter_count Enter(s)"
-  [ "$(herdr_ctrl_u_count "$log")" -eq 5 ] || fail "a five-row wrapped suffix should take five Ctrl+U presses, sent $(herdr_ctrl_u_count "$log")"
-  pass "fm_backend_herdr_send_text_submit: a refused 480-character suffix wrapped over five rows is cleared one row per Ctrl+U and reports send-failed"
+  [ "$enter_count" -eq 0 ] || fail "an unconfirmed paste must not be submitted, sent $enter_count Enter(s)"
+  [ "$(herdr_ctrl_u_count "$log")" -eq 5 ] || fail "a five-row wrapped leftover should take five Ctrl+U presses, sent $(herdr_ctrl_u_count "$log")"
+  pass "fm_backend_herdr_send_text_submit: an unconfirmed paste left wrapped over five rows is cleared one row per Ctrl+U and reports send-failed"
 }
 
 test_send_text_submit_refused_suffix_then_clean_retry_submits_only_the_message() {
@@ -5304,15 +5312,17 @@ test_send_text_submit_refused_suffix_then_clean_retry_submits_only_the_message()
   text=$(herdr_long_payload 1492)
   suffix=${text: -480}
   herdr_submit_claude_prefix "$resp" "$text"
+  # The first send reads only the suffix (4), clears it (5-6), types its first
+  # piece again (7), which never shows (8), and clears that (9-10). The resend
+  # finds an empty composer (11-12), pastes the message (13), reads it whole
+  # (14), and submits it (15-17).
   printf '  \xe2\x9d\xaf %s\n' "$suffix" > "$resp/4.out"
-  printf '  \xe2\x9d\xaf\n' > "$resp/6.out"
-  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/7.out"
-  printf '  \xe2\x9d\xaf\n' > "$resp/8.out"
-  printf '  \xe2\x9d\xaf %s\n' "$text" > "$resp/10.out"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/11.out"
-  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/13.out"
-  herdr_paste_socket "$resp" 9
-  herdr_insert_unscrolled_walk "$resp" 4
+  for n in 6 8 10 12; do printf '  \xe2\x9d\xaf\n' > "$resp/$n.out"; done
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/11.out"
+  printf '  \xe2\x9d\xaf %s\n' "$text" > "$resp/14.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/15.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/17.out"
+  herdr_paste_socket "$resp" 13
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_BACKEND_HERDR_PROOF_BACKOFF='' \
     bash -c '. "$0/bin/backends/herdr.sh"
@@ -5321,7 +5331,7 @@ test_send_text_submit_refused_suffix_then_clean_retry_submits_only_the_message()
       printf "%s %s" "$first" "$second"' "$ROOT" "$text" )
   [ "$out" = "send-failed empty" ] || fail "a refused send followed by a resend should report 'send-failed empty', got '$out'"
   [ "$(herdr_paste_count "$resp")" -eq 2 ] && [ "$(herdr_pasted_text "$resp" 1)" = "$text" ] \
-    && [ "$(herdr_pasted_text "$resp" 2)" = "$text" ] || fail "each attempt should type the full message exactly once"
+    && [ "$(herdr_pasted_text "$resp" 2)" = "$text" ] || fail "each attempt should paste the full message exactly once"
   enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
   [ "$enter_count" -eq 1 ] || fail "only the clean retry should be submitted, sent $enter_count Enter(s)"
   pass "fm_backend_herdr_send_text_submit: after a refused suffix is cleared, a resend starts from an empty Claude composer and submits only the message"
@@ -5356,8 +5366,11 @@ test_send_text_submit_refuses_suffix_when_transcript_still_shows_the_head() {
     printf '%s\n' "$text"
     printf '  \xe2\x9d\xaf %s\n' "$suffix"
   } > "$resp/4.out"
+  # The draft is cleared (5-6) and its first piece typed again (7), which never
+  # shows in the composer while the transcript still shows the head (8).
   printf '  \xe2\x9d\xaf\n' > "$resp/6.out"
-  herdr_insert_unscrolled_walk "$resp" 4
+  { printf '%s\n' "$text"; printf '  \xe2\x9d\xaf\n'; } > "$resp/8.out"
+  printf '  \xe2\x9d\xaf\n' > "$resp/10.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_BACKEND_HERDR_PROOF_BACKOFF='' \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" )
@@ -5410,99 +5423,269 @@ test_send_text_submit_refuses_marked_digest_missing_its_head() {
   shown=${text//$'\xe2\x81\xa3'/}
   herdr_submit_claude_prefix "$resp" "$text"
   printf '  \xe2\x9d\xaf\xc2\xa0%s\n' "${shown: -480}" > "$resp/4.out"
-  printf '  \xe2\x9d\xaf\n' > "$resp/6.out"
-  herdr_insert_unscrolled_walk "$resp" 4
+  # The tail is cleared (5-6) and its first piece typed again (7), which never
+  # shows (8), and is cleared (9-10).
+  for n in 6 8 10; do printf '  \xe2\x9d\xaf\n' > "$resp/$n.out"; done
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_BACKEND_HERDR_PROOF_BACKOFF='' \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" )
   [ "$out" = send-failed ] || fail "a marked digest whose composer kept only the tail should report send-failed, got '$out'"
   enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
   [ "$enter_count" -eq 0 ] || fail "a marked digest tail must not be submitted, sent $enter_count Enter(s)"
-  [ "$(herdr_ctrl_u_count "$log")" -eq 1 ] || fail "the refused marked digest tail should be cleared"
+  [ "$(herdr_ctrl_u_count "$log")" -eq 2 ] || fail "the refused marked digest tail and its unproven piece should each be cleared"
   pass "fm_backend_herdr_send_text_submit: dropping U+2063 does not let a marked digest missing its head be submitted"
 }
 
-# Live Claude Code 2.1.285 in its fullscreen view caps the composer at about
-# half the pane's rows and scrolls a longer draft with the cursor, so a long
-# wrapped message that landed whole reads back as its own last rows. Helm's
-# 379-character chat message was refused that way while firstmate sat idle.
-# The proof pages up through the composer before Enter, and the cursor is back
-# at the end of the draft when Enter lands.
-test_send_text_submit_pages_a_scrolled_claude_composer_before_enter() {
-  local geometry columns rows dir log fb out text
+# herdr_sim_delivered: 0 when the simulator in <dir> submitted <text> exactly
+# once and nothing else.
+herdr_sim_delivered() {  # <dir> <text>
+  jq -e --arg t "$2" '.submitted == [$t]' "$1/sim.json" >/dev/null
+}
+
+# herdr_para_message: a 263-character captain message with single blank lines
+# between its paragraphs and a three-item list.
+herdr_para_message() {
+  printf '%s' $'Captain notes, reply with only OK:\n\nfirst paragraph about the release, which should go out after the review is done and the docs are fixed.\n\n- item one: rebase the branch\n- item two: rerun the checks\n- item three: update the report\n\nlast line, including the docs.'
+}
+
+# Live Claude Code 2.1.286 in its fullscreen view caps the composer at
+# max(3, rows / 2 - 5) rows and shows only its last rows while the cursor is
+# at the end, so a long message that landed whole reads back as its own end.
+# Helm's 379-character chat message was refused that way while firstmate sat
+# idle. The draft is cleared and typed again in pieces, each proven as it
+# lands, with no cursor movement, and then submitted whole.
+test_send_text_submit_retypes_a_scrolled_claude_composer_in_proven_pieces() {
+  local geometry dir fb out text
   text=$(herdr_helm_message)
-  for geometry in 33x16 61x16 94x16 33x30; do
-    columns=${geometry%x*}
-    rows=${geometry#*x}
-    dir="$TMP_ROOT/submit-scrolled-$geometry"; mkdir -p "$dir"; log="$dir/log"; : > "$log"
-    fb=$(make_herdr_claude_sim "$dir" "$columns" "$rows")
-    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_SIM_STATE="$dir/sim.json" FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_BACKEND_HERDR_PROOF_BACKOFF='' \
-      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" 2>"$dir/stderr" )
+  for geometry in 33x16 61x16 94x16 33x30 24x12 12x35 85x9; do
+    dir="$TMP_ROOT/submit-scrolled-$geometry"; mkdir -p "$dir"; : > "$dir/log"
+    fb=$(make_herdr_claude_sim "$dir" "${geometry%x*}" "${geometry#*x}")
+    out=$(herdr_sim_submit "$dir" "$fb" "$text")
     [ "$out" = empty ] || fail "a $geometry Claude composer scrolling the whole ${#text}-character Helm message should confirm delivery, got '$out': $(cat "$dir/stderr")"
-    [ "$(jq -r '.submitted | length' "$dir/sim.json")" = 1 ] && [ "$(jq -r '.submitted[0]' "$dir/sim.json")" = "$text" ] \
-      || fail "the $geometry composer did not submit the whole message exactly once: $(jq -c .submitted "$dir/sim.json")"
-    [ "$(jq -r '.cursor_at_end[0]' "$dir/sim.json")" = true ] \
-      || fail "Enter must land with the cursor back at the end of the $geometry draft"
-    grep -qF $'\x1f''send-text'$'\x1f''w1:p2'$'\x1f'$'\033''[H' "$log" \
-      || fail "the $geometry proof never paged up through the scrolled composer"
-    [ "$(herdr_ctrl_u_count "$log")" -eq 0 ] || fail "a proven $geometry draft must not be cleared"
+    herdr_sim_delivered "$dir" "$text" || fail "the $geometry composer did not submit the whole message exactly once: $(jq -c .submitted "$dir/sim.json")"
+    [ "$(jq -r '.cursor_at_end[0]' "$dir/sim.json")" = true ] || fail "Enter must land with the cursor at the end of the $geometry draft"
+    [ "$(jq -r '.typed | length' "$dir/sim.json")" -gt 2 ] || fail "the scrolled $geometry draft should have been typed again in pieces: $(jq -c .typed "$dir/sim.json")"
+    if grep $'\x1f''send-text'$'\x1f' "$dir/log" | grep -q $'\033'; then
+      fail "the $geometry proof must not type cursor-movement sequences"
+    fi
   done
-  pass "fm_backend_herdr_send_text_submit: Helm's 379-character message in a scrolling Claude composer is paged, proven, and submitted whole with the cursor back at the end"
+  pass "fm_backend_herdr_send_text_submit: Helm's 379-character message in a scrolling Claude composer is typed again in proven pieces and submitted whole, from 12 columns and from 9 rows"
 }
 
-# The paging must not prove a draft that really lost its head: its first page
-# starts where the draft starts, which is not where the message starts.
-test_send_text_submit_refuses_a_scrolled_claude_draft_that_lost_its_head() {
-  local dir log fb out text err
+# A multi-paragraph message puts blank rows at the top of some proof reads,
+# which join a new piece to the blank line typed before it.
+test_send_text_submit_delivers_a_multi_paragraph_message_to_a_scrolled_claude_composer() {
+  local geometry dir fb out text
+  text=$(herdr_para_message)
+  for geometry in 33x16 61x16 19x39 12x35; do
+    dir="$TMP_ROOT/submit-scrolled-para-$geometry"; mkdir -p "$dir"; : > "$dir/log"
+    fb=$(make_herdr_claude_sim "$dir" "${geometry%x*}" "${geometry#*x}")
+    out=$(herdr_sim_submit "$dir" "$fb" "$text")
+    [ "$out" = empty ] || fail "a $geometry Claude composer scrolling a ${#text}-character multi-paragraph message should confirm delivery, got '$out': $(cat "$dir/stderr")"
+    herdr_sim_delivered "$dir" "$text" || fail "the $geometry composer did not submit the multi-paragraph message exactly once: $(jq -c .submitted "$dir/sim.json")"
+  done
+  pass "fm_backend_herdr_send_text_submit: a multi-paragraph message with a list in a scrolling Claude composer is submitted whole at 12 to 61 columns"
+}
+
+# Claude scrolls a draft whose last rows are blank lines, so a composer whose
+# visible rows are blank can still hold text above them. Only a one-row
+# composer is empty; anything else is refused before typing, so hidden text is
+# never submitted ahead of the message and is left for its owner.
+test_send_text_submit_refuses_a_claude_draft_hidden_above_blank_rows() {
+  local dir fb out text stale
   text=$(herdr_helm_message)
-  dir="$TMP_ROOT/submit-scrolled-headless"; mkdir -p "$dir"; log="$dir/log"; : > "$log"
-  err="$dir/stderr"
-  fb=$(make_herdr_claude_sim "$dir" 33 16 11)
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_SIM_STATE="$dir/sim.json" FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_BACKEND_HERDR_PROOF_BACKOFF='' \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" 2>"$err" )
-  [ "$out" = send-failed ] || fail "a scrolled draft missing its first 11 characters should report send-failed, got '$out': $(cat "$err")"
-  [ "$(jq -r '.submitted | length' "$dir/sim.json")" = 0 ] || fail "a draft missing its head must never be submitted: $(jq -c .submitted "$dir/sim.json")"
-  [ "$(jq -r '.buf' "$dir/sim.json")" = '' ] || fail "the refused draft should be cleared back to empty, left '$(jq -r .buf "$dir/sim.json")'"
-  grep -E 'showed only the last [0-9]+ of 312 characters of the message, and scrolling back through it proved only the last 303, so Enter was not pressed' "$err" >/dev/null \
-    || fail "the refusal must name what the scrolled composer showed and what paging proved: $(cat "$err")"
-  pass "fm_backend_herdr_send_text_submit: a scrolling Claude draft that lost its head is paged, refused, named, and cleared"
+  stale=$'STALE-FRAGMENT rm the release branch\n\n\n\n'
+  dir="$TMP_ROOT/submit-hidden-draft"; mkdir -p "$dir"; : > "$dir/log"
+  fb=$(make_herdr_claude_sim "$dir" 33 16 '[]' "$stale")
+  out=$(herdr_sim_submit "$dir" "$fb" "$text")
+  [ "$out" = send-failed ] || fail "a composer holding a draft above three blank rows should refuse the send, got '$out': $(cat "$dir/stderr")"
+  grep -F 'the Claude composer in w1:p2 already held a draft whose 3 visible rows are blank before typing, so nothing was typed' "$dir/stderr" >/dev/null \
+    || fail "the refusal must name the blank rows it saw: $(cat "$dir/stderr")"
+  [ "$(jq -r '.typed | length' "$dir/sim.json")" = 0 ] || fail "nothing may be typed after a hidden draft, or Enter would submit it with the message"
+  [ "$(grep -c $'\x1f''send-keys' "$dir/log")" -eq 0 ] || fail "a hidden draft must not receive any key"
+  jq -e --arg b "$stale" '.buf == $b and .submitted == []' "$dir/sim.json" >/dev/null \
+    || fail "the hidden draft must be left untouched and unsubmitted: $(jq -c '{buf, submitted}' "$dir/sim.json")"
+  pass "fm_backend_herdr_send_text_submit: a Claude draft hidden above blank composer rows is refused before anything is typed"
 }
 
-# Live Claude's Ctrl+U deletes one wrapped row per press, so a long refused
-# draft in a narrow pane needs more presses than an estimate of 40 characters
-# per row allows. The clear keeps pressing while each press shortens the
-# composer, and the draft is gone before the refusal is reported.
+# A draft that lost its head once reads back as an end of the message, whether
+# the rest scrolls or fits one row. It is cleared and typed again in pieces,
+# so a transient loss still delivers the whole message.
+test_send_text_submit_retypes_a_claude_draft_that_lost_its_head_once() {
+  local drop dir fb out text
+  text=$(herdr_helm_message)
+  for drop in 11 355; do
+    dir="$TMP_ROOT/submit-lost-head-$drop"; mkdir -p "$dir"; : > "$dir/log"
+    fb=$(make_herdr_claude_sim "$dir" 33 16 "[{\"kind\":\"drop\",\"n\":$drop}]")
+    out=$(herdr_sim_submit "$dir" "$fb" "$text")
+    [ "$out" = empty ] || fail "a draft that lost its first $drop characters once should be typed again and delivered, got '$out': $(cat "$dir/stderr")"
+    herdr_sim_delivered "$dir" "$text" || fail "the draft that lost its first $drop characters once was not submitted whole: $(jq -c .submitted "$dir/sim.json")"
+  done
+  pass "fm_backend_herdr_send_text_submit: a Claude draft that lost its head once is typed again in proven pieces and submitted whole"
+}
+
+test_send_text_submit_refuses_a_claude_draft_that_keeps_losing_its_head() {
+  local dir fb out text
+  text=$(herdr_helm_message)
+  dir="$TMP_ROOT/submit-keeps-losing-head"; mkdir -p "$dir"; : > "$dir/log"
+  fb=$(make_herdr_claude_sim "$dir" 33 16 '[{"kind":"drop","n":11,"always":true}]')
+  out=$(herdr_sim_submit "$dir" "$fb" "$text")
+  [ "$out" = send-failed ] || fail "a draft that loses its head on every write should report send-failed, got '$out': $(cat "$dir/stderr")"
+  grep -E 'showed only the last [0-9]+ of 312 characters of the message, and typing it again in pieces proved only the first 0, so Enter was not pressed' "$dir/stderr" >/dev/null \
+    || fail "the refusal must name what the composer showed and what typing again proved: $(cat "$dir/stderr")"
+  jq -e '.buf == "" and .submitted == []' "$dir/sim.json" >/dev/null \
+    || fail "a draft missing its head must be cleared and never submitted: $(jq -c '{buf, submitted}' "$dir/sim.json")"
+  pass "fm_backend_herdr_send_text_submit: a Claude draft that keeps losing its head is refused, named, and cleared"
+}
+
+# Text that lands above the message is never submitted with it. Once, it is
+# cleared with the draft and the message is typed again alone. On every write,
+# or above the first piece typed again, no piece is proven: a blank row above
+# a piece joins it only to a blank line the message itself typed.
+test_send_text_submit_never_submits_text_that_lands_above_the_message() {
+  local case geometry mangles dir fb out text
+  text=$(herdr_helm_message)
+  for case in once always blank-ended; do
+    geometry=61x16
+    case "$case" in
+      once) mangles='[{"kind":"prefix","text":"rm -rf something\n"}]' ;;
+      always) mangles='[{"kind":"prefix","text":"rm -rf something\n","always":true}]' ;;
+      blank-ended) geometry=33x16; mangles='[{"kind":"prefix","text":"STALE\n\n\n","skip":1}]' ;;
+    esac
+    dir="$TMP_ROOT/submit-text-above-$case"; mkdir -p "$dir"; : > "$dir/log"
+    fb=$(make_herdr_claude_sim "$dir" "${geometry%x*}" "${geometry#*x}" "$mangles")
+    out=$(herdr_sim_submit "$dir" "$fb" "$text")
+    if [ "$case" = once ]; then
+      [ "$out" = empty ] || fail "text that landed above the message once should be cleared and the message delivered, got '$out': $(cat "$dir/stderr")"
+      herdr_sim_delivered "$dir" "$text" || fail "the message must be submitted alone after text landed above it once: $(jq -c .submitted "$dir/sim.json")"
+    else
+      [ "$out" = send-failed ] || fail "text landing above the message ($case) should be refused, got '$out': $(cat "$dir/stderr")"
+      jq -e '.buf == "" and .submitted == []' "$dir/sim.json" >/dev/null \
+        || fail "text landing above the message ($case) must be cleared and never submitted: $(jq -c '{buf, submitted}' "$dir/sim.json")"
+    fi
+  done
+  pass "fm_backend_herdr_send_text_submit: text that lands above the message in a scrolling Claude composer is never submitted with it"
+}
+
+# A doubled line is never submitted, even in a message that already repeats
+# it: doubled once, it is cleared and typed again; doubled every time, the
+# piece that doubles is not proven.
+test_send_text_submit_never_submits_a_doubled_line() {
+  local case mangles dir fb out text
+  text=$'Plan for today:\n- ship the fix\n- ship the fix\n- write the report for the captain and the review team\nThanks, and reply with only OK.'
+  for case in once always; do
+    mangles='[{"kind":"dup","text":"- ship the fix\n"}]'
+    [ "$case" = once ] || mangles='[{"kind":"dup","text":"- ship the fix\n","always":true}]'
+    dir="$TMP_ROOT/submit-doubled-line-$case"; mkdir -p "$dir"; : > "$dir/log"
+    fb=$(make_herdr_claude_sim "$dir" 61 16 "$mangles")
+    out=$(herdr_sim_submit "$dir" "$fb" "$text")
+    if [ "$case" = once ]; then
+      [ "$out" = empty ] || fail "a line doubled once should be cleared and the message delivered, got '$out': $(cat "$dir/stderr")"
+      herdr_sim_delivered "$dir" "$text" || fail "the message must be submitted as written after a line doubled once: $(jq -c .submitted "$dir/sim.json")"
+    else
+      [ "$out" = send-failed ] || fail "a line doubled on every write should be refused, got '$out': $(cat "$dir/stderr")"
+      jq -e '.buf == "" and .submitted == []' "$dir/sim.json" >/dev/null \
+        || fail "a draft with a doubled line must be cleared and never submitted: $(jq -c '{buf, submitted}' "$dir/sim.json")"
+    fi
+  done
+  pass "fm_backend_herdr_send_text_submit: a doubled line in a scrolling Claude composer is never submitted"
+}
+
+# A draft that empties while it is typed again is refused, even when all it
+# then shows is blank lines of the message: a composer below its cap shows the
+# whole draft, which must be exactly the text typed so far.
+test_send_text_submit_refuses_a_claude_draft_wiped_during_the_retype() {
+  local dir fb out text
+  text="$(herdr_helm_message | cut -c1-200)"$'\n\n\n'"$(herdr_helm_message | cut -c210-)"
+  dir="$TMP_ROOT/submit-wiped-retype"; mkdir -p "$dir"; : > "$dir/log"
+  fb=$(make_herdr_claude_sim "$dir" 33 16 '[{"kind":"wipe","before":"\n","skip":1}]')
+  out=$(herdr_sim_submit "$dir" "$fb" "$text")
+  [ "$out" = send-failed ] || fail "a draft wiped before its second blank line should be refused, got '$out': $(cat "$dir/stderr")"
+  jq -e '.buf == "" and .submitted == []' "$dir/sim.json" >/dev/null \
+    || fail "a wiped draft must be cleared and never submitted: $(jq -c '{buf, submitted}' "$dir/sim.json")"
+  pass "fm_backend_herdr_send_text_submit: a Claude draft wiped while it is typed again is refused, even behind blank lines"
+}
+
+# The refused-draft clear judges emptiness the same way: a draft whose
+# visible rows are blank lines still holds text above them, so the clear keeps
+# pressing Ctrl+U until the composer shows one empty row.
+test_composer_clear_empties_a_claude_draft_hidden_above_blank_rows() {
+  local dir fb draft rc=0
+  draft=$'HEAD of a refused draft that should be cleared completely\n\n\n\nTAIL line of it'
+  dir="$TMP_ROOT/clear-hidden-draft"; mkdir -p "$dir"; : > "$dir/log"
+  fb=$(make_herdr_claude_sim "$dir" 33 16 '[]' "$draft")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_SIM_STATE="$dir/sim.json" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_clear default:w1:p2 "$1" 1' "$ROOT" "$draft" || rc=$?
+  [ "$rc" -eq 0 ] || fail "the Claude-aware clear should verify the composer empty, returned $rc"
+  [ "$(herdr_sim_buf "$dir")" = '' ] || fail "the clear left text hidden above blank rows: '$(herdr_sim_buf "$dir")'"
+  pass "fm_backend_herdr_composer_clear: a Claude draft whose visible rows go blank is cleared until the composer shows one empty row"
+}
+
+# Live Claude's Ctrl+U deletes one wrapped row per press, so a long draft in a
+# narrow pane needs more presses than an estimate of 40 characters per row
+# allows. Here the landed draft is cleared before it is typed again, and the
+# first piece typed again loses its head, so the send is refused and the
+# composer is still left empty.
 test_send_text_submit_clears_a_long_refused_draft_in_a_narrow_pane() {
-  local dir log fb out text err
+  local dir fb out text
   text="$(herdr_helm_message) $(herdr_helm_message | cut -c1-120)"
-  dir="$TMP_ROOT/submit-narrow-clear"; mkdir -p "$dir"; log="$dir/log"; : > "$log"
-  err="$dir/stderr"
-  fb=$(make_herdr_claude_sim "$dir" 24 16 11)
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_SIM_STATE="$dir/sim.json" FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_BACKEND_HERDR_PROOF_BACKOFF='' \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" 2>"$err" )
-  [ "$out" = send-failed ] || fail "a refused ${#text}-character draft wrapped over about 25 rows should be cleared and report send-failed, got '$out': $(cat "$err")"
-  [ "$(jq -r '.buf' "$dir/sim.json")" = '' ] || fail "the refused draft must be cleared completely, left '$(jq -r .buf "$dir/sim.json")'"
-  [ "$(herdr_ctrl_u_count "$log")" -gt 20 ] || fail "a draft of about 25 rows needs more than 20 Ctrl+U presses, sent $(herdr_ctrl_u_count "$log")"
-  [ "$(jq -r '.submitted | length' "$dir/sim.json")" = 0 ] || fail "a refused draft must never be submitted"
-  pass "fm_backend_herdr_send_text_submit: a refused ${#text}-character draft in a 24-column pane is cleared row by row until the composer is empty"
+  dir="$TMP_ROOT/submit-narrow-clear"; mkdir -p "$dir"; : > "$dir/log"
+  fb=$(make_herdr_claude_sim "$dir" 24 16 '[{"kind":"drop","n":11,"always":true}]')
+  out=$(herdr_sim_submit "$dir" "$fb" "$text")
+  [ "$out" = send-failed ] || fail "a refused ${#text}-character draft wrapped over about 25 rows should be cleared and report send-failed, got '$out': $(cat "$dir/stderr")"
+  jq -e '.buf == "" and .submitted == []' "$dir/sim.json" >/dev/null \
+    || fail "the refused draft must be cleared completely and never submitted: $(jq -c '{buf, submitted}' "$dir/sim.json")"
+  [ "$(herdr_ctrl_u_count "$dir/log")" -gt 20 ] || fail "a draft of about 25 rows needs more than 20 Ctrl+U presses, sent $(herdr_ctrl_u_count "$dir/log")"
+  pass "fm_backend_herdr_send_text_submit: a ${#text}-character draft in a 24-column pane is cleared row by row until the composer is empty"
 }
 
 # A tall pane lets Claude's composer grow past any row estimate made from the
 # payload length, and a tail capture of that estimate cuts the composer's
-# first row off, which reads back as the truncation the proof refuses.
+# first row off, which reads back as an end of the message.
 test_send_text_submit_reads_a_tall_claude_composer_whole() {
-  local dir log fb out text
+  local dir fb out text
   text="$(herdr_helm_message) $(herdr_helm_message | cut -c1-120)"
-  dir="$TMP_ROOT/submit-tall-composer"; mkdir -p "$dir"; log="$dir/log"; : > "$log"
+  dir="$TMP_ROOT/submit-tall-composer"; mkdir -p "$dir"; : > "$dir/log"
   fb=$(make_herdr_claude_sim "$dir" 30 60)
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_SIM_STATE="$dir/sim.json" FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_BACKEND_HERDR_PROOF_BACKOFF='' \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" 2>"$dir/stderr" )
+  out=$(herdr_sim_submit "$dir" "$fb" "$text")
   [ "$out" = empty ] || fail "a ${#text}-character message filling a tall Claude composer should confirm delivery, got '$out': $(cat "$dir/stderr")"
-  [ "$(jq -r '.submitted[0]' "$dir/sim.json")" = "$text" ] || fail "the tall composer did not submit the whole message: $(jq -c .submitted "$dir/sim.json")"
-  if grep -qF $'\x1f''send-text'$'\x1f''w1:p2'$'\x1f'$'\033''[H' "$log"; then
-    fail "a composer that shows the whole message must not need paging"
-  fi
+  herdr_sim_delivered "$dir" "$text" || fail "the tall composer did not submit the whole message: $(jq -c .submitted "$dir/sim.json")"
+  [ "$(jq -r '.typed | length' "$dir/sim.json")" = 1 ] && [ "$(herdr_ctrl_u_count "$dir/log")" -eq 0 ] \
+    || fail "a composer that shows the whole message must be proven from its first read, not cleared and typed again"
   pass "fm_backend_herdr_send_text_submit: a 500-character message wrapped over 20 rows of a tall Claude composer is read whole and submitted"
+}
+
+# fm_backend_herdr_composer_retype takes a piece that fills the composer as
+# proof only when something older shows above it. Here a width read wider
+# than the composer lets the second piece fill it, and the draft empties just
+# before that piece, which then reads the same as if nothing had been lost.
+test_composer_retype_needs_older_text_above_a_piece_that_fills_the_composer() {
+  local dir fb text piece rc=0
+  piece=$(printf 'b%.0s' $(seq 87))
+  text="short start $piece"
+  dir="$TMP_ROOT/retype-filled-composer"; mkdir -p "$dir"; : > "$dir/log"
+  fb=$(make_herdr_claude_sim "$dir" 33 16 "[{\"kind\":\"wipe\",\"before\":\"$piece\"}]")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_SIM_STATE="$dir/sim.json" FM_BACKEND_HERDR_PROOF_BACKOFF='' \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_retype default:w1:p2 "$1" 200 3 87' "$ROOT" "$text" || rc=$?
+  [ "$rc" -eq 1 ] || fail "a piece that fills the composer with nothing older above it must not be proof, retype returned $rc"
+  [ "$(herdr_sim_buf "$dir")" = "$piece" ] || fail "the case did not wipe the draft before the filling piece: '$(herdr_sim_buf "$dir")'"
+  pass "fm_backend_herdr_composer_retype: a piece that fills the composer is not proof without older text above it"
+}
+
+# Every piece is typed as keys, however large the composer: a raw write longer
+# than Herdr's raw text limit is the burst Claude splits and truncates.
+test_composer_retype_types_pieces_no_longer_than_the_raw_limit() {
+  local dir fb text rc=0 max
+  text=$(awk 'BEGIN { for (i = 0; i < 300; i++) printf "word%05d ", i }')
+  dir="$TMP_ROOT/retype-raw-limit"; mkdir -p "$dir"; : > "$dir/log"
+  fb=$(make_herdr_claude_sim "$dir" 200 60)
+  PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_SIM_STATE="$dir/sim.json" FM_BACKEND_HERDR_PROOF_BACKOFF='' \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_retype default:w1:p2 "$1" 200 25 196' "$ROOT" "$text" || rc=$?
+  [ "$rc" -eq 0 ] || fail "a ${#text}-character text typed again in a 196-column composer should be proven, retype returned $rc"
+  jq -e --arg t "$text" '.buf == $t' "$dir/sim.json" >/dev/null || fail "the composer does not hold exactly the text typed again"
+  max=$(jq '.typed | max' "$dir/sim.json")
+  [ "$max" -le 512 ] || fail "a piece of $max bytes was typed raw, over the 512-byte raw text limit"
+  pass "fm_backend_herdr_composer_retype: pieces stay within the raw text limit however wide the composer is"
 }
 
 test_send_text_submit_lone_paste_placeholder_submits_the_long_payload() {
@@ -6409,16 +6592,25 @@ test_send_text_submit_refuses_enter_when_composer_holds_only_the_suffix
 test_send_text_submit_rereads_a_late_claude_render_before_enter
 test_send_text_submit_refuses_after_the_reread_window
 test_send_text_submit_refused_suffix_that_will_not_clear_is_unknown
-test_send_text_submit_clears_a_wrapped_suffix_one_row_per_press
+test_send_text_submit_clears_a_wrapped_unconfirmed_paste_one_row_per_press
 test_send_text_submit_refused_suffix_then_clean_retry_submits_only_the_message
 test_send_text_submit_claude_refuses_to_type_into_a_nonempty_composer
 test_send_text_submit_refuses_suffix_when_transcript_still_shows_the_head
 test_send_text_submit_accepts_marked_payloads_whose_read_back_drops_u2063
 test_send_text_submit_refuses_marked_digest_missing_its_head
-test_send_text_submit_pages_a_scrolled_claude_composer_before_enter
-test_send_text_submit_refuses_a_scrolled_claude_draft_that_lost_its_head
+test_send_text_submit_retypes_a_scrolled_claude_composer_in_proven_pieces
+test_send_text_submit_delivers_a_multi_paragraph_message_to_a_scrolled_claude_composer
+test_send_text_submit_refuses_a_claude_draft_hidden_above_blank_rows
+test_send_text_submit_retypes_a_claude_draft_that_lost_its_head_once
+test_send_text_submit_refuses_a_claude_draft_that_keeps_losing_its_head
+test_send_text_submit_never_submits_text_that_lands_above_the_message
+test_send_text_submit_never_submits_a_doubled_line
+test_send_text_submit_refuses_a_claude_draft_wiped_during_the_retype
+test_composer_clear_empties_a_claude_draft_hidden_above_blank_rows
 test_send_text_submit_reads_a_tall_claude_composer_whole
 test_send_text_submit_clears_a_long_refused_draft_in_a_narrow_pane
+test_composer_retype_needs_older_text_above_a_piece_that_fills_the_composer
+test_composer_retype_types_pieces_no_longer_than_the_raw_limit
 test_send_text_submit_lone_paste_placeholder_submits_the_long_payload
 test_send_text_submit_multiline_paste_placeholder_submits_the_long_payload
 test_send_text_submit_refuses_placeholder_followed_by_a_literal_remainder

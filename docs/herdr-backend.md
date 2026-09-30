@@ -544,7 +544,9 @@ When the request was sent but Herdr never answered, the composer may already hol
 ### Claude composer proof
 
 When native `agent get` identity is Claude, the adapter types only into an empty composer.
-A Claude composer that already holds text, or cannot be read, before the send is refused with nothing typed.
+Claude's fullscreen view caps its composer at `max(3, rows / 2 - 5)` visible rows and shows the rows around the cursor, so a draft whose visible rows are blank lines can still hold text above them.
+The composer is therefore empty only when it shows a single row with no typed text.
+A Claude composer that shows anything else, or cannot be read, before the send is refused with nothing typed, which also leaves someone else's draft untouched.
 Before that Enter, the adapter continues only when the selected composer shows the typed payload, or only Claude paste placeholders with no literal remainder.
 A read-back that does not show it yet is read again after short pauses for about two seconds (`FM_BACKEND_HERDR_PROOF_BACKOFF`), because a large, busy Claude session can draw typed text after the send's settle.
 Every read captures the whole screen, because a tail bound estimated from the payload length cuts the top off a composer that wraps narrower than the estimate or that a tall pane lets grow taller.
@@ -552,30 +554,31 @@ Every read captures the whole screen, because a tail bound estimated from the pa
 That comparison ignores whitespace and U+2063, the invisible mark that starts operational inputs and ends the from-firstmate label.
 It ignores U+2063 because Claude's Herdr read-back never shows it.
 
-Claude's fullscreen view caps its composer at about half the pane's rows, never fewer than three, and scrolls a longer draft with the cursor.
-A long message that landed whole therefore reads back as its own last rows.
-When a read-back shows only a literal end of the payload, the adapter pages up through the composer before deciding:
+A long message that landed whole in a capped composer reads back as its own last rows, and a draft that lost its head reads back the same way.
+When a read-back shows only a literal end of the payload, the adapter clears the draft and types the payload again in pieces, proving each piece before the next:
 
-1. It types Home as its escape sequence, because Herdr's `pane send-keys` has no Home key.
-   Home moves Claude's cursor back one wrapped row per press and stops at the draft's start, and unlike Up it never recalls prompt history into the draft.
-2. The first step presses Home once per visible composer row and later steps one fewer, so consecutive pages share at least one row.
-3. Every page must match the payload in exactly one place, touching or overlapping the part already proven below it, until a page starts at the payload's first character.
-4. End, typed the same way, then moves the cursor back as many rows, and the read-back must show the same last rows again, so Enter lands where typing left the cursor.
+1. Each piece holds at most the composer's width times half the rows below its cap, and at most the 512-byte raw limit, and it ends at its first line break.
+   So it is typed as keys and fits the composer with older rows to spare.
+2. Nothing moves the cursor, so every read-back is the end of the draft, and it must match the end of the text typed so far.
+3. A composer that shows fewer rows than its cap shows the whole draft, which must be exactly the text typed so far.
+4. A composer at its cap must show the whole newest piece joined to something older above it: older text, or, when the text typed before the piece ends with a blank line, that blank line as its top row.
 
-A page that is not part of the payload, a gap between pages, a page that fits more than one place, or two steps without progress fails the proof.
-So a draft that lost its head, which pages up to a start that is not the payload's start, still never receives Enter.
+Because the typing starts from a composer proven empty and only ever appends at the cursor, the draft holds exactly the payload once the last piece is proven, with nothing above or below it.
+A draft that loses its head once is recovered this way, while a piece that loses its head, is doubled, follows stray text, or lands in a draft that emptied is not proven.
+What the proof cannot see is a stretch of text dropped or doubled inside a repetition longer than the rows the composer shows, because those rows read the same either way.
 
-A composer that still holds a shorter suffix that paging does not prove, or a placeholder plus a literal remainder, after that window does not receive Enter.
+A composer whose read-back still does not show the payload after that window, a piece that is not proven, or a placeholder plus a literal remainder does not receive Enter.
 Instead:
 
-1. The adapter presses Ctrl+U until the shared classifier reads the composer as empty.
-   Claude deletes one wrapped row per press, so the presses continue while each one visibly changes the composer and stop after three that change nothing, rather than at an estimate of the draft's rows.
+1. The adapter presses Ctrl+U until the composer reads as empty, for Claude the single empty row above.
+   Claude deletes one wrapped row per press, so the presses continue while they visibly change the composer, and stop after the payload's line breaks plus three presses that change nothing, because deleting a blank line of a scrolled draft can leave the rows it shows unchanged.
+   The payload's visible characters and line breaks, plus two, cap the presses, and Claude's go out as many at a time as its composer shows rows.
 2. It then reports `send-failed`, so a resend starts from a clean composer.
 
 Ctrl+C is not used for this, because Claude documents it as interrupting a running operation.
 If the composer cannot be verified empty again, the submit reports `unknown` instead, because text may still be in the composer.
 
-Every refusal names its reason on stderr, which `fm-send.sh` passes to its caller: a composer that already held text or could not be read before typing, text that could not be typed, how many of the message's visible characters the last read-back showed and, for a scrolled composer, how many paging proved, or an Enter that could not be sent.
+Every refusal names its reason on stderr, which `fm-send.sh` passes to its caller: a composer that already held text or a draft behind blank rows, or could not be read, before typing, text that could not be typed, how many of the message's visible characters the last read-back showed and, for a draft typed again, how many its pieces proved, or an Enter that could not be sent.
 
 Other harnesses, and panes with no native identity, skip this proof and keep the type-then-Enter path.
 They skip it because their paste placeholders and composer shapes are not live-verified.

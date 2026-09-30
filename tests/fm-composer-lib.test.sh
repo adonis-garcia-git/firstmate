@@ -996,26 +996,39 @@ test_titled_bottom_requires_matching_width
 test_cursor_on_proven_box_bottom_classifies_content
 test_selected_content_is_composer_scoped_and_wrap_normalized
 
-test_selected_rows_counts_the_composer_rows_it_reads() {
-  # A Claude composer capped at three rows shows exactly its cap while it
-  # scrolls a longer draft, and a Herdr payload proof steps its paging by that
-  # count. A blank interior row is a composer row too.
-  local rule footer screen out
+test_selected_rows_view_reports_every_composer_row() {
+  # Claude caps its composer at a few rows and scrolls a longer draft, so a
+  # composer whose visible rows are blank can still hold text above them. The
+  # row view reports every row between the rules: typed text, blank rows
+  # (including blank rows below the last text), and ghost furniture apart.
+  local rule footer screen out want
   rule='──────────────────────────────'
   footer=$'\n  Opus 5.5 | ctx: 8% used\n  ⏵⏵ bypass permissions on'
   screen=$'transcript line\n❯ an earlier prompt\n'"$rule"$'\n❯ ring number one, look into\n  it. Make sure that he\n  didn\'t actually do anything\n'"$rule$footer"
-  out=$(fm_composer_selected_rows "$screen") || fail "a ruled three-row Claude composer should report its rows"
-  [ "$out" = 3 ] || fail "a ruled three-row Claude composer should report 3 rows, got '$out'"
+  out=$(fm_composer_selected_rows_view "$CAPS_STYLED" "$screen") || fail "a ruled three-row Claude composer should have a row view"
+  want=$'t\tring number one, look into\nt\tit. Make sure that he\nt\tdidn\'t actually do anything'
+  [ "$out" = "$want" ] || fail "a ruled three-row Claude composer should report three text rows, got '$out'"
   screen=$'transcript line\n'"$rule"$'\n❯ a\n\n  b\n'"$rule$footer"
-  out=$(fm_composer_selected_rows "$screen") || fail "a composer with a paragraph break should report its rows"
-  [ "$out" = 3 ] || fail "a blank interior row should count as a composer row, got '$out'"
-  screen=$'transcript line\n'"$rule"$'\n❯\u00a0\n'"$rule$footer"
-  out=$(fm_composer_selected_rows "$screen") || fail "an empty ruled composer should report its row"
-  [ "$out" = 1 ] || fail "an empty ruled composer should report 1 row, got '$out'"
-  if out=$(fm_composer_selected_rows $'just some shell output\nwith no composer'); then
-    fail "a screen with no composer must not report rows, got '$out'"
+  out=$(fm_composer_selected_rows_view "$CAPS_STYLED" "$screen")
+  [ "$out" = $'t\ta\nb\nt\tb' ] || fail "a paragraph break should report a blank row between two text rows, got '$out'"
+  screen=$'transcript line\n'"$rule"$'\n❯ \n'"$rule$footer"
+  out=$(fm_composer_selected_rows_view "$CAPS_STYLED" "$screen")
+  [ "$out" = b ] || fail "an empty ruled composer should report one blank row, got '$out'"
+  # A draft scrolled so that only its trailing blank lines show: every row is
+  # blank, and there are three of them, not one.
+  screen=$'transcript line\n'"$rule"$'\n❯ \n\n\n'"$rule$footer"
+  out=$(fm_composer_selected_rows_view "$CAPS_STYLED" "$screen")
+  [ "$out" = $'b\nb\nb' ] || fail "a composer showing three blank rows should report three blank rows, got '$out'"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$screen")
+  [ -z "$out" ] || fail "blank rows add no extracted content, got '$out'"
+  # Dim ghost text is furniture, reported apart from a blank row.
+  screen=$'transcript line\n'"$rule"$'\n❯ \033[2mTry asking about the report\033[0m\n'"$rule$footer"
+  out=$(fm_composer_selected_rows_view "$CAPS_STYLED" "$screen")
+  [ "$out" = g ] || fail "a composer holding only ghost text should report one ghost row, got '$out'"
+  if out=$(fm_composer_selected_rows_view "$CAPS_STYLED" $'just some shell output\nwith no composer'); then
+    fail "a screen with no composer must not have a row view, got '$out'"
   fi
-  pass "fm_composer_selected_rows: counts the rows of the composer fm_composer_extract_selected_content reads"
+  pass "fm_composer_selected_rows_view: reports text, blank, and ghost rows of the composer, trailing blank rows included"
 }
 
 test_ruled_bare_composer_keeps_text_past_a_blank_line() {
@@ -1126,4 +1139,4 @@ test_queued_enter_verdict_idle_pending_stays_pending
 test_queued_enter_verdict_does_not_convert_other_states
 test_ruled_bare_composer_keeps_text_past_a_blank_line
 test_ruled_bare_composer_keeps_typed_ascii_pipes
-test_selected_rows_counts_the_composer_rows_it_reads
+test_selected_rows_view_reports_every_composer_row

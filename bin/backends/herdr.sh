@@ -3127,13 +3127,18 @@ fm_backend_herdr_normalize_key() {  # <key>
   esac
 }
 
-# fm_backend_herdr_send_key: one named special key. Mirrors fm-send.sh's --key
-# path (tmux's `send-keys -t T key`).
-fm_backend_herdr_send_key() {  # <target> <key>
+# fm_backend_herdr_send_key: one named special key, or <count> of it in one
+# call. Mirrors fm-send.sh's --key path (tmux's `send-keys -t T key`).
+fm_backend_herdr_send_key() {  # <target> <key> [count]
   fm_backend_herdr_target_ready "$1" || return 1
-  local key
+  local key i=0
+  local -a keys=()
   key=$(fm_backend_herdr_normalize_key "$2")
-  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-keys "$FM_BACKEND_HERDR_PANE" "$key" >/dev/null 2>&1
+  while [ "$i" -lt "${3:-1}" ]; do
+    keys+=("$key")
+    i=$((i + 1))
+  done
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-keys "$FM_BACKEND_HERDR_PANE" "${keys[@]}" >/dev/null 2>&1
 }
 
 # fm_backend_herdr_capture: bounded plain-text pane capture. Mirrors
@@ -3278,15 +3283,18 @@ fm_backend_herdr_rendered_busy_state() {  # <target> [harness] -> busy|idle|unkn
 # Claude, text is typed only into an empty composer and Enter is sent only
 # after the composer shows the payload (fm_backend_herdr_composer_payload_shown),
 # re-read over about two seconds (fm_backend_herdr_composer_payload_wait) so a
-# late render is not mistaken for a truncated draft. A composer too short to
-# show the whole payload, which scrolls it and reads back as its end, is paged
-# through before Enter (fm_backend_herdr_composer_scrolled_proof).
-# A missing read, a shorter suffix that paging does not prove, or a paste
-# placeholder followed by a literal remainder still unchanged after that
-# window does not press Enter:
-# the composer is cleared back to empty and the verdict is send-failed, or
-# unknown when the clear cannot be verified. Every refusal names its reason on
-# stderr for the caller to relay. Other harnesses skip this proof. Verified hazard
+# late render is not mistaken for a truncated draft. The composer counts as
+# empty only when it shows one row (fm_backend_herdr_composer_view), because
+# Claude scrolls a draft whose visible rows can be blank. A read-back that
+# shows only the payload's end, from a composer too short to show all of it
+# or a draft that lost its head, is cleared and typed again in pieces, each
+# proven as it lands (fm_backend_herdr_composer_retype), so Enter lands only
+# on exactly the payload. A missing read, a piece that is not proven, or a
+# paste placeholder followed by a literal remainder still unchanged after
+# that window does not press Enter: the composer is cleared back to empty and
+# the verdict is send-failed, or unknown when the clear cannot be verified.
+# Every refusal names its reason on stderr for the caller to relay. Other
+# harnesses skip this proof. Verified hazard
 # (herdr-verification-p2.md "slash/$ autocomplete popup"): a `/`- or
 # `$`-prefixed send opens a completion popup within ~0.1s, exactly like tmux's
 # claude/codex popups, so the caller's <settle> before the first Enter matters
@@ -3440,8 +3448,8 @@ FM_BACKEND_HERDR_PASTE_PLACEHOLDER_RE='\[Pastedtext#[0-9]+(\+[0-9]+lines?)?\]'
 # burst: Claude collapses that burst into the placeholder and expands it on
 # submit. A shorter literal suffix, or a placeholder followed by a literal
 # remainder, is the head-truncation shape and is not proof on its own; see
-# fm_backend_herdr_composer_scrolled_proof for the suffix a capped composer
-# shows of a message that did land.
+# fm_backend_herdr_composer_retype for the suffix a capped composer shows of
+# a message that did land.
 fm_backend_herdr_composer_payload_shown() {  # <text> <after>
   local text=$1 after=$2 literal
   fm_backend_herdr_proof_text_var text
@@ -3466,39 +3474,82 @@ fm_backend_herdr_visible_chars() {  # <text>
 # FM_BACKEND_HERDR_PROOF_BACKOFF (default "0.1 0.2 0.3 0.5 0.9", about two
 # seconds in all): the pauses before each re-read of a composer whose
 # read-back does not yet show the payload, and before each re-read of a
-# scrolled composer page that has not yet redrawn after a cursor move. A
-# large, busy Claude session can draw typed text later than the caller's
-# settle, so one early read is not proof of a truncated draft. An empty value
-# keeps the single read, for call-count assertions in tests.
+# composer that has not yet drawn a piece fm_backend_herdr_composer_retype
+# typed. A large, busy Claude session can draw typed text later than the
+# caller's settle, so one early read is not proof of a truncated draft. An
+# empty value keeps the single read, for call-count assertions in tests.
 FM_BACKEND_HERDR_PROOF_BACKOFF=${FM_BACKEND_HERDR_PROOF_BACKOFF-0.1 0.2 0.3 0.5 0.9}
+
+# fm_backend_herdr_composer_view: capture <target> and read its selected
+# composer row by row (fm_composer_selected_rows_view), into
+# FM_BACKEND_HERDR_VIEW_TEXT (the typed text, as
+# fm_backend_herdr_composer_content reads it), FM_BACKEND_HERDR_VIEW_ROWS (the
+# rows the composer shows), FM_BACKEND_HERDR_VIEW_WIDTH (the longest text
+# row), FM_BACKEND_HERDR_VIEW_TOP_BLANK (1 when its first row is blank), and
+# FM_BACKEND_HERDR_VIEW_EMPTY (1 when it holds nothing at all: no text row and
+# no blank row below the first). Claude caps its composer at a few rows and
+# scrolls a longer draft with the cursor, so a composer whose visible rows are
+# blank can still hold text above them; only a one-row composer is empty.
+# 1 when the composer cannot be read.
+fm_backend_herdr_composer_view() {  # <target> <lines>
+  local view line n=0 text=''
+  FM_BACKEND_HERDR_VIEW_TEXT=
+  FM_BACKEND_HERDR_VIEW_ROWS=0
+  FM_BACKEND_HERDR_VIEW_WIDTH=0
+  FM_BACKEND_HERDR_VIEW_TOP_BLANK=0
+  FM_BACKEND_HERDR_VIEW_EMPTY=0
+  fm_backend_herdr_composer_capture "$1" "$2" || return 1
+  view=$(fm_composer_selected_rows_view "$FM_BACKEND_HERDR_COMPOSER_CAPS" "$FM_BACKEND_HERDR_COMPOSER_SCREEN") || return 1
+  FM_BACKEND_HERDR_VIEW_EMPTY=1
+  while IFS= read -r line; do
+    n=$((n + 1))
+    case "$line" in
+      t$'\t'*)
+        line=${line#t$'\t'}
+        text="${text}${text:+ }$line"
+        [ "${#line}" -le "$FM_BACKEND_HERDR_VIEW_WIDTH" ] || FM_BACKEND_HERDR_VIEW_WIDTH=${#line}
+        FM_BACKEND_HERDR_VIEW_EMPTY=0
+        ;;
+      b)
+        [ "$n" -gt 1 ] && FM_BACKEND_HERDR_VIEW_EMPTY=0
+        [ "$n" -gt 1 ] || FM_BACKEND_HERDR_VIEW_TOP_BLANK=1
+        ;;
+    esac
+  done <<EOF
+$view
+EOF
+  FM_BACKEND_HERDR_VIEW_ROWS=$n
+  FM_BACKEND_HERDR_VIEW_TEXT=$(printf '%s\n' "$text" | LC_ALL=C awk '{$1=$1; printf "%s", $0}')
+}
 
 # fm_backend_herdr_composer_payload_wait: 0 as soon as a composer read-back
 # shows <text> (fm_backend_herdr_composer_payload_shown), reading once and
-# then again after each FM_BACKEND_HERDR_PROOF_BACKOFF pause. A read-back that
-# shows only a literal end of <text> goes to
-# fm_backend_herdr_composer_scrolled_proof once, and its verdict is final.
-# Only a read that shows the whole payload, or a scrolled composer proven to
-# hold it, returns 0. On 1, FM_BACKEND_HERDR_PROOF_READS is the number of
-# reads and FM_BACKEND_HERDR_PROOF_SEEN the last read's visible character
-# count, or -1 when that read failed. FM_BACKEND_HERDR_PROOF_PROVEN is the
-# characters the scrolled proof proved from the end, or -1 when it did not run.
+# then again after each FM_BACKEND_HERDR_PROOF_BACKOFF pause. The composer
+# was proven empty before typing, so a read that shows <text> is all it
+# holds. A read that shows only a literal end of <text> is a composer that
+# scrolled the rest out of view, or a draft that lost its head, which no
+# re-read changes: the wait stops there with FM_BACKEND_HERDR_PROOF_SCROLLED=1
+# and that read's rows and width in FM_BACKEND_HERDR_VIEW_ROWS and
+# FM_BACKEND_HERDR_VIEW_WIDTH, for fm_backend_herdr_composer_retype. On 1,
+# FM_BACKEND_HERDR_PROOF_READS is the number of reads and
+# FM_BACKEND_HERDR_PROOF_SEEN the last read's visible character count, or -1
+# when that read failed.
 fm_backend_herdr_composer_payload_wait() {  # <target> <text> <lines>
-  local target=$1 text=$2 lines=$3 delay content
+  local target=$1 text=$2 lines=$3 delay
   local -a delays=()
   read -r -a delays <<< "$FM_BACKEND_HERDR_PROOF_BACKOFF"
   FM_BACKEND_HERDR_PROOF_READS=0
   FM_BACKEND_HERDR_PROOF_SEEN=-1
-  FM_BACKEND_HERDR_PROOF_PROVEN=-1
+  FM_BACKEND_HERDR_PROOF_SCROLLED=0
   for delay in 0 ${delays[@]+"${delays[@]}"}; do
     [ "$delay" = 0 ] || sleep "$delay"
     FM_BACKEND_HERDR_PROOF_READS=$((FM_BACKEND_HERDR_PROOF_READS + 1))
-    if fm_backend_herdr_composer_capture "$target" "$lines" \
-       && content=$(fm_composer_extract_selected_content "$FM_BACKEND_HERDR_COMPOSER_CAPS" "$FM_BACKEND_HERDR_COMPOSER_SCREEN"); then
-      fm_backend_herdr_composer_payload_shown "$text" "$content" && return 0
-      FM_BACKEND_HERDR_PROOF_SEEN=$(fm_backend_herdr_visible_chars "$content")
-      if fm_backend_herdr_composer_literal_tail "$text" "$content"; then
-        fm_backend_herdr_composer_scrolled_proof "$target" "$text" "$lines" "$content"
-        return
+    if fm_backend_herdr_composer_view "$target" "$lines"; then
+      fm_backend_herdr_composer_payload_shown "$text" "$FM_BACKEND_HERDR_VIEW_TEXT" && return 0
+      FM_BACKEND_HERDR_PROOF_SEEN=$(fm_backend_herdr_visible_chars "$FM_BACKEND_HERDR_VIEW_TEXT")
+      if fm_backend_herdr_composer_literal_tail "$text" "$FM_BACKEND_HERDR_VIEW_TEXT"; then
+        FM_BACKEND_HERDR_PROOF_SCROLLED=1
+        return 1
       fi
     else
       FM_BACKEND_HERDR_PROOF_SEEN=-1
@@ -3519,177 +3570,182 @@ fm_backend_herdr_composer_literal_tail() {  # <text> <after>
   [ "${text:$(( ${#text} - ${#after} ))}" = "$after" ]
 }
 
-# fm_backend_herdr_escape_keys: <count> copies of one escape sequence, the key
-# names Herdr's `pane send-keys` does not accept (Home and End) typed as the
-# sequences a terminal sends for them.
-fm_backend_herdr_escape_keys() {  # <sequence> <count>
-  local out='' i=0
-  while [ "$i" -lt "$2" ]; do
-    out+=$1
-    i=$((i + 1))
+# fm_backend_herdr_text_pieces: split <text> into the pieces
+# fm_backend_herdr_composer_retype types, printed NUL-separated: each at most
+# <size> bytes, ending at its first line break, else after its last space when
+# it has one, else inside a long word but never inside a UTF-8 character.
+fm_backend_herdr_text_pieces() {  # <text> <size>
+  local LC_ALL=C
+  local rest=$1 size=$2 piece head cut
+  while [ -n "$rest" ]; do
+    piece=${rest:0:$size}
+    case "$piece" in
+      *$'\n'*)
+        piece=${piece%%$'\n'*}$'\n'
+        ;;
+      *)
+        if [ "${#piece}" -lt "${#rest}" ]; then
+          head=${piece% *}
+          if [ "$head" != "$piece" ] && [ -n "$head" ]; then
+            piece="$head "
+          else
+            cut=${#piece}
+            while [ "$cut" -gt 1 ] && [[ ${rest:$cut:1} == [$'\x80'-$'\xbf'] ]]; do
+              cut=$((cut - 1))
+            done
+            piece=${rest:0:$cut}
+          fi
+        fi
+        ;;
+    esac
+    printf '%s\0' "$piece"
+    rest=${rest:${#piece}}
   done
-  printf '%s' "$out"
 }
 
-# fm_backend_herdr_composer_page_wait: read the composer once and then again
-# after each FM_BACKEND_HERDR_PROOF_BACKOFF pause until its content differs
-# from <previous>, printing the last read, because Claude redraws a moved
-# cursor's page after the keys that moved it. With <expect>, the wait instead
-# ends at the first read that shows <expect> in the
-# fm_backend_herdr_proof_text_var form, and 1 means none did. 1 when no read
-# succeeds.
-fm_backend_herdr_composer_page_wait() {  # <target> <lines> <previous> [expect]
-  local target=$1 lines=$2 previous=$3 expect=${4-} delay page norm read_ok=1
-  local -a delays=()
+# fm_backend_herdr_composer_retype: type <text> into a composer proven empty
+# in pieces, and prove after each piece that the composer holds exactly the
+# text typed so far. Claude's composer shows its last rows while the cursor is
+# at the end, and nothing here moves the cursor, so each read is the end of
+# the draft and must match the end of the text typed so far. A composer that
+# shows fewer rows than its cap shows the whole draft, which must then be
+# exactly that text. A composer at its cap must show the whole of the newest
+# piece joined to something older above it: older text, or, when the text
+# typed before the piece ends with a blank line, that blank line as its top
+# row. Every piece is therefore seen whole, joined to text already proven, and
+# the draft holds exactly <text> once the last piece is proven. The cap is
+# <rows>, the rows of the scrolled read that sent the draft here, and never
+# fewer than three, the fewest Claude's fullscreen composer shows when it
+# scrolls. A piece holds at most <width> times half the rows below the cap and
+# at most FM_BACKEND_HERDR_RAW_TEXT_MAX_BYTES, so it is typed as keys and fits
+# the composer with older rows to spare, and it ends at its first line break.
+# What this cannot see is a stretch of text dropped or doubled inside a
+# repetition longer than the rows the composer shows, because those rows read
+# the same either way. FM_BACKEND_HERDR_RETYPE_PROVEN is the visible
+# characters proven. 1 on the first piece that cannot be typed or proven.
+fm_backend_herdr_composer_retype() {  # <target> <text> <lines> <rows> <width>
+  local target=$1 text=$2 lines=$3 rows=$4 width=$5 size piece typed='' want seen got delay ok blank_before
+  local blank_re=$'(^|\n)[[:blank:]]*\n$'
+  local -a delays=() pieces=()
   read -r -a delays <<< "$FM_BACKEND_HERDR_PROOF_BACKOFF"
-  for delay in 0 ${delays[@]+"${delays[@]}"}; do
-    [ "$delay" = 0 ] || sleep "$delay"
-    page=$(fm_backend_herdr_composer_content "$target" "$lines") || continue
-    read_ok=0
-    if [ "$#" -ge 4 ]; then
-      norm=$page
-      fm_backend_herdr_proof_text_var norm
-      if [ "$norm" = "$expect" ]; then
-        printf '%s' "$page"
-        return 0
+  FM_BACKEND_HERDR_RETYPE_PROVEN=0
+  [ "$rows" -ge 3 ] || rows=3
+  size=$(( width * (rows - 1) / 2 ))
+  [ "$size" -ge 8 ] || size=8
+  [ "$size" -le "$FM_BACKEND_HERDR_RAW_TEXT_MAX_BYTES" ] || size=$FM_BACKEND_HERDR_RAW_TEXT_MAX_BYTES
+  # Split first, so no command below can read the pieces from its stdin.
+  while IFS= read -r -d '' piece; do
+    pieces+=("$piece")
+  done < <(fm_backend_herdr_text_pieces "$text" "$size")
+  for piece in ${pieces[@]+"${pieces[@]}"}; do
+    blank_before=0
+    [[ $typed =~ $blank_re ]] && blank_before=1
+    fm_backend_herdr_send_literal "$target" "$piece" || return 1
+    typed+=$piece
+    want=$typed
+    fm_backend_herdr_proof_text_var want
+    seen=$piece
+    fm_backend_herdr_proof_text_var seen
+    ok=0
+    for delay in 0 ${delays[@]+"${delays[@]}"}; do
+      [ "$delay" = 0 ] || sleep "$delay"
+      fm_backend_herdr_composer_view "$target" "$lines" || continue
+      got=$FM_BACKEND_HERDR_VIEW_TEXT
+      fm_backend_herdr_proof_text_var got
+      [ "${#got}" -le "${#want}" ] || continue
+      [ "${want:$(( ${#want} - ${#got} ))}" = "$got" ] || continue
+      if [ "$FM_BACKEND_HERDR_VIEW_ROWS" -lt "$rows" ]; then
+        [ "$got" = "$want" ] || continue
+      elif [ "${#got}" -le "${#seen}" ]; then
+        [ "${#got}" -eq "${#seen}" ] && [ "$blank_before" = 1 ] \
+          && [ "$FM_BACKEND_HERDR_VIEW_TOP_BLANK" = 1 ] || continue
       fi
-    elif [ "$page" != "$previous" ]; then
+      ok=1
       break
-    fi
+    done
+    [ "$ok" = 1 ] || return 1
+    FM_BACKEND_HERDR_RETYPE_PROVEN=${#want}
   done
-  [ "$read_ok" = 0 ] && [ "$#" -lt 4 ] || return 1
-  printf '%s' "$page"
-}
-
-# fm_backend_herdr_composer_scrolled_proof: 0 when a Claude composer whose
-# read-back <tail> shows only the end of <text> is proven to hold all of it.
-# Live Claude Code 2.1.285 in its fullscreen view caps the composer at about
-# half the pane's rows, never fewer than three, and scrolls the rest of a long
-# draft out of view with the cursor, so a wrapped message that landed whole
-# reads back as its own last rows (verified live on Herdr 0.8.2). The proof
-# pages up through the composer with Home, which moves Claude's cursor to the
-# start of the previous wrapped row per press and stops at the draft's start;
-# unlike Up it never recalls prompt history into the draft. The first step
-# presses Home once per visible composer row and later steps one fewer, so
-# consecutive pages share at least one row. Every page must sit in <text>
-# exactly once, touching or overlapping the part already proven below it,
-# until a page starts at <text>'s first character. A page that is not in
-# <text>, a gap, a page that fits more than one place, or two steps in a row
-# without progress fails the proof, so a draft that lost its head, which pages
-# up to a start that is not <text>'s start, is never proven. End then moves
-# the cursor back down as many rows, and the read-back must show <tail> again,
-# so Enter lands where typing left the cursor. FM_BACKEND_HERDR_PROOF_PROVEN is
-# the characters proven from the end. Callers capture the <tail> read through
-# fm_backend_herdr_composer_capture, whose screen this reads for the row count.
-fm_backend_herdr_composer_scrolled_proof() {  # <target> <text> <lines> <tail>
-  local target=$1 text=$2 lines=$3 tail=$4 want got rows step home_keys end_keys presses=0 stalled=0
-  local previous page norm covered lo x found matches
   want=$text
   fm_backend_herdr_proof_text_var want
-  got=$tail
-  fm_backend_herdr_proof_text_var got
-  covered=$(( ${#want} - ${#got} ))
-  FM_BACKEND_HERDR_PROOF_PROVEN=${#got}
-  rows=$(fm_composer_selected_rows "$FM_BACKEND_HERDR_COMPOSER_SCREEN") || return 1
-  case "$rows" in ''|*[!0-9]*|0) return 1 ;; esac
-  step=$rows
-  previous=$tail
-  while [ "$covered" -gt 0 ] && [ "$stalled" -lt 2 ]; do
-    home_keys=$(fm_backend_herdr_escape_keys $'\033[H' "$step")
-    fm_backend_herdr_send_literal "$target" "$home_keys" || break
-    presses=$((presses + step))
-    [ "$rows" -gt 1 ] && step=$((rows - 1))
-    page=$(fm_backend_herdr_composer_page_wait "$target" "$lines" "$previous") || break
-    previous=$page
-    norm=$page
-    fm_backend_herdr_proof_text_var norm
-    [ -n "$norm" ] || break
-    [[ $norm =~ $FM_BACKEND_HERDR_PASTE_PLACEHOLDER_RE ]] && break
-    lo=$(( covered - ${#norm} ))
-    [ "$lo" -ge 0 ] || lo=0
-    matches=0
-    found=-1
-    for (( x = lo; x <= covered; x++ )); do
-      if [ "${want:x:${#norm}}" = "$norm" ]; then
-        matches=$((matches + 1))
-        found=$x
-      fi
-    done
-    [ "$matches" -eq 1 ] || break
-    if [ "$found" -lt "$covered" ]; then
-      covered=$found
-      stalled=0
-    else
-      stalled=$((stalled + 1))
-    fi
-  done
-  FM_BACKEND_HERDR_PROOF_PROVEN=$(( ${#want} - covered ))
-  # Back to the end of the draft: End moves at most one wrapped row per press.
-  presses=$((presses + 2))
-  while [ "$presses" -gt 0 ]; do
-    step=$presses
-    [ "$step" -le 100 ] || step=100
-    end_keys=$(fm_backend_herdr_escape_keys $'\033[F' "$step")
-    fm_backend_herdr_send_literal "$target" "$end_keys" || return 1
-    presses=$((presses - step))
-  done
-  fm_backend_herdr_composer_page_wait "$target" "$lines" "$previous" "$got" >/dev/null || return 1
-  [ "$covered" -eq 0 ]
+  [ "$FM_BACKEND_HERDR_RETYPE_PROVEN" -eq "${#want}" ]
 }
 
 # fm_backend_herdr_composer_clear: after a refused proof or an unconfirmed
-# paste-aware send, press Ctrl+U until the shared classifier reads the
-# composer as empty. Claude documents Ctrl+U
-# as delete-to-line-start, repeated across lines of a multiline draft; Ctrl+C
-# is not used because it interrupts a running turn. Live Claude deletes one
-# wrapped screen row per press, so a draft takes one press per row it really
-# wraps to, which a per-row character estimate undercounts at narrow widths.
-# The presses therefore continue while each one visibly changes the captured
-# composer, and stop after three presses in a row that change nothing. The
-# text's visible characters and line breaks, plus two, cap them, because no
-# draft of that text has more rows. 0 only when the composer is verified empty
+# paste-aware send, press Ctrl+U until the composer reads as empty. Claude
+# documents Ctrl+U as delete-to-line-start, repeated across lines of a
+# multiline draft; Ctrl+C is not used because it interrupts a running turn.
+# Live Claude deletes one wrapped screen row per press, so a draft takes one
+# press per row it really wraps to, which a per-row character estimate
+# undercounts at narrow widths. The presses continue while each one visibly
+# changes the captured composer, and stop after the text's line breaks plus
+# three presses in a row that change nothing, because deleting a blank line
+# in a scrolled composer can leave the rows it shows unchanged. The text's
+# visible characters and line breaks, plus two, cap them, because no draft of
+# that text has more rows. With <claude>, empty means
+# fm_backend_herdr_composer_view's one-row composer, because Claude scrolls a
+# draft whose visible rows can all be blank, and the presses go out as many
+# at a time as the composer shows rows, because a Ctrl+U on Claude's empty
+# composer does nothing; otherwise empty is the shared classifier's verdict
+# and each press is read back. 0 only when the composer is verified empty
 # again.
-fm_backend_herdr_composer_clear() {  # <target> <text>
-  local target=$1 text=$2 limit breaks presses=0 unchanged=0 content previous=''
+fm_backend_herdr_composer_clear() {  # <target> <text> [claude]
+  local target=$1 text=$2 claude=${3:-0} limit breaks presses=0 unchanged=0 content previous='' batch=1
   breaks=${text//[!$'\n']/}
   limit=$(( $(fm_backend_herdr_visible_chars "$text") + ${#breaks} + 2 ))
-  while [ "$presses" -lt "$limit" ] && [ "$unchanged" -lt 3 ]; do
-    fm_backend_herdr_send_key "$target" C-u || return 1
-    presses=$((presses + 1))
-    if fm_backend_herdr_composer_state_capture "$target"; then
+  while [ "$presses" -lt "$limit" ] && [ "$unchanged" -lt $(( ${#breaks} + 3 )) ]; do
+    [ "$batch" -le $(( limit - presses )) ] || batch=$(( limit - presses ))
+    fm_backend_herdr_send_key "$target" C-u "$batch" || return 1
+    presses=$((presses + batch))
+    if [ "$claude" = 1 ]; then
+      if fm_backend_herdr_composer_view "$target" "$FM_BACKEND_HERDR_PROOF_CAPTURE_LINES"; then
+        [ "$FM_BACKEND_HERDR_VIEW_EMPTY" = 1 ] && return 0
+        content="$FM_BACKEND_HERDR_VIEW_ROWS:$FM_BACKEND_HERDR_VIEW_TEXT"
+      else
+        content=$previous
+      fi
+    elif fm_backend_herdr_composer_state_capture "$target"; then
       [ "$(fm_backend_herdr_composer_state_verdict "$target")" = empty ] && return 0
       content=$(fm_composer_extract_selected_content "$FM_BACKEND_HERDR_STATE_CAPS" "$FM_BACKEND_HERDR_STATE_SCREEN") || content=
     else
       content=$previous
     fi
-    if [ "$presses" -gt 1 ] && [ "$content" = "$previous" ]; then
-      unchanged=$((unchanged + 1))
+    if [ "$presses" -gt "$batch" ] && [ "$content" = "$previous" ]; then
+      unchanged=$((unchanged + batch))
     else
       unchanged=0
     fi
     previous=$content
+    if [ "$claude" = 1 ] && [ "$FM_BACKEND_HERDR_VIEW_ROWS" -gt 1 ]; then
+      batch=$FM_BACKEND_HERDR_VIEW_ROWS
+    fi
   done
   return 1
 }
 
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
-  local raw_status footer_baseline='' allow_rendered=0 enter_sent=0 identity proof=0 content send_rc=0 refused=0 seen total
+  local raw_status footer_baseline='' allow_rendered=0 enter_sent=0 identity proof=0 send_rc=0 refused=0 seen total rows width
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   # Claude on Herdr is the live-verified truncation shape: Enter is withheld
-  # unless the composer, empty before the send, shows this payload. A suffix
-  # that then starts a turn must not report empty. Other harnesses keep the
-  # unproven type-then-Enter path.
+  # unless the composer, proven empty before the send, is proven to hold
+  # exactly this payload. A suffix that then starts a turn must not report
+  # empty. Other harnesses keep the unproven type-then-Enter path.
   identity=$(fm_backend_herdr_agent_identity_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE") || identity=
   if [ "${identity%%$'\t'*}" = claude ]; then
     proof=1
-    if ! content=$(fm_backend_herdr_composer_content "$target" "$FM_BACKEND_HERDR_PROOF_CAPTURE_LINES"); then
+    if ! fm_backend_herdr_composer_view "$target" "$FM_BACKEND_HERDR_PROOF_CAPTURE_LINES"; then
       echo "warning: herdr: could not read the Claude composer in $FM_BACKEND_HERDR_PANE before typing, so nothing was typed" >&2
       printf 'send-failed'
       return 0
     fi
-    if [ -n "${content//[$' \t\r\n\v\f']/}" ]; then
-      echo "warning: herdr: the Claude composer in $FM_BACKEND_HERDR_PANE already held $(fm_backend_herdr_visible_chars "$content") characters before typing, so nothing was typed" >&2
+    if [ -n "${FM_BACKEND_HERDR_VIEW_TEXT//[$' \t\r\n\v\f']/}" ]; then
+      echo "warning: herdr: the Claude composer in $FM_BACKEND_HERDR_PANE already held $(fm_backend_herdr_visible_chars "$FM_BACKEND_HERDR_VIEW_TEXT") characters before typing, so nothing was typed" >&2
+      printf 'send-failed'
+      return 0
+    fi
+    if [ "$FM_BACKEND_HERDR_VIEW_EMPTY" != 1 ]; then
+      echo "warning: herdr: the Claude composer in $FM_BACKEND_HERDR_PANE already held a draft whose $FM_BACKEND_HERDR_VIEW_ROWS visible rows are blank before typing, so nothing was typed" >&2
       printf 'send-failed'
       return 0
     fi
@@ -3702,23 +3758,37 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   fi
   sleep "$settle"
   # An unconfirmed paste has already said why. A read-back that still does not
-  # show the payload after the re-read window withholds Enter.
+  # show the payload after the re-read window withholds Enter, unless it shows
+  # only the payload's end: then the draft is cleared and typed again in
+  # pieces the composer can show, each proven before the next.
   if [ "$send_rc" = 2 ]; then
     refused=1
   elif [ "$proof" = 1 ] && ! fm_backend_herdr_composer_payload_wait "$target" "$text" "$FM_BACKEND_HERDR_PROOF_CAPTURE_LINES"; then
-    refused=1
     total=$(fm_backend_herdr_visible_chars "$text")
-    if [ "$FM_BACKEND_HERDR_PROOF_SEEN" -lt 0 ]; then
-      seen='could not be read'
-    elif [ "$FM_BACKEND_HERDR_PROOF_PROVEN" -ge 0 ]; then
-      seen="showed only the last $FM_BACKEND_HERDR_PROOF_SEEN of $total characters of the message, and scrolling back through it proved only the last $FM_BACKEND_HERDR_PROOF_PROVEN"
+    if [ "$FM_BACKEND_HERDR_PROOF_SCROLLED" = 1 ]; then
+      rows=$FM_BACKEND_HERDR_VIEW_ROWS
+      width=$FM_BACKEND_HERDR_VIEW_WIDTH
+      if ! fm_backend_herdr_composer_clear "$target" "$text" 1; then
+        echo "warning: herdr: the Claude composer in $FM_BACKEND_HERDR_PANE showed only the last $FM_BACKEND_HERDR_PROOF_SEEN of $total characters of the message, and the draft could not be cleared to type it again in pieces, so the composer may still hold it and Enter was not pressed" >&2
+        printf 'unknown'
+        return 0
+      fi
+      if ! fm_backend_herdr_composer_retype "$target" "$text" "$FM_BACKEND_HERDR_PROOF_CAPTURE_LINES" "$rows" "$width"; then
+        refused=1
+        echo "warning: herdr: after $FM_BACKEND_HERDR_PROOF_READS read(s) the Claude composer in $FM_BACKEND_HERDR_PANE showed only the last $FM_BACKEND_HERDR_PROOF_SEEN of $total characters of the message, and typing it again in pieces proved only the first $FM_BACKEND_HERDR_RETYPE_PROVEN, so Enter was not pressed" >&2
+      fi
     else
-      seen="showed $FM_BACKEND_HERDR_PROOF_SEEN of $total characters of the message"
+      refused=1
+      if [ "$FM_BACKEND_HERDR_PROOF_SEEN" -lt 0 ]; then
+        seen='could not be read'
+      else
+        seen="showed $FM_BACKEND_HERDR_PROOF_SEEN of $total characters of the message"
+      fi
+      echo "warning: herdr: after $FM_BACKEND_HERDR_PROOF_READS read(s) the Claude composer in $FM_BACKEND_HERDR_PANE $seen, so Enter was not pressed" >&2
     fi
-    echo "warning: herdr: after $FM_BACKEND_HERDR_PROOF_READS read(s) the Claude composer in $FM_BACKEND_HERDR_PANE $seen, so Enter was not pressed" >&2
   fi
   if [ "$refused" = 1 ]; then
-    if fm_backend_herdr_composer_clear "$target" "$text"; then
+    if fm_backend_herdr_composer_clear "$target" "$text" "$proof"; then
       printf 'send-failed'
     else
       echo "warning: herdr: the refused draft could not be cleared from the composer in $FM_BACKEND_HERDR_PANE, which may still hold it" >&2
