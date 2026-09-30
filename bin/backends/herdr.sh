@@ -3127,14 +3127,21 @@ fm_backend_herdr_normalize_key() {  # <key>
   esac
 }
 
-# fm_backend_herdr_send_key: one named special key, or <count> of it in one
-# call. Mirrors fm-send.sh's --key path (tmux's `send-keys -t T key`).
-fm_backend_herdr_send_key() {  # <target> <key> [count]
+# fm_backend_herdr_send_key: one named special key. Mirrors fm-send.sh's --key
+# path (tmux's `send-keys -t T key`). fm_backend_send_key passes an
+# expected-label third argument, which herdr's pane targeting does not need.
+fm_backend_herdr_send_key() {  # <target> <key> [expected-label]
+  fm_backend_herdr_send_key_repeat "$1" "$2" 1
+}
+
+# fm_backend_herdr_send_key_repeat: <count> of one named special key in one
+# call.
+fm_backend_herdr_send_key_repeat() {  # <target> <key> <count>
   fm_backend_herdr_target_ready "$1" || return 1
   local key i=0
   local -a keys=()
   key=$(fm_backend_herdr_normalize_key "$2")
-  while [ "$i" -lt "${3:-1}" ]; do
+  while [ "$i" -lt "$3" ]; do
     keys+=("$key")
     i=$((i + 1))
   done
@@ -3695,7 +3702,7 @@ fm_backend_herdr_composer_clear() {  # <target> <text> [claude]
   limit=$(( $(fm_backend_herdr_visible_chars "$text") + ${#breaks} + 2 ))
   while [ "$presses" -lt "$limit" ] && [ "$unchanged" -lt $(( ${#breaks} + 3 )) ]; do
     [ "$batch" -le $(( limit - presses )) ] || batch=$(( limit - presses ))
-    fm_backend_herdr_send_key "$target" C-u "$batch" || return 1
+    fm_backend_herdr_send_key_repeat "$target" C-u "$batch" || return 1
     presses=$((presses + batch))
     if [ "$claude" = 1 ]; then
       if fm_backend_herdr_composer_view "$target" "$FM_BACKEND_HERDR_PROOF_CAPTURE_LINES"; then
