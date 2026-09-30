@@ -3260,11 +3260,14 @@ fm_backend_herdr_rendered_busy_state() {  # <target> [harness] -> busy|idle|unkn
 # (Enter only, never retyped) until native agent-state, a cleared composer, or
 # fm_composer_queued_enter_verdict confirms delivery. When native identity is
 # Claude, text is typed only into an empty composer and Enter is sent only
-# after the composer shows the payload (fm_backend_herdr_composer_payload_shown).
+# after the composer shows the payload (fm_backend_herdr_composer_payload_shown),
+# re-read over about two seconds (fm_backend_herdr_composer_payload_wait) so a
+# late render is not mistaken for a truncated draft.
 # A missing read, a shorter suffix, or a paste placeholder followed by a
-# literal remainder does not press Enter: the composer is cleared back to
-# empty and the verdict is send-failed, or unknown when the clear cannot be
-# verified. Other harnesses skip this proof. Verified hazard
+# literal remainder still unchanged after that window does not press Enter:
+# the composer is cleared back to empty and the verdict is send-failed, or
+# unknown when the clear cannot be verified. Every refusal names its reason on
+# stderr for the caller to relay. Other harnesses skip this proof. Verified hazard
 # (herdr-verification-p2.md "slash/$ autocomplete popup"): a `/`- or
 # `$`-prefixed send opens a completion popup within ~0.1s, exactly like tmux's
 # claude/codex popups, so the caller's <settle> before the first Enter matters
@@ -3417,6 +3420,49 @@ fm_backend_herdr_composer_payload_shown() {  # <text> <after>
   [ -z "$literal" ]
 }
 
+# fm_backend_herdr_visible_chars: the character count the payload proof
+# compares - <text> without whitespace or the U+2063 mark.
+fm_backend_herdr_visible_chars() {  # <text>
+  local text=$1
+  fm_composer_normalize_spaces_var text
+  text=${text//[$' \t\r\n\v\f']/}
+  text=${text//$'\xE2\x81\xA3'/}
+  printf '%s' "${#text}"
+}
+
+# FM_BACKEND_HERDR_PROOF_BACKOFF (default "0.1 0.2 0.3 0.5 0.9", about two
+# seconds in all): the pauses before each re-read of a composer whose
+# read-back does not yet show the payload. A large, busy Claude session can
+# draw typed text later than the caller's settle, so one early read is not
+# proof of a truncated draft. An empty value keeps the single read, for
+# call-count assertions in tests.
+FM_BACKEND_HERDR_PROOF_BACKOFF=${FM_BACKEND_HERDR_PROOF_BACKOFF-0.1 0.2 0.3 0.5 0.9}
+
+# fm_backend_herdr_composer_payload_wait: 0 as soon as a composer read-back
+# shows <text> (fm_backend_herdr_composer_payload_shown), reading once and
+# then again after each FM_BACKEND_HERDR_PROOF_BACKOFF pause. Only a read that
+# shows the whole payload returns 0. On 1, FM_BACKEND_HERDR_PROOF_READS is the
+# number of reads and FM_BACKEND_HERDR_PROOF_SEEN the last read's visible
+# character count, or -1 when that read failed.
+fm_backend_herdr_composer_payload_wait() {  # <target> <text> <lines>
+  local target=$1 text=$2 lines=$3 delay content
+  local -a delays=()
+  read -r -a delays <<< "$FM_BACKEND_HERDR_PROOF_BACKOFF"
+  FM_BACKEND_HERDR_PROOF_READS=0
+  FM_BACKEND_HERDR_PROOF_SEEN=-1
+  for delay in 0 ${delays[@]+"${delays[@]}"}; do
+    [ "$delay" = 0 ] || sleep "$delay"
+    FM_BACKEND_HERDR_PROOF_READS=$((FM_BACKEND_HERDR_PROOF_READS + 1))
+    if content=$(fm_backend_herdr_composer_content "$target" "$lines"); then
+      fm_backend_herdr_composer_payload_shown "$text" "$content" && return 0
+      FM_BACKEND_HERDR_PROOF_SEEN=$(fm_backend_herdr_visible_chars "$content")
+    else
+      FM_BACKEND_HERDR_PROOF_SEEN=-1
+    fi
+  done
+  return 1
+}
+
 # fm_backend_herdr_composer_clear: after a refused proof or an unconfirmed
 # paste-aware send, press Ctrl+U until the shared classifier reads the
 # composer as empty. Claude documents Ctrl+U
@@ -3438,7 +3484,7 @@ fm_backend_herdr_composer_clear() {  # <target> <text>
 
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
-  local raw_status footer_baseline='' allow_rendered=0 enter_sent=0 identity proof=0 proof_lines content send_rc=0
+  local raw_status footer_baseline='' allow_rendered=0 enter_sent=0 identity proof=0 proof_lines content send_rc=0 refused=0 seen
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   # Claude on Herdr is the live-verified truncation shape: Enter is withheld
   # unless the composer, empty before the send, shows this payload. A suffix
@@ -3448,19 +3494,42 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   if [ "${identity%%$'\t'*}" = claude ]; then
     proof=1
     proof_lines=$(fm_backend_herdr_proof_lines "$text")
-    content=$(fm_backend_herdr_composer_content "$target" "$proof_lines") \
-      || { printf 'send-failed'; return 0; }
-    [ -z "${content//[$' \t\r\n\v\f']/}" ] || { printf 'send-failed'; return 0; }
+    if ! content=$(fm_backend_herdr_composer_content "$target" "$proof_lines"); then
+      echo "warning: herdr: could not read the Claude composer in $FM_BACKEND_HERDR_PANE before typing, so nothing was typed" >&2
+      printf 'send-failed'
+      return 0
+    fi
+    if [ -n "${content//[$' \t\r\n\v\f']/}" ]; then
+      echo "warning: herdr: the Claude composer in $FM_BACKEND_HERDR_PANE already held $(fm_backend_herdr_visible_chars "$content") characters before typing, so nothing was typed" >&2
+      printf 'send-failed'
+      return 0
+    fi
   fi
   fm_backend_herdr_send_composer_text "$target" "$text" || send_rc=$?
-  [ "$send_rc" = 0 ] || [ "$send_rc" = 2 ] || { printf 'send-failed'; return 0; }
+  if [ "$send_rc" != 0 ] && [ "$send_rc" != 2 ]; then
+    echo "warning: herdr: the message could not be typed into $FM_BACKEND_HERDR_PANE, so no Enter was pressed" >&2
+    printf 'send-failed'
+    return 0
+  fi
   sleep "$settle"
-  if [ "$send_rc" = 2 ] || { [ "$proof" = 1 ] && {
-      ! content=$(fm_backend_herdr_composer_content "$target" "$proof_lines") \
-      || ! fm_backend_herdr_composer_payload_shown "$text" "$content"; }; }; then
+  # An unconfirmed paste has already said why. A read-back that still does not
+  # show the payload after the re-read window withholds Enter.
+  if [ "$send_rc" = 2 ]; then
+    refused=1
+  elif [ "$proof" = 1 ] && ! fm_backend_herdr_composer_payload_wait "$target" "$text" "$proof_lines"; then
+    refused=1
+    if [ "$FM_BACKEND_HERDR_PROOF_SEEN" -lt 0 ]; then
+      seen='could not be read'
+    else
+      seen="showed $FM_BACKEND_HERDR_PROOF_SEEN of $(fm_backend_herdr_visible_chars "$text") characters of the message"
+    fi
+    echo "warning: herdr: after $FM_BACKEND_HERDR_PROOF_READS read(s) the Claude composer in $FM_BACKEND_HERDR_PANE $seen, so Enter was not pressed" >&2
+  fi
+  if [ "$refused" = 1 ]; then
     if fm_backend_herdr_composer_clear "$target" "$text"; then
       printf 'send-failed'
     else
+      echo "warning: herdr: the refused draft could not be cleared from the composer in $FM_BACKEND_HERDR_PANE, which may still hold it" >&2
       printf 'unknown'
     fi
     return 0
@@ -3481,6 +3550,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
     elif [ "$enter_sent" -eq 0 ]; then
       i=$((i + 1))
       if [ "$i" -ge "$retries" ]; then
+        echo "warning: herdr: Enter could not be sent to $FM_BACKEND_HERDR_PANE in $retries attempt(s), so the typed text may still sit in its composer" >&2
         printf 'send-failed'
         return 0
       fi

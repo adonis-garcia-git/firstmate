@@ -1028,6 +1028,50 @@ test_ruled_bare_composer_keeps_text_past_a_blank_line() {
   pass "fm_composer_extract_selected_content: a ruled bare composer keeps text past a blank line"
 }
 
+test_ruled_bare_composer_keeps_typed_ascii_pipes() {
+  # helm ends every attachment line with ` |` ("ATTACHMENTS: <a> | <b> |"),
+  # so a wrapped row of that line starts or ends with an ASCII `|`, which
+  # fm_composer_row_has_edge reads as a box side. Between a Claude composer's
+  # two rules no ASCII box exists, and stopping there read back only part of
+  # the message: the payload proof refused and every helm send with an
+  # attachment failed as "herdr send failed".
+  local rule footer screen out
+  rule='──────────────────────────────'
+  footer=$'\n  Opus 5.5 | ctx: 8% used\n  ⏵⏵ bypass permissions on'
+  screen=$'transcript line\n'"$rule"$'\n❯ why is this happening?\n\n  ATTACHMENTS: /tmp/a.png |\n'"$rule$footer"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$screen")
+  [ "$out" = 'why is this happening? ATTACHMENTS: /tmp/a.png |' ] \
+    || fail "a ruled composer must keep an attachment row that ends in '|' past a blank line, got '$out'"
+  assert_screen "ruled claude draft with an attachment line" pending "$CAPS_STYLED" "$screen" '' "$(printf 'claude\tidle')"
+  # A wrap can leave the closing `|` alone on a row, or open a row with the
+  # `|` that separates two attachments; that row keeps both of its pipes.
+  screen=$'transcript line\n'"$rule"$'\n❯ ATTACHMENTS: /tmp/a-long-name.png\n  |\n'"$rule$footer"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$screen")
+  [ "$out" = 'ATTACHMENTS: /tmp/a-long-name.png |' ] \
+    || fail "a ruled composer must keep a wrapped row holding only '|', got '$out'"
+  screen=$'transcript line\n'"$rule"$'\n❯ ATTACHMENTS: /tmp/a.png | /tmp/b.png\n  | /tmp/c.png |\n'"$rule$footer"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$screen")
+  [ "$out" = 'ATTACHMENTS: /tmp/a.png | /tmp/b.png | /tmp/c.png |' ] \
+    || fail "a ruled composer must keep a wrapped row opening and closing with '|', got '$out'"
+  screen=$'transcript line\n'"$rule"$'\n❯ totals for the run\n  +3 new tests\n'"$rule$footer"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$screen")
+  [ "$out" = 'totals for the run +3 new tests' ] \
+    || fail "a ruled composer must keep a typed row that starts with '+', got '$out'"
+  # The boundaries this must not move: without a closing rule an ASCII-edged
+  # row still ends the composer, a box-drawing edge still reads as structure,
+  # and a composer with no rule above keeps the old stop.
+  screen=$'transcript line\n'"$rule"$'\n❯ my draft\n  | model | ctx |'
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$screen")
+  [ "$out" = 'my draft' ] || fail "an unclosed ruled composer must still end at an ASCII-edged row, got '$out'"
+  screen=$'transcript line\n'"$rule"$'\n❯ my draft\n  │ panel │\n'"$rule$footer"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$screen")
+  [ "$out" = 'my draft' ] || fail "a box-drawing edge row must still end a ruled composer, got '$out'"
+  screen=$'transcript line\n❯ my draft\n  footer cell |'
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  [ "$out" = 'my draft' ] || fail "an unruled bare composer must still end at an ASCII-edged row, got '$out'"
+  pass "fm_composer_extract_selected_content: a ruled bare composer keeps typed ASCII pipes and plus signs"
+}
+
 test_queued_enter_verdict_busy_pending_is_empty() {
   local out
   out=$(fm_composer_queued_enter_verdict pending busy)
@@ -1059,3 +1103,4 @@ test_queued_enter_verdict_busy_pending_is_empty
 test_queued_enter_verdict_idle_pending_stays_pending
 test_queued_enter_verdict_does_not_convert_other_states
 test_ruled_bare_composer_keeps_text_past_a_blank_line
+test_ruled_bare_composer_keeps_typed_ascii_pipes

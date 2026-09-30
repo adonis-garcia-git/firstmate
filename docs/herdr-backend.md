@@ -546,11 +546,12 @@ When the request was sent but Herdr never answered, the composer may already hol
 When native `agent get` identity is Claude, the adapter types only into an empty composer.
 A Claude composer that already holds text, or cannot be read, before the send is refused with nothing typed.
 Before that Enter, the adapter continues only when the selected composer shows the typed payload, or only Claude paste placeholders with no literal remainder.
+A read-back that does not show it yet is read again after short pauses for about two seconds (`FM_BACKEND_HERDR_PROOF_BACKOFF`), because a large, busy Claude session can draw typed text after the send's settle.
 
 That comparison ignores whitespace and U+2063, the invisible mark that starts operational inputs and ends the from-firstmate label.
 It ignores U+2063 because Claude's Herdr read-back never shows it.
 
-A composer that holds a shorter suffix, or a placeholder plus a literal remainder, does not receive Enter.
+A composer that still holds a shorter suffix, or a placeholder plus a literal remainder, after that window does not receive Enter.
 Instead:
 
 1. The adapter presses Ctrl+U until the shared classifier reads the composer as empty.
@@ -558,6 +559,8 @@ Instead:
 
 Ctrl+C is not used for this, because Claude documents it as interrupting a running operation.
 If the composer cannot be verified empty again, the submit reports `unknown` instead, because text may still be in the composer.
+
+Every refusal names its reason on stderr, which `fm-send.sh` passes to its caller: a composer that already held text or could not be read before typing, text that could not be typed, how many of the message's visible characters the last read-back showed, or an Enter that could not be sent.
 
 Other harnesses, and panes with no native identity, skip this proof and keep the type-then-Enter path.
 They skip it because their paste placeholders and composer shapes are not live-verified.
