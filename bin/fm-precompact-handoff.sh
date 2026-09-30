@@ -48,8 +48,9 @@
 # Captain turns are the transcript's `user` records whose `origin.kind` is
 # `human`, minus firstmate's own typed operational input, which Claude Code also
 # records as human: whatever bin/fm-operational-input.sh classifies as
-# operational input, or recognizes as a record-backed doorbell. A transcript
-# with no `origin` field has no captain turns.
+# operational input, or recognizes as a doorbell line by its shape alone, since
+# the record a doorbell names is pruned after about a week while the session
+# lives on. A transcript with no `origin` field has no captain turns.
 #
 # Contract with the compaction: this hook must never block or fail it. Claude
 # Code blocks compaction on exit 2 or a `decision: block` JSON object, so the
@@ -172,7 +173,7 @@ render_turns() {
     return 1
   fi
   while [ "$n" -lt "$MAX_TURNS" ] && IFS= read -r -d '' raw && IFS= read -r -d '' turn; do
-    if fm_operational_input_classify "$raw" kind || fm_operational_doorbell_record_kind "$raw" kind; then
+    if fm_operational_input_classify "$raw" kind || fm_operational_doorbell_path "$raw" kind; then
       continue
     fi
     kept[n]=$turn

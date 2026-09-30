@@ -217,19 +217,25 @@ test_records_no_turns_without_origin() {
 }
 
 # Claude Code records firstmate's own typed operational input with
-# origin.kind "human": a record-backed doorbell and an envelope. Neither is the
-# captain's word, and neither may push the captain's turns out of the window.
+# origin.kind "human": a record-backed doorbell, one whose record has since been
+# pruned, and an envelope. None is the captain's word, and none may push the
+# captain's turns out of the window.
 test_skips_firstmate_operational_input() {
-  local dir transcript doorbell envelope block i
+  local dir transcript doorbell pruned record envelope block i
   dir=$(make_home "$TMP_ROOT/operational")
   transcript="$TMP_ROOT/operational.jsonl"
   doorbell=$(printf 'DOORBELL-BODY-SENTINEL' | FM_STATE_OVERRIDE="$dir/state" \
     "$ROOT/bin/fm-operational-input.sh" record away-supervisor) || fail "could not write an operational record"
+  pruned=$(printf 'PRUNED-BODY-SENTINEL' | FM_STATE_OVERRIDE="$dir/state" \
+    "$ROOT/bin/fm-operational-input.sh" record away-supervisor) || fail "could not write an operational record"
+  record=$(printf '%s' "$pruned" | sed "s/^[^']*'//; s/'.*\$//")
+  rm "$record" || fail "could not prune the operational record $record"
   envelope=$(printf 'ENVELOPE-BODY-SENTINEL' | "$ROOT/bin/fm-operational-input.sh" encode watcher) \
     || fail "could not encode an operational envelope"
   {
     jq -nc '{type:"user", origin:{kind:"human"}, timestamp:"T0", message:{role:"user", content:"AWAY-BRIEF-SENTINEL hold the fort"}}'
     for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+      jq -nc --arg d "$pruned" '{type:"user", origin:{kind:"human"}, message:{role:"user", content:$d}}'
       jq -nc --arg d "$doorbell" '{type:"user", origin:{kind:"human"}, message:{role:"user", content:$d}}'
     done
     jq -nc --arg e "$envelope" '{type:"user", origin:{kind:"human"}, message:{role:"user", content:$e}}'
