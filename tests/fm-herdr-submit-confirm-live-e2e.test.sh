@@ -11,8 +11,9 @@
 # idle and while Claude is mid-turn, and to refuse a composer that shows only
 # part of the payload. In a pane short enough that Claude's composer scrolls a
 # long message, it requires the proof to page through the composer and submit
-# the whole message, and to refuse a scrolled draft that lost its head. It
-# fails naming the harness and version rather than degrading quietly.
+# the whole message, to refuse a scrolled draft that lost its head, and to
+# clear a long draft in a narrow pane completely. It fails naming the harness
+# and version rather than degrading quietly.
 #
 # Run explicitly with FM_HERDR_SUBMIT_CONFIRM_LIVE=1 after a Herdr or Claude
 # upgrade, and before trusting a refreshed docs/verification/runtime-backends.md
@@ -339,7 +340,7 @@ for part in tail head; do
   lab pane send-text "$PANE" "$typed" >/dev/null \
     || fail "could not type the $part of the truncation probe into the lab composer"
   sleep 0.5
-  content=$(fm_backend_herdr_composer_content "$TARGET" "$(fm_backend_herdr_proof_lines "$cut_msg")") \
+  content=$(fm_backend_herdr_composer_content "$TARGET" "$FM_BACKEND_HERDR_PROOF_CAPTURE_LINES") \
     || fail "Claude Code ($VERSION) on $HERDR_VER: could not read back the composer holding the $part"
   case "$content" in
     *"$typed"*) ;;
@@ -403,6 +404,33 @@ fi
 fm_backend_herdr_composer_clear "$TARGET" "$typed" \
   || fail "Claude Code ($VERSION) on $HERDR_VER: could not clear the refused head-dropped draft"
 pass "live Herdr scrolled composer: Claude Code ($VERSION) on $HERDR_VER pages a scrolled draft missing its head and refuses it"
+
+# A refused long draft in a narrow pane: Claude's Ctrl+U deletes one wrapped
+# row per press, so the clear needs one press per row the draft really wraps
+# to, more than a 40-characters-per-row estimate allows at this width.
+lab pane split "$PANE" --direction right --ratio 0.35 >/dev/null \
+  || fail "could not split the lab pane to narrow Claude's composer"
+cols=''
+i=0
+while [ "$i" -lt 20 ]; do
+  cols=$(lab pane layout --pane "$PANE" 2>/dev/null | jq -r --arg p "$PANE" '.result.layout.panes[] | select(.pane_id == $p) | .rect.width')
+  case "$cols" in ''|*[!0-9]*) ;; *) [ "$cols" -le 40 ] && break ;; esac
+  i=$((i + 1))
+  sleep 0.5
+done
+case "$cols" in ''|*[!0-9]*) cols=999 ;; esac
+[ "$cols" -le 40 ] || fail "the split lab pane never narrowed to 40 columns (width: $cols)"
+sleep 1
+draft="${msg} ${msg}"
+draft=${draft:0:700}
+lab pane send-text "$PANE" "$draft" >/dev/null \
+  || fail "could not type the long draft into the narrow lab composer"
+sleep 0.5
+fm_backend_herdr_composer_clear "$TARGET" "$draft" \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: a ${#draft}-char draft in a $cols-column pane was not cleared back to empty"
+[ "$(fm_backend_herdr_composer_state "$TARGET")" = empty ] \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: the $cols-column composer still holds part of the cleared draft"
+pass "live Herdr composer clear: Claude Code ($VERSION) on $HERDR_VER clears a ${#draft}-char draft in a $cols-column pane row by row"
 env PATH="$ORIGINAL_PATH" "$LAB_HELPER" viewer stop "$SESSION" >/dev/null || true
 
 [ "$CHECKED" -gt 0 ] || fail "FM_HERDR_SUBMIT_CONFIRM_LIVE=1 checked no harness"

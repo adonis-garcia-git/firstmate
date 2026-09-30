@@ -3213,22 +3213,38 @@ fm_backend_herdr_composer_identity() {  # <target> -> "<agent>\t<status>"
 # pair below every other candidate), preserving this adapter's original
 # consult-only-when-needed behavior.
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
-  local target=$1 cap caps verdict identity
+  local target=$1
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
+  fm_backend_herdr_composer_state_capture "$target" || { printf 'unknown'; return 0; }
+  fm_backend_herdr_composer_state_verdict "$target"
+}
+
+# fm_backend_herdr_composer_state_capture: the capture half of
+# fm_backend_herdr_composer_state, into FM_BACKEND_HERDR_STATE_CAPS and
+# FM_BACKEND_HERDR_STATE_SCREEN, so one capture can also give the composer's
+# text (fm_backend_herdr_composer_clear). 1 when neither capture works.
+fm_backend_herdr_composer_state_capture() {  # <target>
+  local target=$1 cap
   if cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_COMPOSER_CAPTURE_LINES" 2>/dev/null); then
-    caps=$(printf 'styled=1\ncursor=0\nidentity=1\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
+    FM_BACKEND_HERDR_STATE_CAPS=$(printf 'styled=1\ncursor=0\nidentity=1\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
   elif cap=$(fm_backend_herdr_capture "$target" "$FM_COMPOSER_CAPTURE_LINES"); then
-    caps=$(printf 'styled=0\ncursor=0\nidentity=1\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
+    FM_BACKEND_HERDR_STATE_CAPS=$(printf 'styled=0\ncursor=0\nidentity=1\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
   else
-    printf 'unknown'
-    return 0
+    return 1
   fi
-  verdict=$(fm_composer_classify_screen "$caps" "$cap")
+  FM_BACKEND_HERDR_STATE_SCREEN=$cap
+}
+
+# fm_backend_herdr_composer_state_verdict: the verdict half, for the screen
+# fm_backend_herdr_composer_state_capture captured from <target>.
+fm_backend_herdr_composer_state_verdict() {  # <target>
+  local target=$1 verdict identity
+  verdict=$(fm_composer_classify_screen "$FM_BACKEND_HERDR_STATE_CAPS" "$FM_BACKEND_HERDR_STATE_SCREEN")
   if [ "$verdict" = need-identity ]; then
     if ! identity=$(fm_backend_herdr_composer_identity "$target" 2>/dev/null) || [ -z "$identity" ]; then
       identity='probe-absent'
     fi
-    verdict=$(fm_composer_classify_screen "$caps" "$cap" '' "$identity")
+    verdict=$(fm_composer_classify_screen "$FM_BACKEND_HERDR_STATE_CAPS" "$FM_BACKEND_HERDR_STATE_SCREEN" '' "$identity")
     [ "$verdict" != need-identity ] || verdict=unknown
   fi
   printf '%s' "$verdict"
@@ -3361,21 +3377,6 @@ fm_backend_herdr_queued_enter_busy() {  # <target> <allow-rendered>
   else
     printf 'idle'
   fi
-}
-
-# fm_backend_herdr_proof_lines: how many Ctrl+U presses
-# fm_backend_herdr_composer_clear may spend on a refused draft, one per wrapped
-# row it expects the draft to span.
-fm_backend_herdr_proof_lines() {  # <text>
-  local text=$1 lines
-  lines=$(( (${#text} / 40) + 8 ))
-  if [ "$lines" -lt "$FM_COMPOSER_CAPTURE_LINES" ]; then
-    lines=$FM_COMPOSER_CAPTURE_LINES
-  fi
-  if [ "$lines" -gt 200 ]; then
-    lines=200
-  fi
-  printf '%s' "$lines"
 }
 
 # FM_BACKEND_HERDR_PROOF_CAPTURE_LINES: the rows every Claude payload proof
@@ -3641,16 +3642,32 @@ fm_backend_herdr_composer_scrolled_proof() {  # <target> <text> <lines> <tail>
 # composer as empty. Claude documents Ctrl+U
 # as delete-to-line-start, repeated across lines of a multiline draft; Ctrl+C
 # is not used because it interrupts a running turn. Live Claude deletes one
-# wrapped screen row per press, so a single-line leftover can need several
-# presses. The press count is bounded by fm_backend_herdr_proof_lines.
-# 0 only when the composer is verified empty again.
+# wrapped screen row per press, so a draft takes one press per row it really
+# wraps to, which a per-row character estimate undercounts at narrow widths.
+# The presses therefore continue while each one visibly changes the captured
+# composer, and stop after three presses in a row that change nothing. The
+# text's visible characters and line breaks, plus two, cap them, because no
+# draft of that text has more rows. 0 only when the composer is verified empty
+# again.
 fm_backend_herdr_composer_clear() {  # <target> <text>
-  local target=$1 text=$2 presses i=0
-  presses=$(fm_backend_herdr_proof_lines "$text")
-  while [ "$i" -lt "$presses" ]; do
+  local target=$1 text=$2 limit breaks presses=0 unchanged=0 content previous=''
+  breaks=${text//[!$'\n']/}
+  limit=$(( $(fm_backend_herdr_visible_chars "$text") + ${#breaks} + 2 ))
+  while [ "$presses" -lt "$limit" ] && [ "$unchanged" -lt 3 ]; do
     fm_backend_herdr_send_key "$target" C-u || return 1
-    i=$((i + 1))
-    [ "$(fm_backend_herdr_composer_state "$target")" = empty ] && return 0
+    presses=$((presses + 1))
+    if fm_backend_herdr_composer_state_capture "$target"; then
+      [ "$(fm_backend_herdr_composer_state_verdict "$target")" = empty ] && return 0
+      content=$(fm_composer_extract_selected_content "$FM_BACKEND_HERDR_STATE_CAPS" "$FM_BACKEND_HERDR_STATE_SCREEN") || content=
+    else
+      content=$previous
+    fi
+    if [ "$presses" -gt 1 ] && [ "$content" = "$previous" ]; then
+      unchanged=$((unchanged + 1))
+    else
+      unchanged=0
+    fi
+    previous=$content
   done
   return 1
 }

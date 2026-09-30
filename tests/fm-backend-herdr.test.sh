@@ -4924,7 +4924,7 @@ test_send_text_submit_unconfirmed_paste_that_will_not_clear_is_unknown() {
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_BACKEND_HERDR_PROOF_BACKOFF='' \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$msg" 2>/dev/null )
   [ "$out" = unknown ] || fail "an unconfirmed paste that stays in the composer must not claim nothing was typed, got '$out'"
-  [ "$(herdr_ctrl_u_count "$log")" -eq "$cap" ] || fail "a leftover that will not clear should get a bounded $cap Ctrl+U presses, sent $(herdr_ctrl_u_count "$log")"
+  [ "$(herdr_ctrl_u_count "$log")" -eq 4 ] || fail "a leftover that never changes should stop after four Ctrl+U presses, sent $(herdr_ctrl_u_count "$log")"
   [ "$(grep -cE $'\x1f''pane'$'\x1f''send-text|'$'\x1f''enter$' "$log")" -eq 0 ] \
     || fail "an unconfirmed paste must not fall back to raw send-text or press Enter: $(cat "$log")"
   pass "fm_backend_herdr_send_text_submit: an unconfirmed paste whose clear cannot be verified reports unknown, not send-failed"
@@ -5274,7 +5274,7 @@ test_send_text_submit_refused_suffix_that_will_not_clear_is_unknown() {
   [ "$out" = unknown ] || fail "a refused suffix that stays in the composer must not claim nothing was typed, got '$out'"
   enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
   [ "$enter_count" -eq 0 ] || fail "a suffix must not be submitted, sent $enter_count Enter(s)"
-  [ "$(herdr_ctrl_u_count "$log")" -eq "$cap" ] || fail "a leftover that will not clear should get a bounded $cap Ctrl+U presses, sent $(herdr_ctrl_u_count "$log")"
+  [ "$(herdr_ctrl_u_count "$log")" -eq 4 ] || fail "a leftover that never changes should stop after four Ctrl+U presses, sent $(herdr_ctrl_u_count "$log")"
   pass "fm_backend_herdr_send_text_submit: a refused suffix whose clear cannot be verified reports unknown, not send-failed"
 }
 
@@ -5466,6 +5466,25 @@ test_send_text_submit_refuses_a_scrolled_claude_draft_that_lost_its_head() {
   grep -E 'showed only the last [0-9]+ of 312 characters of the message, and scrolling back through it proved only the last 303, so Enter was not pressed' "$err" >/dev/null \
     || fail "the refusal must name what the scrolled composer showed and what paging proved: $(cat "$err")"
   pass "fm_backend_herdr_send_text_submit: a scrolling Claude draft that lost its head is paged, refused, named, and cleared"
+}
+
+# Live Claude's Ctrl+U deletes one wrapped row per press, so a long refused
+# draft in a narrow pane needs more presses than an estimate of 40 characters
+# per row allows. The clear keeps pressing while each press shortens the
+# composer, and the draft is gone before the refusal is reported.
+test_send_text_submit_clears_a_long_refused_draft_in_a_narrow_pane() {
+  local dir log fb out text err
+  text="$(herdr_helm_message) $(herdr_helm_message | cut -c1-120)"
+  dir="$TMP_ROOT/submit-narrow-clear"; mkdir -p "$dir"; log="$dir/log"; : > "$log"
+  err="$dir/stderr"
+  fb=$(make_herdr_claude_sim "$dir" 24 16 11)
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_SIM_STATE="$dir/sim.json" FM_BACKEND_HERDR_SUBMIT_POLLS=1 FM_BACKEND_HERDR_PROOF_BACKOFF='' \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 3 0.01 0.01' "$ROOT" "$text" 2>"$err" )
+  [ "$out" = send-failed ] || fail "a refused ${#text}-character draft wrapped over about 25 rows should be cleared and report send-failed, got '$out': $(cat "$err")"
+  [ "$(jq -r '.buf' "$dir/sim.json")" = '' ] || fail "the refused draft must be cleared completely, left '$(jq -r .buf "$dir/sim.json")'"
+  [ "$(herdr_ctrl_u_count "$log")" -gt 20 ] || fail "a draft of about 25 rows needs more than 20 Ctrl+U presses, sent $(herdr_ctrl_u_count "$log")"
+  [ "$(jq -r '.submitted | length' "$dir/sim.json")" = 0 ] || fail "a refused draft must never be submitted"
+  pass "fm_backend_herdr_send_text_submit: a refused ${#text}-character draft in a 24-column pane is cleared row by row until the composer is empty"
 }
 
 # A tall pane lets Claude's composer grow past any row estimate made from the
@@ -6399,6 +6418,7 @@ test_send_text_submit_refuses_marked_digest_missing_its_head
 test_send_text_submit_pages_a_scrolled_claude_composer_before_enter
 test_send_text_submit_refuses_a_scrolled_claude_draft_that_lost_its_head
 test_send_text_submit_reads_a_tall_claude_composer_whole
+test_send_text_submit_clears_a_long_refused_draft_in_a_narrow_pane
 test_send_text_submit_lone_paste_placeholder_submits_the_long_payload
 test_send_text_submit_multiline_paste_placeholder_submits_the_long_payload
 test_send_text_submit_refuses_placeholder_followed_by_a_literal_remainder

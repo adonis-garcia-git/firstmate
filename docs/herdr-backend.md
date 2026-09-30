@@ -569,6 +569,7 @@ A composer that still holds a shorter suffix that paging does not prove, or a pl
 Instead:
 
 1. The adapter presses Ctrl+U until the shared classifier reads the composer as empty.
+   Claude deletes one wrapped row per press, so the presses continue while each one visibly changes the composer and stop after three that change nothing, rather than at an estimate of the draft's rows.
 2. It then reports `send-failed`, so a resend starts from a clean composer.
 
 Ctrl+C is not used for this, because Claude documents it as interrupting a running operation.
