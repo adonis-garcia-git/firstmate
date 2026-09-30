@@ -33,9 +33,20 @@ install_hook_scripts() {
     cp "$ROOT/bin/$script" "$dir/bin/$script"
   done
   chmod +x "$dir/bin/fm-precompact-handoff.sh"
+  # Answers like the real listing: the requested extra fields follow the title,
+  # which may itself hold commas.
   cat > "$dir/bin/fm-tasks-axi.sh" <<'SH'
 #!/usr/bin/env bash
-printf 'count: 1\ntasks[1]{id,state,kind,repo,title,hold_kind,hold_reason}:\n  held-1,queued,task,demo,HOLD-SENTINEL title,captain,waiting on the captain\n'
+case "$*" in
+  *hold_reason*)
+    printf 'count: 1\ntasks[1]{id,state,kind,repo,title,hold_kind,hold_reason}:\n'
+    printf '  held-1,queued,task,demo,"TITLE-SENTINEL, with a comma",captain,REASON-SENTINEL patient said\n'
+    ;;
+  *)
+    printf 'count: 1\ntasks[1]{id,state,kind,repo,title,hold_kind}:\n'
+    printf '  held-1,queued,task,demo,"TITLE-SENTINEL, with a comma",captain\n'
+    ;;
+esac
 SH
   chmod +x "$dir/bin/fm-tasks-axi.sh"
 }
@@ -118,14 +129,10 @@ test_writes_verbatim_captain_words_and_open_work() {
   assert_contains "$block" "> keep COMPACT-ARG-SENTINEL" "the /compact instructions were not recorded"
   assert_contains "$block" "> FIRST-SENTINEL please look at the build" "a captain turn was not recorded verbatim"
   assert_contains "$block" "> Yes." "a short captain answer was not recorded"
-  assert_contains "$block" "In reply to firstmate: Should I merge QUESTION-SENTINEL?" \
-    "a short answer lost the question it answered (the no-op reply must be skipped)"
   assert_contains "$block" "> /stow now" "a slash command was not rendered as the captain typed it"
   assert_contains "$block" "- T11 (with an attachment)" "an attachment was not noted"
-  assert_contains "$block" "> FINAL-SENTINEL all set" "firstmate's last substantive reply was not recorded"
-  assert_contains "$block" "HOLD-SENTINEL" "held backlog items were not recorded"
+  assert_contains "$block" "- held-1 (hold kind: captain)" "a held backlog item's id and kind were not recorded"
   assert_contains "$block" "- task-a (ship) pr=https://example.invalid/pr/7" "a task record was not recorded"
-  assert_contains "$block" "last status: paused [at=2]: WORKER-SENTINEL" "a task's last status was not recorded"
   local sentinel
   for sentinel in WAKE-SENTINEL TOOL-SENTINEL META-SENTINEL SUMMARY-SENTINEL SIDECHAIN-SENTINEL; do
     assert_not_contains "$block" "$sentinel" "a non-captain record was recorded as captain words"
@@ -137,7 +144,25 @@ test_writes_verbatim_captain_words_and_open_work() {
   [ "$(record_field "$dir" trigger)" = manual ] || fail "the result record lost the trigger"
   [ "$(record_field "$dir" turns)" = 4 ] || fail "expected 4 captain turns, got $(record_field "$dir" turns)"
   [ "$(record_field "$dir" transcript)" = "$transcript" ] || fail "the result record lost the transcript path"
-  pass "the hook records verbatim captain words, their context, and open work, and keeps the rest of the note"
+  pass "the hook records verbatim captain words and open-work identifiers, and keeps the rest of the note"
+}
+
+# The note carries only the captain's own words plus identifiers. Firstmate's
+# replies, worker status lines, backlog titles, and hold reasons can quote
+# patient or worker text, so none of them may reach it.
+test_carries_no_dropped_fields() {
+  local dir transcript note sentinel
+  dir=$(make_home "$TMP_ROOT/dropped")
+  transcript="$TMP_ROOT/dropped.jsonl"
+  write_origin_transcript "$transcript"
+  run_hook "$dir" "$(payload "$transcript")"
+  note=$(cat "$dir/data/session-handoff.md")
+  for sentinel in QUESTION-SENTINEL FINAL-SENTINEL "Captain, shipshape." WORKER-SENTINEL \
+    TITLE-SENTINEL REASON-SENTINEL "In reply to" "last status" "last reply"; do
+    assert_not_contains "$note" "$sentinel" "the note carried a field outside the captain's words and identifiers"
+  done
+  assert_contains "$note" "> FIRST-SENTINEL please look at the build" "the captain's words were dropped too"
+  pass "the note carries no firstmate replies, worker status lines, backlog titles, or hold reasons"
 }
 
 test_replaces_its_block_in_place() {
@@ -203,7 +228,8 @@ test_missing_transcript_still_writes_open_work() {
   run_hook "$dir" "$(payload "$TMP_ROOT/does-not-exist.jsonl")"
   [ "$(record_field "$dir" status)" = partial ] || fail "a missing transcript was not recorded as partial"
   assert_contains "$(record_field "$dir" reason)" "transcript not readable" "the partial reason was not recorded"
-  assert_contains "$(block_of "$dir")" "WORKER-SENTINEL" "open work was not written without a transcript"
+  assert_contains "$(block_of "$dir")" "- task-a (ship) pr=https://example.invalid/pr/7" \
+    "open work was not written without a transcript"
   pass "a missing transcript still writes the open-work snapshot and records a partial result"
 }
 
@@ -316,6 +342,7 @@ test_lock_ownership_decides_authority() {
 }
 
 test_writes_verbatim_captain_words_and_open_work
+test_carries_no_dropped_fields
 test_replaces_its_block_in_place
 test_keeps_only_the_most_recent_turns
 test_falls_back_to_record_shape_without_origin

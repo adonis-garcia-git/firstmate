@@ -125,7 +125,8 @@ The `bin/fm-session-start.sh` header is the single owner of those mechanics.
 
 A compaction keeps the session but replaces its conversation with a summary, and an automatic compaction happens with no `/stow` first.
 On Claude, `.claude/settings.json` registers one unmatched `PreCompact` hook, so `bin/fm-precompact-handoff.sh` runs just before every manual and automatic compaction.
-It writes a snapshot of what the summary could lose into the home's session handoff note, `data/session-handoff.md`: the `/compact` instructions, the captain's most recent turns verbatim with the reply each answered, firstmate's last reply, held backlog items, and every task record with its last status line.
+It writes a snapshot of what the summary could lose into the home's session handoff note, `data/session-handoff.md`: the `/compact` instructions, the captain's most recent turns verbatim, the id and hold kind of every held backlog item, and every task record's id, kind, and PR URL.
+It never copies firstmate's replies, worker status lines, backlog titles, or hold reasons, because those can quote patient or worker text and the compaction digest reprints the work state from its own records anyway.
 It owns only its marked block in that note, so conversation threads a `/stow` wrote there survive.
 It records and never judges: filing work and correcting records stays with `/stow` and the agent.
 

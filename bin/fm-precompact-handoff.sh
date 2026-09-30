@@ -36,14 +36,14 @@
 #
 # The snapshot block holds, newest state at compaction time:
 #   - the /compact custom instructions, when the captain gave any;
-#   - the captain's most recent turns, verbatim and clipped, each with the tail
-#     of the reply it answered, so a bare "yes" keeps its referent;
-#   - firstmate's last reply before compaction, clipped;
-#   The exact no-op reply `Captain, shipshape.` (AGENTS.md section 9) is never
-#   chosen as a reply or as a turn's context, because it answers nothing.
-#   - held backlog items through bin/fm-tasks-axi.sh (captain decisions and
-#     external waits);
-#   - every state/*.meta task with its kind, recorded PR, and last status line.
+#   - the captain's most recent turns, verbatim and clipped;
+#   - the id and hold kind of every held backlog item, through
+#     bin/fm-tasks-axi.sh (captain decisions and external waits);
+#   - every state/*.meta task's id, kind, and recorded PR URL.
+# It deliberately carries only the captain's own words plus identifiers, never
+# firstmate's replies, worker status lines, backlog titles, or hold reasons:
+# those can quote patient or worker text, and the compact re-emit already
+# reprints the work state from its own records.
 #
 # Captain turns are the transcript's `user` records whose `origin.kind` is
 # `human`. A transcript that carries no `origin` field at all (an older Claude
@@ -82,10 +82,6 @@ END_MARK='<!-- fm-precompact-handoff:end -->'
 # harness may truncate.
 MAX_TURNS=10
 TURN_CHARS=1000
-CONTEXT_CHARS=240
-REPLY_CHARS=1500
-STATUS_CHARS=240
-HOLDS_CHARS=3000
 HOLDS_TIMEOUT=10
 
 case "${1:-}" in
@@ -134,16 +130,13 @@ step_aside() {  # <reason>
 }
 
 # render_turns <transcript>: print TURNS=<n> on the first line, then the
-# markdown for the captain's recent turns and firstmate's last reply. Each line
-# parses on its own, so a torn line from a concurrent append is skipped rather
-# than failing the whole read.
+# markdown for the captain's recent turns. Each line parses on its own, so a
+# torn line from a concurrent append is skipped rather than failing the whole
+# read.
 render_turns() {
   jq -Rrn \
     --argjson max "$MAX_TURNS" \
-    --argjson turn_chars "$TURN_CHARS" \
-    --argjson context_chars "$CONTEXT_CHARS" \
-    --argjson reply_chars "$REPLY_CHARS" \
-    --arg noop '^\s*Captain, shipshape\.\s*$' '
+    --argjson turn_chars "$TURN_CHARS" '
     def blocks: if (.message.content | type) == "array" then .message.content else [] end;
     def content_text:
       if (.message.content | type) == "string" then .message.content
@@ -160,27 +153,22 @@ render_turns() {
         | sub("\\s+$"; "")
       else . end;
     def clip($n): if length > $n then .[0:$n] + " [...]" else . end;
-    def tail_clip($n): if length > $n then "[...] " + .[length - $n:] else . end;
     def safe: gsub("<!--"; "<! --");
     def quote: split("\n") | map("> " + .) | join("\n");
-    reduce (inputs | try fromjson catch null) as $e ({origin_seen: false, by_origin: [], by_shape: [], reply: null};
+    reduce (inputs | try fromjson catch null) as $e ({origin_seen: false, by_origin: [], by_shape: []};
       if ($e | type) != "object" then .
       else
         (if ($e.origin | type) == "object" then .origin_seen = true else . end)
         | if ($e | plain_user) then
             ($e | content_text) as $t
             | {ts: ($e.timestamp // ""), text: ($t | command_form),
-               image: ($e | has_block("image")), before: (.reply.text // null)} as $turn
+               image: ($e | has_block("image"))} as $turn
             | (if ($e.origin | type) == "object" and $e.origin.kind == "human"
                then .by_origin = (.by_origin + [$turn])[-$max:] else . end)
             | (if $e.origin == null
                  and (($t | test("^\\s*<") | not) or ($t | test("^\\s*<command-")))
                  and (($t | length) > 0 or $turn.image)
                then .by_shape = (.by_shape + [$turn])[-$max:] else . end)
-          elif $e.type == "assistant" and $e.isSidechain != true then
-            ([$e | blocks[] | select(type == "object" and .type == "text") | .text | strings] | join("\n")) as $t
-            | if ($t | length) > 0 and ($t | test($noop) | not)
-              then .reply = {ts: ($e.timestamp // ""), text: $t} else . end
           else . end
       end)
     | (if .origin_seen then .by_origin else .by_shape end) as $turns
@@ -190,41 +178,34 @@ render_turns() {
       (if ($turns | length) == 0 then "(no captain turns found in the transcript)"
        else ($turns[] |
          "- \(.ts)" + (if .image then " (with an attachment)" else "" end),
-         (if .before != null then
-            "  In reply to firstmate: " + (.before | tail_clip($context_chars) | gsub("\n"; " ") | safe)
-          else empty end),
          "",
          ((if (.text | length) > 0 then .text else "(attachment only)" end) | clip($turn_chars) | safe | quote),
          "")
-       end),
-      "",
-      "### Firstmate'"'"'s last reply before compaction",
-      "",
-      (if .reply == null then "(none found)"
-       else ("\(.reply.ts)", "", (.reply.text | clip($reply_chars) | safe | quote)) end)
+       end)
   ' < "$1"
 }
 
-# render_workers: one line per state/*.meta task.
+# render_workers: one line per state/*.meta task - its id, kind, and PR URL.
 render_workers() {
-  local meta id kind pr last found=0
+  local meta id kind pr found=0
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     found=1
     id=$(basename "$meta" .meta)
     kind=$(sed -n 's/^kind=//p' "$meta" 2>/dev/null | tail -n 1)
     pr=$(sed -n 's/^pr=//p' "$meta" 2>/dev/null | tail -n 1)
-    last=
-    if [ -f "$STATE/$id.status" ]; then
-      last=$(grep -v '^[[:space:]]*$' "$STATE/$id.status" 2>/dev/null | tail -n 1 | cut -c "1-$STATUS_CHARS")
-    fi
     printf -- '- %s (%s)' "$id" "${kind:-unknown kind}"
     [ -z "$pr" ] || printf ' pr=%s' "$pr"
-    printf '\n  last status: %s\n' "${last:-(none)}"
+    printf '\n'
   done
   [ "$found" -eq 1 ] || printf '(no task records)\n'
 }
 
+# render_holds: one line per held backlog item - its id and hold kind only. In
+# the listing's row form the id is the first cell and hold_kind, requested as
+# the one extra field, is the last; the title between them may hold commas, so
+# only those two cells are read, and a row whose cells do not look like
+# identifiers is left out rather than guessed at.
 render_holds() {
   local out rc=0
   if [ ! -x "$SCRIPT_DIR/fm-tasks-axi.sh" ]; then
@@ -232,12 +213,23 @@ render_holds() {
     return 0
   fi
   out=$(fm_run_timed "$HOLDS_TIMEOUT" "$SCRIPT_DIR/fm-tasks-axi.sh" list --state held \
-    --fields hold_kind,hold_reason 2>&1 </dev/null) || rc=$?
+    --fields hold_kind 2>&1 </dev/null) || rc=$?
   if [ "$rc" -ne 0 ]; then
     printf '(unavailable: the backlog listing exited %s)\n' "$rc"
     return 0
   fi
-  printf '%s\n' "$out" | cut -c "1-$HOLDS_CHARS" | sed 's/<!--/<! --/g'
+  printf '%s\n' "$out" | awk '
+    /^  [^ ]/ {
+      row = substr($0, 3)
+      id = row; sub(/,.*/, "", id)
+      kind = row; sub(/.*,/, "", kind)
+      if (id ~ /^[A-Za-z0-9._-]+$/ && kind ~ /^[a-z-]*$/) {
+        printf "- %s (hold kind: %s)\n", id, (kind == "" ? "unknown" : kind)
+        found = 1
+      }
+    }
+    END { if (!found) print "(none)" }
+  '
 }
 
 main() {
@@ -308,6 +300,7 @@ main() {
     fi
     printf '%s\n\n' "$turns_out"
     printf '### Open work at compaction\n\n'
+    printf 'Identifiers only: the compact digest reprints each item'"'"'s state from its record.\n\n'
     printf 'Held backlog items (captain decisions and external waits):\n\n'
     render_holds
     printf '\nTask records:\n\n'
