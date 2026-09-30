@@ -125,12 +125,14 @@ The `bin/fm-session-start.sh` header is the single owner of those mechanics.
 
 A compaction keeps the session but replaces its conversation with a summary, and an automatic compaction happens with no `/stow` first.
 On Claude, `.claude/settings.json` registers one unmatched `PreCompact` hook, so `bin/fm-precompact-handoff.sh` runs just before every manual and automatic compaction.
-It writes a snapshot of what the summary could lose into the home's session handoff note, `data/session-handoff.md`: the `/compact` instructions, the captain's most recent turns verbatim, the id and hold kind of every held backlog item, and every task record's id, kind, and PR URL.
+It writes a snapshot of what the summary could lose into the home's session handoff note, `data/session-handoff.md`: the `/compact` instructions, the captain's most recent turns verbatim and newest first, the id and hold kind of every held backlog item, and every task record's id, kind, and PR URL.
 It never copies firstmate's replies, worker status lines, backlog titles, or hold reasons, because those can quote patient or worker text and the compaction digest reprints the work state from its own records anyway.
 It owns only its marked block in that note, so conversation threads a `/stow` wrote there survive.
 It records and never judges: filing work and correcting records stays with `/stow` and the agent.
 
-The compaction's `compact` digest prints that block in its fleet-state stage.
+The compaction's `compact` digest prints that block first, ahead of every other section.
+Claude Code keeps only a 2KB preview of an oversized hook output inline and saves the whole output to a file it names on a `Full output saved to` line, and a compaction digest is routinely larger than that.
+So the handoff's heading, its pointer to that saved file, and the newest captain turn all start inside the preview.
 When no result was recorded at all, or the recorded one is stale, the digest says so and warns that conversation-only decisions or open work may be missing from the summary.
 When the hook failed for this compaction, or its result is fresh but the block is gone from the note, the digest says so and names the pre-compaction transcript the result recorded, to read instead, because the transcript file outlives the compaction.
 
@@ -469,7 +471,8 @@ Cursor uses the separate primary live guard named in [Cursor tests](#cursor-test
 `tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh` is the separate opt-in real-Pi guard for a post-start AGENTS.md update followed by compaction.
 
 `tests/fm-precompact-handoff-live-e2e.test.sh` is the opt-in real-Claude guard for the pre-compaction handoff.
-It proves the tracked `PreCompact` entry fires before a manual `/compact` and before an automatic compaction, quotes the captain's words from the real transcript, and lets the compaction proceed.
+It drives the real interactive TUI through a pty, because the primary is interactive and headless `claude -p` transcripts carry no `origin` field.
+It proves the tracked `PreCompact` entry runs the hook at its committed git mode before a manual `/compact` and before an automatic compaction, quotes the captain's words from the real transcript, drops a typed firstmate doorbell, and lets the compaction proceed.
 `tests/fm-precompact-handoff.test.sh` pins the hook portably, and `tests/fm-session-start.test.sh` pins how the compaction digest presents it.
 
 ### Guard, monitoring, and away-mode tests

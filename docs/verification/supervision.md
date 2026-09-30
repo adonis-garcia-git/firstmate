@@ -228,16 +228,26 @@ Blocking behavior:
 | exit 2 with `blocked by test` on stderr | `Compaction blocked by PreCompact hook: [<command>]: blocked by test`, no compaction |
 | exit 1, alongside a second hook with `timeout: 3` that slept 8 seconds and was killed | compaction proceeded and wrote its `compact_boundary` record |
 
-In the same version's transcripts, a genuine captain turn is a `user` record with `origin.kind` `human`, and background-task wakes carry `origin.kind` `task-notification`. Firstmate's own typed operational input, such as a record-backed doorbell, is also recorded with `origin.kind` `human`, so the hook tells it apart through `bin/fm-operational-input.sh` rather than by origin.
+Transcript shape, in the same version:
 
-Refresh with the live guard:
+- In an interactive TUI session, a genuine captain turn is a `user` record with `origin.kind` `human`, and background-task wakes carry `origin.kind` `task-notification`.
+- Firstmate's own typed operational input, such as a record-backed doorbell, is also recorded with `origin.kind` `human`, so the hook tells it apart through `bin/fm-operational-input.sh` rather than by origin.
+- A headless `claude -p` or stream-json session writes its transcript with no `origin` field at all, so the hook records no captain turns there; only the interactive primary carries them.
+- A session launched from inside another Claude session inherits `CLAUDE_CODE_CHILD_SESSION` and saves no transcript, so a lab must clear every inherited `CLAUDE*` variable.
+
+Oversized session-open output, in the same version: a `SessionStart` hook that printed 12,034 bytes reached the model as `Output too large (11.8KB). Full output saved to: <file>` followed by `Preview (first 2KB)`, and the model could not see the output's last line.
+That is why the compaction digest leads with the handoff.
+
+Refresh with the live guard, which drives the interactive TUI through a Python pty in a throwaway lab and answers its workspace-trust dialog for that path only:
 
 ```text
 $ FM_PRECOMPACT_HANDOFF_LIVE_E2E=1 tests/fm-precompact-handoff-live-e2e.test.sh
 # claude: 2.1.285 (Claude Code)
-ok - claude 2.1.285 (Claude Code): /compact runs the handoff with trigger=manual, verbatim captain words, and proceeds
-ok - claude 2.1.285 (Claude Code): an automatic compaction runs the handoff first with trigger=auto
+ok - claude 2.1.285 (Claude Code): interactive /compact runs the committed hook with trigger=manual, quotes the captain verbatim, drops a doorbell, and proceeds
+ok - claude 2.1.285 (Claude Code): an interactive automatic compaction runs the handoff first with trigger=auto and verbatim captain words
 ```
+
+With `bin/fm-precompact-handoff.sh` staged without its executable bit, the same guard fails with `not ok - claude 2.1.285 (Claude Code): the tracked PreCompact entry did not run the hook on /compact (is bin/fm-precompact-handoff.sh executable in git?)`.
 
 ## Semantic busy state
 

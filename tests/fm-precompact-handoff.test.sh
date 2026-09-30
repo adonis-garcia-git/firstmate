@@ -200,6 +200,10 @@ test_keeps_only_the_most_recent_turns() {
   assert_not_contains "$(block_of "$dir")" "TURN-2-END" "an old turn beyond the bound was kept"
   assert_contains "$(block_of "$dir")" "TURN-3-END" "the oldest in-bound turn was dropped"
   assert_contains "$(block_of "$dir")" "TURN-12-END" "the newest turn was dropped"
+  local order
+  order=$(block_of "$dir" | grep -o 'TURN-[0-9]*-END' | tr '\n' ' ')
+  [ "$order" = "TURN-12-END TURN-11-END TURN-10-END TURN-9-END TURN-8-END TURN-7-END TURN-6-END TURN-5-END TURN-4-END TURN-3-END " ] \
+    || fail "captain turns were not newest first: $order"
   pass "the block keeps only the most recent captain turns"
 }
 

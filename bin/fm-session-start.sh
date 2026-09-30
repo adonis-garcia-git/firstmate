@@ -26,6 +26,11 @@
 # ORDERING, and why LOCK now runs before BOOTSTRAP (the old AGENTS.md order
 # was bootstrap-then-lock):
 #
+#   0. pre-compaction handoff - on a compaction source only, the snapshot
+#                       bin/fm-precompact-handoff.sh recorded, printed before
+#                       everything else so it survives a harness that keeps
+#                       only the first 2KB of an oversized hook output inline.
+#                       Read-only.
 #   1. lock          - acquire the per-home session lock FIRST, before any
 #                       mutating step runs.
 #   2. bootstrap      - home-local stale Herdr projection cleanup runs only
@@ -47,10 +52,9 @@
 #   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail,
 #                       the away posture (state/.afk-contract and the legacy
-#                       state/.afk daemon flag), a cheap per-task
-#                       endpoint-liveness read, and, on a compaction, the
-#                       pre-compaction handoff bin/fm-precompact-handoff.sh
-#                       recorded: read-only, always runs.
+#                       state/.afk daemon flag), and a cheap per-task
+#                       endpoint-liveness read:
+#                       read-only, always runs.
 #   7. network checks - the result of the deferred network stage started back at
 #                       step 1, harvested WITHOUT waiting for it.
 #   8. context digest - data/projects.md, data/secondmates.md, data/captain.md,
@@ -637,17 +641,22 @@ EOF
 # record older than PRECOMPACT_HANDOFF_FRESH_SECONDS belongs to an earlier
 # compaction, so its block is not presented as this one's.
 PRECOMPACT_HANDOFF_FRESH_SECONDS=1800
+precompact_handoff_heading() {
+  printf 'PRE-COMPACTION HANDOFF (data/session-handoff.md) - read first\n'
+  printf 'If this digest reached you as a preview, the complete digest is in the file your harness named on its "Full output saved to" line; read that file before acting.\n'
+  printf '%s\n' "$SUBRULE"
+}
 print_precompact_handoff() {
   local record="$STATE/.precompact-handoff" handoff="$DATA/session-handoff.md"
   local status at transcript reason now age block
   if [ ! -f "$record" ]; then
     [ "$PRIMARY_HARNESS" = claude ] || return 0
-    subsection "Pre-compaction handoff (data/session-handoff.md)"
+    precompact_handoff_heading
     printf 'None recorded: the pre-compaction hook did not run in this home.\n'
     printf 'Decisions or open work that existed only in conversation before this compaction may be missing from the summary.\n'
     return 0
   fi
-  subsection "Pre-compaction handoff (data/session-handoff.md)"
+  precompact_handoff_heading
   status=$(sed -n 's/^status=//p' "$record" 2>/dev/null | tail -n 1)
   at=$(sed -n 's/^at=//p' "$record" 2>/dev/null | tail -n 1)
   transcript=$(sed -n 's/^transcript=//p' "$record" 2>/dev/null | tail -n 1)
@@ -686,6 +695,15 @@ print_precompact_handoff() {
 AGENTS_START_HASH=
 if [ "$REEMIT" -eq 0 ] && [ "$SESSION_SOURCE" = startup ]; then
   AGENTS_START_HASH=$(hash_file_sha256 "$FM_ROOT/AGENTS.md" 2>/dev/null || true)
+fi
+
+# A compaction digest leads with the pre-compaction handoff, ahead even of the
+# banner. A harness may keep only a short preview of an oversized hook output
+# inline (Claude Code keeps the first 2KB and saves the rest to a file), and
+# the handoff exists so the captain's words reach the model after compaction.
+# It is a read-only print, so it needs no lock.
+if [ "$SESSION_SOURCE" = compact ]; then
+  print_precompact_handoff
 fi
 
 if [ "$REEMIT" -eq 1 ]; then
@@ -993,16 +1011,6 @@ if fm_pf_relay_active "$FM_HOME" \
     printf '%s/bin/fm-public-followup.sh deliver <id>. Hand a delivered loop on with rechain, or close it with\n' "$FM_ROOT"
     printf '%s/bin/fm-public-followup.sh retire <id> --reason "...". Load fmx-respond for the procedure.\n' "$FM_ROOT"
   fi
-fi
-
-# After a compaction, the snapshot bin/fm-precompact-handoff.sh wrote just before
-# it (the Claude Code PreCompact hook) carries what the summary could lose: the
-# captain's recent words verbatim and the open work at that moment. It lives in
-# the fleet-state stage because it is exactly the conversation state recovery
-# depends on. A home whose harness has no such hook and never recorded one
-# prints nothing here.
-if [ "$SESSION_SOURCE" = compact ]; then
-  print_precompact_handoff
 fi
 
 # --- 7. network checks ------------------------------------------------------

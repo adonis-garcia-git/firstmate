@@ -2400,8 +2400,8 @@ EOF
   make_fake_ps_claude "$fakebin"
   section_of() {
     printf '%s\n' "$1" | awk '
-      /^Pre-compaction handoff \(data\/session-handoff.md\)$/ { flag = 1; print; next }
-      flag && /^(={10,}|Orphan status logs|AFK$|Public commitments)/ { exit }
+      /^PRE-COMPACTION HANDOFF \(data\/session-handoff.md\) - read first$/ { flag = 1; print; next }
+      flag && /^={10,}/ { exit }
       flag { print }
     '
   }
@@ -2437,7 +2437,7 @@ EOF
 
   out=$(run_named_harness_session_start claude "$home" "$root" "$fakebin:$BASE_PATH" --source startup)
   case "$out" in
-    *CAPTAIN-WORDS-INSIDE-THE-BLOCK*|*'Pre-compaction handoff'*) fail "a startup digest surfaced the pre-compaction handoff" ;;
+    *CAPTAIN-WORDS-INSIDE-THE-BLOCK*|*'PRE-COMPACTION HANDOFF'*) fail "a startup digest surfaced the pre-compaction handoff" ;;
   esac
 
   printf 'status=ok\nat=%s\ntrigger=auto\nsession=s1\ntranscript=/t/s1.jsonl\nturns=1\nreason=\n' "$((now - 7200))" \
@@ -2460,10 +2460,51 @@ EOF
   rm -f "$home/state/.precompact-handoff"
   out=$(run_named_harness_session_start pi "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)
   case "$out" in
-    *'Pre-compaction handoff'*) fail "a harness without the pre-compaction hook printed a handoff notice" ;;
+    *'PRE-COMPACTION HANDOFF'*) fail "a harness without the pre-compaction hook printed a handoff notice" ;;
   esac
 
   pass "compaction digest surfaces a fresh pre-compaction handoff and names a missing, stale, or failed one"
+}
+
+# Claude Code keeps only the first 2KB of an oversized hook output inline and
+# saves the rest to a file, so the handoff must lead the compaction digest: its
+# heading, the pointer to the full digest, and the newest captain turn must all
+# start inside that preview even with a full 10-turn, 1000-character handoff.
+test_compact_digest_leads_with_the_handoff_inside_the_preview() {
+  local rec root home fakebin out i turn offset needle
+  rec=$(new_world precompact-preview)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  {
+    printf '# Session handoff\n\n<!-- fm-precompact-handoff:begin -->\n## Pre-compaction snapshot\n\n'
+    printf 'Written automatically at 2026-09-30T00:00:00Z just before an automatic compaction (session s1).\n'
+    printf 'The captain'"'"'s words below are verbatim and outrank any summary of them.\n'
+    printf 'The work state is a snapshot from that moment: re-verify it live before acting.\n'
+    printf 'Full pre-compaction transcript: /t/s1.jsonl\n\n'
+    printf '### Captain'"'"'s recent words (verbatim, newest first)\n\n'
+    for i in 10 9 8 7 6 5 4 3 2 1; do
+      turn=$(printf 'NEWEST-TURN-%02d ' "$i"; head -c 984 /dev/zero | tr '\0' 'w')
+      printf -- '- 2026-09-30T00:00:%02dZ\n\n> %s [...]\n\n' "$i" "$turn"
+    done
+    printf '### Open work at compaction\n\n- task-a (ship)\n<!-- fm-precompact-handoff:end -->\n'
+  } > "$home/data/session-handoff.md"
+  printf 'status=ok\nat=%s\ntrigger=auto\nsession=s1\ntranscript=/t/s1.jsonl\nturns=10\nreason=\n' "$(date +%s)" \
+    > "$home/state/.precompact-handoff"
+
+  out=$(run_named_harness_session_start claude "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)
+  [ "${#out}" -gt 2048 ] || fail "the fixture digest is not oversized, so the preview bound is untested"
+  for needle in 'PRE-COMPACTION HANDOFF (data/session-handoff.md) - read first' \
+    'the complete digest is in the file your harness named on its "Full output saved to" line' \
+    'NEWEST-TURN-10'; do
+    offset=$(printf '%s' "$out" | LC_ALL=C awk -v n="$needle" 'BEGIN { RS = "\001" } { i = index($0, n); print (i ? i - 1 : -1) }')
+    [ "$offset" -ge 0 ] || fail "the compaction digest lost: $needle"
+    [ "$offset" -lt 2048 ] || fail "'$needle' starts at byte $offset, past the 2KB inline preview"
+  done
+  assert_contains "$out" "NEWEST-TURN-01" "the full handoff was not printed in the digest"
+  pass "a full 10-turn handoff leads the compaction digest inside the 2KB preview, newest turn first"
 }
 
 test_reemit_keeps_repair_ownership_with_the_lock_holder() {
@@ -2892,5 +2933,6 @@ test_codex_unreachable_reset_sources_do_not_claim_instruction_refresh
 test_agents_baseline_requires_sha256_and_successful_completion
 test_reemit_keeps_repair_ownership_with_the_lock_holder
 test_compact_digest_surfaces_the_precompact_handoff
+test_compact_digest_leads_with_the_handoff_inside_the_preview
 
 echo "# fm-session-start.test.sh: all assertions passed"

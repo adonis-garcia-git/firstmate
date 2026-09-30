@@ -36,7 +36,8 @@
 #
 # The snapshot block holds, newest state at compaction time:
 #   - the /compact custom instructions, when the captain gave any;
-#   - the captain's most recent turns, verbatim and clipped;
+#   - the captain's most recent turns, newest first, verbatim and clipped, so a
+#     reader that keeps only the start of the block still gets the latest;
 #   - the id and hold kind of every held backlog item, through
 #     bin/fm-tasks-axi.sh (captain decisions and external waits);
 #   - every state/*.meta task's id, kind, and recorded PR URL.
@@ -180,14 +181,14 @@ render_turns() {
     n=$((n + 1))
   done < "$pairs"
   rm -f "$pairs"
-  for ((i = n - 1; i >= 0; i--)); do printf '%s\n' "${kept[i]}"; done | jq -rs \
+  for ((i = 0; i < n; i++)); do printf '%s\n' "${kept[i]}"; done | jq -rs \
     --argjson turn_chars "$TURN_CHARS" '
     def clip($n): if length > $n then .[0:$n] + " [...]" else . end;
     def safe: gsub("<!--"; "<! --");
     def quote: split("\n") | map("> " + .) | join("\n");
     . as $turns
     | "TURNS=\($turns | length)",
-      "### Captain'"'"'s recent words (verbatim, oldest first)",
+      "### Captain'"'"'s recent words (verbatim, newest first)",
       "",
       (if ($turns | length) == 0 then "(no captain turns found in the transcript)"
        else ($turns[] |
