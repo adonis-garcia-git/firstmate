@@ -23,9 +23,9 @@
 #                            `<!-- fm-precompact-handoff:begin -->` and
 #                            `<!-- fm-precompact-handoff:end -->` is owned by
 #                            this script: it is replaced in place, or appended
-#                            when absent, and every other line of the note (for
-#                            example the conversation threads a /stow wrote) is
-#                            preserved byte for byte. The replacement is atomic.
+#                            when absent, and every other line of the note
+#                            belongs to whoever wrote it and is preserved byte
+#                            for byte. The replacement is atomic.
 #   state/.precompact-handoff The last-result record, one key=value per line:
 #                            status (ok|partial|failed), at (epoch seconds),
 #                            trigger, session, transcript, turns, reason.

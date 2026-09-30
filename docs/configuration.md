@@ -620,7 +620,7 @@ Shared captain preferences that apply across secondmate domains live only in the
 ## Session handoff (data/session-handoff.md)
 
 `data/session-handoff.md` is the home's session handoff note, gitignored and private like the rest of `data/`.
-Its block between the `fm-precompact-handoff` begin and end markers is written by the Claude `PreCompact` hook just before every compaction, and every other line belongs to whoever wrote it, such as a `/stow` pass.
+Its block between the `fm-precompact-handoff` begin and end markers is written by the Claude `PreCompact` hook just before every compaction, and every other line belongs to whoever wrote it and is preserved by the hook.
 [`sessionstart-nudge.md`](sessionstart-nudge.md#pre-compaction-handoff) owns the behavior and `bin/fm-precompact-handoff.sh` owns the block format.
 
 ## Operational learnings (data/learnings.md)
