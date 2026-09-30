@@ -26,7 +26,8 @@
 # ORDERING, and why LOCK now runs before BOOTSTRAP (the old AGENTS.md order
 # was bootstrap-then-lock):
 #
-#   0. pre-compaction handoff - on a compaction source only, the snapshot
+#   0. pre-compaction handoff - on a Claude primary's compaction source only
+#                       (no other harness has the hook), the snapshot
 #                       bin/fm-precompact-handoff.sh recorded for this
 #                       session (--session), printed before
 #                       everything else so it survives a harness that keeps
