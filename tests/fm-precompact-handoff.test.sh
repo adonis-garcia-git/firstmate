@@ -356,9 +356,10 @@ test_lock_ownership_decides_authority() {
   done
   printf '%s\n' "$holder" > "$dir/state/.lock"
   # In production Claude runs the hook, so this session's own harness ancestry
-  # resolves; a second fake harness gives the hook that ancestry here.
+  # resolves; a second fake harness gives the hook that ancestry here. The
+  # trailing no-op keeps bash from exec-ing the hook in the harness's place.
   out=$(payload "$transcript" | env -u NO_MISTAKES_GATE -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
-    FM_HOME="$dir" "$FAKE_CLAUDE" -c '"$FM_HOME/bin/fm-precompact-handoff.sh"' 2>/dev/null) || rc=$?
+    FM_HOME="$dir" "$FAKE_CLAUDE" -c '"$FM_HOME/bin/fm-precompact-handoff.sh"; :' 2>/dev/null) || rc=$?
   [ "$rc" -eq 0 ] && [ -z "$out" ] || fail "a non-owner run exited $rc or wrote stdout"
   kill "$holder" 2>/dev/null || true
   wait "$holder" 2>/dev/null || true
@@ -369,6 +370,7 @@ test_lock_ownership_decides_authority() {
     FM_HOME="$dir" "$FAKE_CLAUDE" -c '
     printf "%s\n" "$$" > "$FM_HOME/state/.lock"
     "$FM_HOME/bin/fm-precompact-handoff.sh"
+    :
   ' 2>/dev/null) || rc=$?
   [ "$rc" -eq 0 ] && [ -z "$out" ] || fail "the lock holder's run exited $rc or wrote stdout"
   [ "$(record_field "$dir" status)" = ok ] || fail "the lock-holding session did not write its handoff"
