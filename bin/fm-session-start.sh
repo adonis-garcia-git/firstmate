@@ -26,6 +26,13 @@
 # ORDERING, and why LOCK now runs before BOOTSTRAP (the old AGENTS.md order
 # was bootstrap-then-lock):
 #
+#   0. pre-compaction handoff - on a Claude primary's compaction source only
+#                       (no other harness has the hook), the snapshot
+#                       bin/fm-precompact-handoff.sh recorded for this
+#                       session (--session), printed before
+#                       everything else so it survives a harness that keeps
+#                       only the first 2KB of an oversized hook output inline.
+#                       Read-only.
 #   1. lock          - acquire the per-home session lock FIRST, before any
 #                       mutating step runs.
 #   2. bootstrap      - home-local stale Herdr projection cleanup runs only
@@ -187,7 +194,7 @@
 # Hosts without timeout, gtimeout, or perl use the shared pure-Bash watchdog, so
 # the digest never runs without the same hard bound and process-group cleanup.
 #
-# Usage: fm-session-start.sh [--reemit] [--source <source>]
+# Usage: fm-session-start.sh [--reemit] [--source <source>] [--session <id>]
 #   Prints the full ordered digest to stdout and always exits 0: this is a
 #   reporting command, not a gate. A lock refusal is reported as a loud
 #   banner inline, never a silent failure or a non-zero exit that would make
@@ -225,6 +232,10 @@
 #             current AGENTS.md to print before the bulky digest. The baseline
 #             remains immutable so every later drifted compaction refreshes
 #             again, while an equal baseline emits no instruction refresh.
+#
+#   --session The native session id, supplied only by fm-sessionstart-run.sh
+#             from the hook payload. On a compaction source, the pre-compaction
+#             handoff is printed only when its record names this session.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -238,6 +249,7 @@ AGENTS_BASELINE_FILE="$STATE/.session-start-agents-baseline"
 
 REEMIT=0
 SESSION_SOURCE=
+SESSION_ID=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --reemit)
@@ -252,13 +264,21 @@ while [ "$#" -gt 0 ]; do
       SESSION_SOURCE=${1#--source=}
       shift
       ;;
+    --session)
+      SESSION_ID=${2:-}
+      if [ "$#" -ge 2 ]; then shift 2; else shift; fi
+      ;;
+    --session=*)
+      SESSION_ID=${1#--session=}
+      shift
+      ;;
     -h|--help)
       sed -n '2,/^set -u$/p' "$SCRIPT_DIR/fm-session-start.sh" | sed 's/^# \{0,1\}//; $d'
       exit 0
       ;;
     *)
       printf 'fm-session-start: unknown argument: %s\n' "$1" >&2
-      printf 'usage: fm-session-start.sh [--reemit] [--source <source>]\n' >&2
+      printf 'usage: fm-session-start.sh [--reemit] [--source <source>] [--session <id>]\n' >&2
       exit 2
       ;;
   esac
@@ -308,25 +328,13 @@ if [ -z "${FM_SESSION_START_STAGE_FILE:-}" ]; then
     # is lost, so the child still runs bounded.
     SESSION_START_STAGE_FILE=/dev/null
   fi
-  if [ "$REEMIT" -eq 1 ]; then
-    if [ -n "$SESSION_SOURCE" ]; then
-      fm_run_timed "$SESSION_START_BUDGET" \
-        env FM_SESSION_START_STAGE_FILE="$SESSION_START_STAGE_FILE" \
-        "$SCRIPT_DIR/fm-session-start.sh" --reemit --source "$SESSION_SOURCE"
-    else
-      fm_run_timed "$SESSION_START_BUDGET" \
-        env FM_SESSION_START_STAGE_FILE="$SESSION_START_STAGE_FILE" \
-        "$SCRIPT_DIR/fm-session-start.sh" --reemit
-    fi
-  elif [ -n "$SESSION_SOURCE" ]; then
-    fm_run_timed "$SESSION_START_BUDGET" \
-      env FM_SESSION_START_STAGE_FILE="$SESSION_START_STAGE_FILE" \
-      "$SCRIPT_DIR/fm-session-start.sh" --source "$SESSION_SOURCE"
-  else
-    fm_run_timed "$SESSION_START_BUDGET" \
-      env FM_SESSION_START_STAGE_FILE="$SESSION_START_STAGE_FILE" \
-      "$SCRIPT_DIR/fm-session-start.sh"
-  fi
+  SESSION_START_ARGS=()
+  [ "$REEMIT" -eq 0 ] || SESSION_START_ARGS+=(--reemit)
+  [ -z "$SESSION_SOURCE" ] || SESSION_START_ARGS+=(--source "$SESSION_SOURCE")
+  [ -z "$SESSION_ID" ] || SESSION_START_ARGS+=(--session "$SESSION_ID")
+  fm_run_timed "$SESSION_START_BUDGET" \
+    env FM_SESSION_START_STAGE_FILE="$SESSION_START_STAGE_FILE" \
+    "$SCRIPT_DIR/fm-session-start.sh" ${SESSION_START_ARGS[@]+"${SESSION_START_ARGS[@]}"}
   SESSION_START_RC=$?
   if [ "$SESSION_START_RC" -eq 124 ]; then
     SESSION_START_LAST_STAGE=$(cat "$SESSION_START_STAGE_FILE" 2>/dev/null) || SESSION_START_LAST_STAGE=
@@ -631,9 +639,84 @@ EOF
   fi
 }
 
+# print_precompact_handoff: the pre-compaction handoff subsection. The producer's
+# header (bin/fm-precompact-handoff.sh) owns the record and block formats. A
+# record older than PRECOMPACT_HANDOFF_FRESH_SECONDS belongs to an earlier
+# compaction, and a record naming another session (or with no session to
+# compare) belongs to another session's compaction, since a hook that stepped
+# aside or was killed leaves the last one in place; neither is presented as
+# this one's.
+PRECOMPACT_HANDOFF_FRESH_SECONDS=1800
+precompact_handoff_heading() {
+  printf 'PRE-COMPACTION HANDOFF (data/session-handoff.md) - read first\n'
+  printf 'If this digest reached you as a preview, the complete digest is in the file your harness named on its "Full output saved to" line; read that file before acting.\n'
+  printf '%s\n' "$SUBRULE"
+}
+print_precompact_handoff() {
+  local record="$STATE/.precompact-handoff" handoff="$DATA/session-handoff.md"
+  local status at session transcript reason now age block
+  [ "$PRIMARY_HARNESS" = claude ] || return 0
+  if [ ! -f "$record" ]; then
+    precompact_handoff_heading
+    printf 'None recorded: the pre-compaction hook did not run in this home.\n'
+    printf 'Decisions or open work that existed only in conversation before this compaction may be missing from the summary.\n'
+    return 0
+  fi
+  precompact_handoff_heading
+  status=$(sed -n 's/^status=//p' "$record" 2>/dev/null | tail -n 1)
+  at=$(sed -n 's/^at=//p' "$record" 2>/dev/null | tail -n 1)
+  session=$(sed -n 's/^session=//p' "$record" 2>/dev/null | tail -n 1)
+  transcript=$(sed -n 's/^transcript=//p' "$record" 2>/dev/null | tail -n 1)
+  reason=$(sed -n 's/^reason=//p' "$record" 2>/dev/null | tail -n 1)
+  now=$(date +%s)
+  case "$at" in ''|*[!0-9]*) at=0 ;; esac
+  age=$((now - at))
+  if [ "$age" -gt "$PRECOMPACT_HANDOFF_FRESH_SECONDS" ]; then
+    printf 'None recorded for this compaction: the last one is %s minutes old and belongs to an earlier compaction.\n' "$((age / 60))"
+    printf 'Decisions or open work that existed only in conversation before this compaction may be missing from the summary.\n'
+    return 0
+  fi
+  if [ -z "$SESSION_ID" ] || [ "$session" != "$SESSION_ID" ]; then
+    printf 'None recorded for this compaction: the last one was recorded for session %s, not this session (%s).\n' \
+      "${session:-unknown}" "${SESSION_ID:-unknown}"
+    printf 'Decisions or open work that existed only in conversation before this compaction may be missing from the summary.\n'
+    return 0
+  fi
+  case "$status" in
+    ok|partial)
+      [ "$status" = ok ] || printf 'Partial snapshot: %s\n\n' "${reason:-reason not recorded}"
+      block=$(awk '
+        $0 == "<!-- fm-precompact-handoff:begin -->" { inside = 1; next }
+        $0 == "<!-- fm-precompact-handoff:end -->" { if (inside) exit }
+        inside { print }
+      ' "$handoff" 2>/dev/null)
+      if [ -n "$block" ]; then
+        printf '%s\n' "$block"
+      else
+        printf 'The snapshot was recorded %s seconds ago but its block is no longer in %s.\n' "$age" "$handoff"
+        [ -z "$transcript" ] || printf 'Read the captain'"'"'s recent turns in the pre-compaction transcript instead: %s\n' "$transcript"
+      fi
+      ;;
+    *)
+      printf 'FAILED for this compaction: %s\n' "${reason:-reason not recorded}"
+      printf 'Decisions or open work that existed only in conversation may be missing from the summary.\n'
+      [ -z "$transcript" ] || printf 'Read the captain'"'"'s recent turns in the pre-compaction transcript before relying on the summary: %s\n' "$transcript"
+      ;;
+  esac
+}
+
 AGENTS_START_HASH=
 if [ "$REEMIT" -eq 0 ] && [ "$SESSION_SOURCE" = startup ]; then
   AGENTS_START_HASH=$(hash_file_sha256 "$FM_ROOT/AGENTS.md" 2>/dev/null || true)
+fi
+
+# A compaction digest leads with the pre-compaction handoff, ahead even of the
+# banner. A harness may keep only a short preview of an oversized hook output
+# inline (Claude Code keeps the first 2KB and saves the rest to a file), and
+# the handoff exists so the captain's words reach the model after compaction.
+# It is a read-only print, so it needs no lock.
+if [ "$SESSION_SOURCE" = compact ]; then
+  print_precompact_handoff
 fi
 
 if [ "$REEMIT" -eq 1 ]; then
@@ -830,7 +913,8 @@ cat <<'EOF'
 Everything below is printed in full for this session start: every state/*.meta,
 a compact data/backlog.md listing, a bounded tail of every state/*.status,
 data/projects.md, data/secondmates.md, data/captain.md, data/captain-shared.md,
-and data/learnings.md.
+and data/learnings.md, plus, after a compaction, the pre-compaction snapshot
+block of data/session-handoff.md.
 Do NOT re-read any of them after reading this digest, and do NOT bulk-read
 data/backlog.md or state/*.status: re-reading everything defeats the entire
 point of this command.

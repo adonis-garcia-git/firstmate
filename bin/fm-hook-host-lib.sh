@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared "which harness delivered this hook payload?" predicate for the tracked
+# Shared "which harness delivered this hook payload?" predicates for the tracked
 # Claude-shaped hook entries.
 # This file is sourced by hook entrypoints and has no side effects on source.
 #
@@ -33,4 +33,16 @@ fm_hook_payload_is_foreign_host() {  # <payload>
   printf '%s' "$payload" | jq -e '
     type == "object" and has("cursor_version") and (.cursor_version | type) == "string"
   ' >/dev/null 2>&1
+}
+
+# Return 0 when payload $1 was delivered by pi-code, Pi's Claude-hook
+# compatibility extension, which also loads the tracked Claude settings. pi-code
+# stamps every hook payload's transcript_path with Pi's own session file under
+# .pi/, which a Claude transcript path never contains. Same fail direction as
+# above: no payload, no jq, or no transcript_path means the caller RUNS.
+fm_hook_payload_is_pi_code() {  # <payload>
+  local payload=${1-}
+  [ -n "$payload" ] || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  printf '%s' "$payload" | jq -e '(.transcript_path // "") | type == "string" and contains("/.pi/")' >/dev/null 2>&1
 }

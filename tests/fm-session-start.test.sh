@@ -2387,6 +2387,166 @@ SH
   pass "instruction baselines require SHA-256 and successful startup completion"
 }
 
+# After a compaction, the digest surfaces the snapshot the PreCompact hook
+# (bin/fm-precompact-handoff.sh) recorded just before it, and says plainly when
+# none exists for this compaction rather than printing nothing.
+test_compact_digest_surfaces_the_precompact_handoff() {
+  local rec root home fakebin out section now record
+  rec=$(new_world precompact-handoff)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  section_of() {
+    printf '%s\n' "$1" | awk '
+      /^PRE-COMPACTION HANDOFF \(data\/session-handoff.md\) - read first$/ { flag = 1; print; next }
+      flag && /^={10,}/ { exit }
+      flag { print }
+    '
+  }
+
+  out=$(run_named_harness_session_start claude "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)
+  section=$(section_of "$out")
+  assert_contains "$section" "None recorded: the pre-compaction hook did not run in this home." \
+    "a Claude compaction with no handoff record did not say so"
+
+  cat > "$home/data/session-handoff.md" <<'EOF'
+# Session handoff
+
+STOW-THREAD-OUTSIDE-THE-BLOCK
+
+<!-- fm-precompact-handoff:begin -->
+## Pre-compaction snapshot
+
+> CAPTAIN-WORDS-INSIDE-THE-BLOCK
+<!-- fm-precompact-handoff:end -->
+EOF
+  now=$(date +%s)
+  printf 'status=ok\nat=%s\ntrigger=auto\nsession=s1\ntranscript=/t/s1.jsonl\nturns=1\nreason=\n' "$now" \
+    > "$home/state/.precompact-handoff"
+  out=$(run_named_harness_session_start claude "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact --session s1)
+  section=$(section_of "$out")
+  assert_contains "$section" "CAPTAIN-WORDS-INSIDE-THE-BLOCK" "a fresh handoff block was not surfaced after compaction"
+  case "$out" in
+    *STOW-THREAD-OUTSIDE-THE-BLOCK*) fail "the digest printed handoff content outside the snapshot block" ;;
+  esac
+  case "$section" in
+    *'fm-precompact-handoff:begin'*) fail "the digest printed the block markers" ;;
+  esac
+
+  # A hook that stepped aside or was killed leaves the last record in place, so
+  # a fresh record from another session, or one this compaction cannot match,
+  # is not this compaction's snapshot.
+  out=$(run_named_harness_session_start claude "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact --session s2)
+  section=$(section_of "$out")
+  assert_contains "$section" "None recorded for this compaction: the last one was recorded for session s1, not this session (s2)." \
+    "another session's fresh handoff was not distinguished from this compaction's"
+  case "$section" in
+    *CAPTAIN-WORDS-INSIDE-THE-BLOCK*) fail "another session's handoff block was presented as this compaction's" ;;
+  esac
+  out=$(run_named_harness_session_start claude "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)
+  section=$(section_of "$out")
+  assert_contains "$section" "None recorded for this compaction: the last one was recorded for session s1, not this session (unknown)." \
+    "a compaction without a session id presented a handoff it cannot match"
+  case "$section" in
+    *CAPTAIN-WORDS-INSIDE-THE-BLOCK*) fail "a handoff block was presented to a compaction without a session id" ;;
+  esac
+  printf 'status=ok\nat=%s\ntrigger=auto\ntranscript=/t/s1.jsonl\nturns=1\nreason=\n' "$now" \
+    > "$home/state/.precompact-handoff"
+  out=$(run_named_harness_session_start claude "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact --session s1)
+  section=$(section_of "$out")
+  assert_contains "$section" "None recorded for this compaction: the last one was recorded for session unknown, not this session (s1)." \
+    "a handoff record without a session was presented as this compaction's"
+
+  out=$(run_named_harness_session_start claude "$home" "$root" "$fakebin:$BASE_PATH" --source startup --session s1)
+  case "$out" in
+    *CAPTAIN-WORDS-INSIDE-THE-BLOCK*|*'PRE-COMPACTION HANDOFF'*) fail "a startup digest surfaced the pre-compaction handoff" ;;
+  esac
+
+  printf 'status=ok\nat=%s\ntrigger=auto\nsession=s1\ntranscript=/t/s1.jsonl\nturns=1\nreason=\n' "$((now - 7200))" \
+    > "$home/state/.precompact-handoff"
+  out=$(run_named_harness_session_start claude "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact --session s1)
+  section=$(section_of "$out")
+  assert_contains "$section" "None recorded for this compaction: the last one is 120 minutes old" \
+    "a stale handoff was not distinguished from this compaction's"
+  case "$section" in
+    *CAPTAIN-WORDS-INSIDE-THE-BLOCK*) fail "a stale handoff block was presented as this compaction's" ;;
+  esac
+
+  printf 'status=failed\nat=%s\ntrigger=manual\nsession=s1\ntranscript=/t/s1.jsonl\nturns=0\nreason=cannot replace the note\n' "$now" \
+    > "$home/state/.precompact-handoff"
+  out=$(run_named_harness_session_start claude "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact --session s1)
+  section=$(section_of "$out")
+  assert_contains "$section" "FAILED for this compaction: cannot replace the note" "a failed handoff was not reported"
+  assert_contains "$section" "/t/s1.jsonl" "a failed handoff did not point at the pre-compaction transcript"
+
+  # A record a Claude compaction left in this home is not a notice for a
+  # harness without the pre-compaction hook, whatever its age or session.
+  for record in \
+    "status=ok\nat=$now\ntrigger=auto\nsession=s1\ntranscript=/t/s1.jsonl\nturns=1\nreason=\n" \
+    "status=ok\nat=$((now - 7200))\ntrigger=auto\nsession=s1\ntranscript=/t/s1.jsonl\nturns=1\nreason=\n" \
+    "status=failed\nat=$now\ntrigger=auto\nsession=s1\ntranscript=/t/s1.jsonl\nturns=0\nreason=boom\n" \
+    ''; do
+    if [ -n "$record" ]; then
+      printf '%b' "$record" > "$home/state/.precompact-handoff"
+    else
+      rm -f "$home/state/.precompact-handoff"
+    fi
+    out=$(run_named_harness_session_start pi "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)
+    case "$out" in
+      *'PRE-COMPACTION HANDOFF'*|*'None recorded'*|*CAPTAIN-WORDS-INSIDE-THE-BLOCK*)
+        fail "a harness without the pre-compaction hook printed a handoff notice for record: ${record:-none}" ;;
+    esac
+  done
+
+  pass "compaction digest surfaces this session's fresh pre-compaction handoff and names a missing, stale, foreign, or failed one"
+}
+
+# Claude Code keeps only the first 2KB of an oversized hook output inline and
+# saves the rest to a file, so the handoff must lead the compaction digest: its
+# heading, the pointer to the full digest, and the newest captain turn must all
+# start inside that preview even when the real PreCompact hook recorded a full
+# 10-turn handoff of 1000-character turns under a /compact argument longer than
+# a turn.
+test_compact_digest_leads_with_the_handoff_inside_the_preview() {
+  local rec root home fakebin out i transcript offset needle hook_payload
+  rec=$(new_world precompact-preview)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  transcript="${root%/root}/transcript.jsonl"
+  for i in 01 02 03 04 05 06 07 08 09 10; do
+    jq -nc --arg i "$i" '{type:"user", origin:{kind:"human"}, timestamp:("2026-09-30T00:00:" + $i + "Z"),
+      message:{role:"user", content:("NEWEST-TURN-" + $i + " " + ("w" * 1200))}}'
+  done > "$transcript"
+  hook_payload=$(jq -nc --arg t "$transcript" --arg c "COMPACT-ARG $(head -c 1500 /dev/zero | tr '\0' 'c')" \
+    '{session_id:"s1", transcript_path:$t, hook_event_name:"PreCompact", trigger:"manual", custom_instructions:$c}')
+  # The hook writes only for a primary checkout carrying AGENTS.md and bin/.
+  mkdir -p "$root/bin"
+  [ -f "$root/AGENTS.md" ] || : > "$root/AGENTS.md"
+  printf '%s' "$hook_payload" | env -u NO_MISTAKES_GATE FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-precompact-handoff.sh" >/dev/null 2>&1 \
+    || fail "the pre-compaction hook exited non-zero"
+  [ "$(sed -n 's/^turns=//p' "$home/state/.precompact-handoff")" = 10 ] \
+    || fail "the hook did not record a full 10-turn handoff: $(cat "$home/state/.precompact-handoff" 2>/dev/null)"
+
+  out=$(run_named_harness_session_start claude "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact --session s1)
+  [ "${#out}" -gt 2048 ] || fail "the fixture digest is not oversized, so the preview bound is untested"
+  for needle in 'PRE-COMPACTION HANDOFF (data/session-handoff.md) - read first' \
+    'the complete digest is in the file your harness named on its "Full output saved to" line' \
+    'NEWEST-TURN-10'; do
+    offset=$(printf '%s' "$out" | LC_ALL=C awk -v n="$needle" 'BEGIN { RS = "\001" } { i = index($0, n); print (i ? i - 1 : -1) }')
+    [ "$offset" -ge 0 ] || fail "the compaction digest lost: $needle"
+    [ "$offset" -lt 2048 ] || fail "'$needle' starts at byte $offset, past the 2KB inline preview"
+  done
+  assert_contains "$out" "COMPACT-ARG" "the /compact argument was not printed in the digest"
+  assert_contains "$out" "NEWEST-TURN-01" "the full handoff was not printed in the digest"
+  pass "a full 10-turn handoff under a long /compact argument leads the compaction digest inside the 2KB preview, newest turn first"
+}
+
 test_reemit_keeps_repair_ownership_with_the_lock_holder() {
   local rec root home fakebin reemit readonly_out holder_pid
   rec=$(new_world reemit-tangle)
@@ -2812,5 +2972,7 @@ test_read_only_pi_compact_refreshes_against_its_own_session_identity
 test_codex_unreachable_reset_sources_do_not_claim_instruction_refresh
 test_agents_baseline_requires_sha256_and_successful_completion
 test_reemit_keeps_repair_ownership_with_the_lock_holder
+test_compact_digest_surfaces_the_precompact_handoff
+test_compact_digest_leads_with_the_handoff_inside_the_preview
 
 echo "# fm-session-start.test.sh: all assertions passed"

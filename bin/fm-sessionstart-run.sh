@@ -17,6 +17,9 @@
 #             (the `source` field). An unreadable or unrecognized source is
 #             treated as `startup`, because taking the helm redundantly is
 #             cheap and idempotent while not taking it is the whole bug.
+#             On clear and compact, that payload's `session_id` is forwarded
+#             as fm-session-start.sh --session, so a compaction digest prints
+#             only the pre-compaction handoff its own session recorded.
 #   --pi-prerequisite
 #             Internal Pi extension mode. An intentional gate/scope stand-down
 #             exits 3 so provider preflight can distinguish it from an eligible
@@ -60,6 +63,7 @@ COMPLETION_FILE="$STATE/.session-start-complete"
 . "$SCRIPT_DIR/fm-hook-host-lib.sh"
 
 SOURCE=
+SESSION_ID=
 PI_PREREQUISITE=0
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -106,9 +110,9 @@ if [ -z "$SOURCE" ] && [ ! -t 0 ]; then
   # host missing it still gets correct routing rather than silent full runs.
   # A terminal stdin is skipped outright: a hook always pipes its payload, and
   # an operator running this by hand must not be left waiting on a read.
-  # Splitting on the quote character finds the FIRST "source" key and its value
+  # Splitting on the quote character finds the FIRST key of a name and its value
   # without depending on greedy-regex luck, and it cannot mistake a string VALUE
-  # of "source" for the key, because only a key is followed by a bare colon.
+  # equal to the name for the key, because only a key is followed by a bare colon.
   PAYLOAD=$(cat 2>/dev/null || true)
   # Cursor loads the tracked Claude settings as well as its own registration,
   # so a Cursor-delivered payload here is the duplicate: bin/fm-sessionstart-
@@ -118,14 +122,21 @@ if [ -z "$SOURCE" ] && [ ! -t 0 ]; then
   if fm_hook_payload_is_foreign_host "$PAYLOAD"; then
     exit 0
   fi
-  SOURCE=$(printf '%s' "$PAYLOAD" | awk '
-    BEGIN { RS = "\"" }
-    seen == 2 { print; exit }
-    seen == 1 && $0 ~ /^[[:space:]]*:[[:space:]]*$/ { seen = 2; next }
-    seen == 1 { seen = 0 }
-    $0 == "source" { seen = 1 }
-  ')
+  payload_field() {  # <key>
+    printf '%s' "$PAYLOAD" | awk -v key="$1" '
+      BEGIN { RS = "\"" }
+      seen == 2 { print; exit }
+      seen == 1 && $0 ~ /^[[:space:]]*:[[:space:]]*$/ { seen = 2; next }
+      seen == 1 { seen = 0 }
+      $0 == key { seen = 1 }
+    '
+  }
+  SOURCE=$(payload_field source)
+  SESSION_ID=$(payload_field session_id)
 fi
+
+SESSION_ARGS=()
+[ -z "$SESSION_ID" ] || SESSION_ARGS=(--session "$SESSION_ID")
 
 case "$SOURCE" in
   resume|reload|fork)
@@ -133,9 +144,9 @@ case "$SOURCE" in
     ;;
   clear|compact)
     if session_start_completed; then
-      "$SCRIPT_DIR/fm-session-start.sh" --reemit --source "$SOURCE" || true
+      "$SCRIPT_DIR/fm-session-start.sh" --reemit --source "$SOURCE" ${SESSION_ARGS[@]+"${SESSION_ARGS[@]}"} || true
     else
-      "$SCRIPT_DIR/fm-session-start.sh" --source "$SOURCE" || true
+      "$SCRIPT_DIR/fm-session-start.sh" --source "$SOURCE" ${SESSION_ARGS[@]+"${SESSION_ARGS[@]}"} || true
     fi
     ;;
   *)

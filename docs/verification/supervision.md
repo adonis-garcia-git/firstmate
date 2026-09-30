@@ -203,6 +203,54 @@ The Ahoy first-message boundary was reverified on 2026-07-22 with Pi 0.81.1 and 
 Marked current operational input and the two exact legacy compatibility shapes selected Bearings, while genuine near-miss captain messages remained real boundaries.
 The detailed reconciliation and task chronology stay in the private audit report and PR evidence.
 
+### Claude PreCompact hook, 2026-09-30
+
+This supports the `bin/fm-precompact-handoff.sh` header and [Pre-compaction handoff](../sessionstart-nudge.md#pre-compaction-handoff).
+It was measured on Claude Code 2.1.285 on macOS arm64, in a scratch git project whose project settings registered one logging command hook each for `PreCompact`, `PostCompact`, and `SessionStart`.
+
+A manual compaction ran as `claude -p --model haiku --resume <session> "/compact keep the codeword"`.
+The `PreCompact` payload was:
+
+```json
+{"session_id":"<id>","transcript_path":"<transcript>.jsonl","cwd":"<lab>","prompt_id":"<id>","hook_event_name":"PreCompact","trigger":"manual","custom_instructions":"keep the codeword"}
+```
+
+The hooks then fired in this order: `PreCompact`, `SessionStart` with `source` `compact`, and `PostCompact`, whose payload also carried the full `compact_summary`.
+The `SessionStart` `compact` payload carried the same `session_id` as the `PreCompact` payload, which is what the compaction digest matches the handoff record against.
+The `PreCompact` stdout did not appear in the summary; it appeared only in the command's own `<local-command-stdout>` record as `PreCompact [<command>] completed successfully: <stdout>`.
+
+An automatic compaction ran in one `claude -p --input-format stream-json` session with `CLAUDE_CODE_AUTO_COMPACT_WINDOW=100000 CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=5`; that window is the floor the binary enforces.
+`PreCompact` fired with `"trigger":"auto"` and `"custom_instructions":null` before each attempt, including attempts whose summary then failed with `compact_result` `failed` and `compact_error` `too_few_groups` because the lab session was small.
+
+Blocking behavior:
+
+| Hook behavior | Result |
+| --- | --- |
+| exit 2 with `blocked by test` on stderr | `Compaction blocked by PreCompact hook: [<command>]: blocked by test`, no compaction |
+| exit 1, alongside a second hook with `timeout: 3` that slept 8 seconds and was killed | compaction proceeded and wrote its `compact_boundary` record |
+
+Transcript shape, in the same version:
+
+- In an interactive TUI session, a genuine captain turn is a `user` record with `origin.kind` `human`, and background-task wakes carry `origin.kind` `task-notification`.
+- Firstmate's own typed operational input, such as a record-backed doorbell, is also recorded with `origin.kind` `human`, so the hook tells it apart through `bin/fm-operational-input.sh` rather than by origin.
+- A typed slash command such as `/stow` is a `human` record holding only its `<command-message>` and `<command-name>` tags, plus `<command-args>` when the captain gave arguments.
+- A headless `claude -p` or stream-json session writes its transcript with no `origin` field at all, so the hook records no captain turns there; only the interactive primary carries them.
+- A session launched from inside another Claude session inherits `CLAUDE_CODE_CHILD_SESSION` and saves no transcript, so a lab must clear every inherited `CLAUDE*` variable.
+
+Oversized session-open output, in the same version: a `SessionStart` hook that printed 12,034 bytes reached the model as `Output too large (11.8KB). Full output saved to: <file>` followed by `Preview (first 2KB)`, and the model could not see the output's last line.
+That is why the compaction digest leads with the handoff.
+
+Refresh with the live guard, which drives the interactive TUI through a Python pty in a throwaway lab and answers its workspace-trust dialog for that path only:
+
+```text
+$ FM_PRECOMPACT_HANDOFF_LIVE_E2E=1 tests/fm-precompact-handoff-live-e2e.test.sh
+# claude: 2.1.285 (Claude Code)
+ok - claude 2.1.285 (Claude Code): interactive /compact runs the committed hook with trigger=manual, quotes the captain and a typed /stow verbatim, drops a doorbell, proceeds, and reopens as the recorded session
+ok - claude 2.1.285 (Claude Code): an interactive automatic compaction runs the handoff first with trigger=auto and verbatim captain words
+```
+
+With `bin/fm-precompact-handoff.sh` staged without its executable bit, the same guard fails with `not ok - claude 2.1.285 (Claude Code): the tracked PreCompact entry did not run the hook on /compact (is bin/fm-precompact-handoff.sh executable in git?)`.
+
 ## Semantic busy state
 
 The per-adapter semantic sources behind [`bin/fm-busy-lib.sh`](../../bin/fm-busy-lib.sh) were live-verified on 2026-07-28 against firstmate-launched workers wired exactly as `fm-spawn` writes them.
