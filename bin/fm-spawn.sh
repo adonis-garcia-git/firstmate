@@ -446,9 +446,16 @@
 # endpoint, worktree, or record exists, unless the home's backlog has an
 # unheld, unblocked Queued or In flight item for the id; a transition that fails
 # after publication removes the record it just wrote rather than leaving a
-# worker the backlog does not own. A relaunch re-reads the row instead of
-# re-running the transition, so an eligible In-flight item is left untouched.
-# The transition is
+# worker the backlog does not own.
+# A relaunch replaces the worker of a task already dispatched, so its row rule
+# is recovery, not dispatch: an In-flight item proceeds and is left exactly as
+# found, held or blocked alike, because a held scout hosting a review or a
+# blocked ship waiting on a dependency must stay recoverable without anyone
+# clearing the captain's decision; a clean Queued item that drifted is moved
+# back to In flight. A held or blocked Queued item, a Done item, and a missing
+# item refuse before the replacement is published, since relaunching would
+# dispatch work the captain held, revive closed work, or leave a worker no row
+# owns. The transition is
 # skipped entirely for --secondmate spawns (persistent agents are not work
 # items), on a config/backlog-backend=manual home, and in a markdown home that
 # keeps no data/backlog.md. A configured non-markdown adapter remains
@@ -3482,7 +3489,12 @@ if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
     exit 1
   fi
   spawn_preflight_actor=$(fm_lease_actor) || exit "$FM_LEASE_REFUSE_EXIT"
-  if [ "$spawn_preflight_actor" = branch ] && fm_lease_away_relocated; then
+  if [ "$RELAUNCH" -eq 1 ]; then
+    if ! fm_backlog_row_relaunchable "$BACKLOG_ROW_STATE"; then
+      echo "error: this home's backlog item $ID is not relaunchable in state $BACKLOG_ROW_STATE; a relaunch recovers only an In-flight item or a clean Queued one, so reconcile the backlog before relaunching" >&2
+      exit 1
+    fi
+  elif [ "$spawn_preflight_actor" = branch ] && fm_lease_away_relocated; then
     if [ "$BACKLOG_ROW_STATE" != "queued no no" ]; then
       echo "error: spawn refused - the supervision branch under the away-posture record may dispatch only queued unblocked work (already queued, or filed by the branch from the captain's away words); task $ID has no dispatchable backlog item in this home" >&2
       exit 1
@@ -4900,11 +4912,14 @@ preserve_relaunch_meta() {
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-  if [ "$RELAUNCH" -eq 1 ]; then
-    preserve_relaunch_meta
-  fi
   if [ "$SPAWN_CONTROL_PARENT" = 1 ] && [ -n "${FM_CONTROL_RELAUNCH_TX:-}" ]; then
     echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
+  fi
+  # Preserved lines come last and in their recorded order, so a PR tail stays
+  # the tail bin/fm-pr-lib.sh's fm_pr_metadata_identity_parse authenticates the
+  # task's merge poll against.
+  if [ "$RELAUNCH" -eq 1 ]; then
+    preserve_relaunch_meta
   fi
 } >"$SPAWN_META_PATH" || {
   echo "error: task record for $ID could not be prepared at $SPAWN_META_PATH" >&2
@@ -4925,7 +4940,20 @@ fi
 # point below so every earlier launch-delivery failure remains unwindable.
 spawn_commit_backlog_transition() {
   [ "$BACKLOG_TRANSITION" = 1 ] || return 0
-  fm_backlog_atomic_transition dispatch "$STATE/$ID.meta" "$DATA" "$ID" "$STATE"
+  if [ "$RELAUNCH" -eq 1 ]; then
+    fm_backlog_atomic_transition relaunch "$STATE/$ID.meta" "$DATA" "$ID" "$STATE"
+  else
+    fm_backlog_atomic_transition dispatch "$STATE/$ID.meta" "$DATA" "$ID" "$STATE"
+  fi
+}
+
+# Whether the read-back row is the In-flight state the commit owes: a relaunch
+# keeps any hold or block the item carries, a fresh dispatch starts it clean.
+spawn_row_committed() {
+  case "$RELAUNCH:$FM_BACKLOG_ROW_STATE" in
+    0:in_flight\ no\ no | 1:in_flight\ *) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # The deferred-signal exit path's preservation report. A claim about preserved
@@ -4949,7 +4977,7 @@ spawn_report_preserved_state() {
     fi
     return 1
   fi
-  if [ "$FM_BACKLOG_ROW_STATE" = "in_flight no no" ]; then
+  if spawn_row_committed; then
     SPAWN_PRESERVED_CLAIM="verified preserved: its paired task record is present and its backlog item is In flight"
     return 0
   fi
@@ -4958,7 +4986,7 @@ spawn_report_preserved_state() {
   fm_backlog_start "$DATA" "$ID" || repair_error=$FM_BACKLOG_TRANSITION_ERROR
   if [ -z "$repair_error" ] &&
     fm_backlog_row_probe "$DATA" "$ID" &&
-    [ "$FM_BACKLOG_ROW_STATE" = "in_flight no no" ]; then
+    spawn_row_committed; then
     SPAWN_PRESERVED_CLAIM="its backlog item did not read back In flight after the commit; it was moved to In flight now and verified, together with its paired task record"
     return 0
   fi
@@ -5153,9 +5181,15 @@ spawn_record_traceparent() {
     acquired=1
   fi
   SPAWN_META_TMP="$STATE/.$ID.meta.trace.${BASHPID:-$$}"
+  # The carrier goes ahead of a relaunch's preserved PR tail, which must stay
+  # last (preserve_relaunch_meta).
   if [ ! -f "$meta" ] || [ ! -w "$meta" ] ||
-    ! awk -F= '$1 != "traceparent"' "$meta" >"$SPAWN_META_TMP" ||
-    ! printf 'traceparent=%s\n' "$SPAWN_TRACEPARENT" >>"$SPAWN_META_TMP" ||
+    ! awk -F= -v carrier="traceparent=$SPAWN_TRACEPARENT" '
+      $1 == "traceparent" { next }
+      $1 == "pr" && !placed { print carrier; placed = 1 }
+      { print }
+      END { if (!placed) print carrier }
+    ' "$meta" >"$SPAWN_META_TMP" ||
     ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$meta" "task record" "$STATE"; then
     status=1
     rm -f "$SPAWN_META_TMP" 2>/dev/null || true

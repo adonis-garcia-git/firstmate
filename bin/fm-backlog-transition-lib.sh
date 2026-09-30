@@ -772,8 +772,26 @@ fm_backlog_row_dispatchable() {
   esac
 }
 
+# Relaunch eligibility; bin/fm-spawn.sh's header owns the rule and its rationale.
+fm_backlog_row_relaunchable() {
+  case "$1" in
+    in_flight\ *|queued\ no\ no) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_backlog_dispatch_transition() {
-  local meta=$1 data=$2 id=$3 state=$4 row row_status
+  fm_backlog_row_commit dispatch "$@"
+}
+
+fm_backlog_relaunch_transition() {
+  fm_backlog_row_commit relaunch "$@"
+}
+
+# Re-read the row under the caller's meta lock and move it to In flight only
+# when it is not there already; an In-flight row is never rewritten.
+fm_backlog_row_commit() {  # <dispatch|relaunch> <meta> <data> <id> <state>
+  local operation=$1 meta=$2 data=$3 id=$4 state=$5 row row_status
   fm_backlog_record_present "$meta" "task record" "$state" || return 1
   fm_backlog_row_probe "$data" "$id"
   row_status=$?
@@ -786,12 +804,17 @@ fm_backlog_dispatch_transition() {
     return "$row_status"
   fi
   row=$FM_BACKLOG_ROW_STATE
-  if ! fm_backlog_row_dispatchable "$row"; then
+  if [ "$operation" = relaunch ]; then
+    if ! fm_backlog_row_relaunchable "$row"; then
+      FM_BACKLOG_TRANSITION_ERROR="backlog item $id is not relaunchable in state $row"
+      return 1
+    fi
+  elif ! fm_backlog_row_dispatchable "$row"; then
     FM_BACKLOG_TRANSITION_ERROR="backlog item $id is not dispatchable in state $row"
     return 1
   fi
   case "$row" in
-    in_flight\ no\ no) return 0 ;;
+    in_flight\ *) return 0 ;;
     queued\ no\ no) fm_backlog_start "$data" "$id" ;;
   esac
 }
@@ -838,6 +861,7 @@ fm_backlog_atomic_transition() {
     publish) fm_backlog_record_publish "$@" ;;
     remove) fm_backlog_record_remove "$@" ;;
     dispatch) fm_backlog_dispatch_transition "$@" ;;
+    relaunch) fm_backlog_relaunch_transition "$@" ;;
     rollback) fm_backlog_dispatch_rollback "$@" ;;
     close) fm_backlog_close_transition "$@" ;;
     retain) fm_backlog_retain_transition "$@" ;;

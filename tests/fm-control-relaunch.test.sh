@@ -489,6 +489,34 @@ test_relaunch_preserves_durable_task_metadata() {
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
 }
 
+# The watcher authenticates a PR merge poll against the task record's PR tail
+# (bin/fm-pr-lib.sh's fm_pr_metadata_identity_parse), which accepts only pr_head
+# and x_* keys after pr=. A relaunch must keep that tail readable, with and
+# without trace context, or the poll it preserved is refused as unauthenticated.
+test_relaunch_keeps_the_pr_poll_identity_readable() {
+  local trace dir id out rc
+  for trace in off on; do
+    rc=0
+    id=rl-pr-$trace
+    dir=$(new_case "pr-identity-$trace" "$id")
+    add_ship_task "$dir" "$id" claude
+    printf '%s\n' 'pr=https://github.com/example/repo/pull/77' "pr_head=$(printf '%040d' 77)" 'x_request=request-77' \
+      >> "$dir/home/state/$id.meta"
+    printf '%s\n' "$$" > "$dir/home/state/.lock"
+    printf '%s %s\n' "$$" "$trace" > "$dir/home/state/.trace-context-effective"
+    bash -c '. "$1/bin/fm-pr-lib.sh" && fm_pr_metadata_identity_parse "$2"' _ "$ROOT" "$dir/home/state/$id.meta" \
+      || fail "trace $trace: the fixture PR identity should be readable before the relaunch"
+
+    out=$(run_control "$dir" "$id" relaunch --note "continuing after the PR was raised") || rc=$?
+    expect_code 0 "$rc" "trace $trace: relaunch should succeed"$'\n'"$out"
+    [ "$trace" = off ] || fm_trace_context_valid "$(meta_field "$dir" "$id" traceparent)" \
+      || fail "trace on: the relaunch should record its trace carrier"
+    bash -c '. "$1/bin/fm-pr-lib.sh" && fm_pr_metadata_identity_parse "$2"' _ "$ROOT" "$dir/home/state/$id.meta" \
+      || fail "trace $trace: relaunch left a task record whose PR identity the merge poll cannot read"$'\n'"$(cat "$dir/home/state/$id.meta")"
+  done
+  pass "fm-control relaunch: the preserved PR merge poll can still read the task's PR identity"
+}
+
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
   local dir control_pid link_pid rc i=0 traceparent prepare launch_release waiting ready release
   dir=$(new_case metadata-race rl28)
@@ -2390,11 +2418,116 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
   pass "relaunch heals an item that drifted out of In flight while the task stayed live"
 }
 
+# A held or blocked In-flight item is exactly the task whose worker must stay
+# recoverable (a held scout hosting a review, a blocked ship waiting on a
+# dependency), so relaunch proceeds and leaves every hold, block, and row byte
+# exactly as it found them. Covers both an agent that is still running and one
+# that already exited, which is how the refusal was first observed.
+test_relaunch_keeps_a_held_or_blocked_in_flight_item_exactly_as_it_was() {
+  local variant dir id file out rc
+  command -v tasks-axi >/dev/null 2>&1 || {
+    pass "skipped: tasks-axi is not installed, so the backlog transition is inert"
+    return 0
+  }
+  fm_tasks_axi_compatible || {
+    pass "skipped: installed tasks-axi predates ${FM_TASKS_AXI_MIN}, so dispatch refuses automatic backlog transitions"
+    return 0
+  }
+  for variant in held blocked held-and-blocked held-exited; do
+    rc=0
+    id=rl-$variant
+    dir=$(new_case "keep-$variant" "$id")
+    add_ship_task "$dir" "$id" claude
+    seed_backlog "$dir" "$id" in_flight
+    file="$dir/home/data/backlog.md"
+    case "$variant" in
+      held*) tasks-axi hold "$id" --reason "captain decision pending" --kind captain --file "$file" >/dev/null \
+        || fail "$variant: could not hold the fixture row" ;;
+    esac
+    case "$variant" in
+      *blocked)
+        tasks-axi add "$id-dep" "relaunch fixture dependency" --kind ship --file "$file" >/dev/null \
+          || fail "$variant: could not add the fixture dependency"
+        tasks-axi block "$id" --by "$id-dep" --file "$file" >/dev/null \
+          || fail "$variant: could not block the fixture row"
+        ;;
+    esac
+    [ "$variant" != held-exited ] || printf 'zsh' > "$dir/fake/command"
+    break_tasks_axi_start "$dir"
+    cp "$file" "$dir/backlog-before"
+
+    out=$(run_control "$dir" "$id" relaunch --note "picking the held work back up") || rc=$?
+    expect_code 0 "$rc" "$variant: a relaunch of an In-flight item must not require clearing its hold or block"$'\n'"$out"
+    cmp -s "$dir/backlog-before" "$file" \
+      || fail "$variant: relaunch changed the backlog"$'\n'"$(diff "$dir/backlog-before" "$file")"
+    [ "$(cat "$dir/fake/command")" = claude ] || fail "$variant: relaunch did not start the replacement agent"
+  done
+  pass "relaunch recovers a held or blocked In-flight item and leaves its backlog byte-identical"
+}
+
+# Relaunch replaces the worker of a task that is already dispatched, so only an
+# In-flight row, or a clean Queued row that merely drifted, is recoverable. A
+# held or blocked Queued row, a Done row, and a missing row all refuse before the
+# replacement is published, leaving the record and backlog untouched.
+test_spawn_relaunch_refuses_rows_that_are_not_a_dispatched_task() {
+  local variant dir id file out rc
+  command -v tasks-axi >/dev/null 2>&1 || {
+    pass "skipped: tasks-axi is not installed, so the backlog transition is inert"
+    return 0
+  }
+  fm_tasks_axi_compatible || {
+    pass "skipped: installed tasks-axi predates ${FM_TASKS_AXI_MIN}, so dispatch refuses automatic backlog transitions"
+    return 0
+  }
+  for variant in queued-held queued-blocked closed missing; do
+    rc=0
+    id=rl-$variant
+    dir=$(new_case "refuse-$variant" "$id")
+    add_ship_task "$dir" "$id" claude
+    file="$dir/home/data/backlog.md"
+    case "$variant" in
+      queued-held)
+        seed_backlog "$dir" "$id" queued
+        tasks-axi hold "$id" --reason "captain decision pending" --kind captain --file "$file" >/dev/null
+        ;;
+      queued-blocked)
+        seed_backlog "$dir" "$id" queued
+        tasks-axi add "$id-dep" "relaunch fixture dependency" --kind ship --file "$file" >/dev/null
+        tasks-axi block "$id" --by "$id-dep" --file "$file" >/dev/null
+        ;;
+      closed)
+        seed_backlog "$dir" "$id" in_flight
+        tasks-axi 'done' "$id" --file "$file" >/dev/null
+        ;;
+      missing)
+        seed_backlog "$dir" "$id" queued
+        tasks-axi rm "$id" --file "$file" >/dev/null
+        ;;
+    esac
+    printf 'zsh' > "$dir/fake/command"
+    cp "$file" "$dir/backlog-before"
+    cp "$dir/home/state/$id.meta" "$dir/meta-before"
+
+    out=$(run_spawn "$dir" "$id" --relaunch) || rc=$?
+    expect_code 1 "$rc" "$variant: relaunch must refuse a row that is not a dispatched task"$'\n'"$out"
+    if [ "$variant" = missing ]; then
+      assert_contains "$out" "task $id has no backlog item" "$variant: the refusal should name the missing row"
+    else
+      assert_contains "$out" "backlog item $id is not relaunchable" "$variant: the refusal should name the ineligible row"
+    fi
+    cmp -s "$dir/backlog-before" "$file" || fail "$variant: a refused relaunch changed the backlog"
+    cmp -s "$dir/meta-before" "$dir/home/state/$id.meta" || fail "$variant: a refused relaunch changed the task record"
+    [ "$(cat "$dir/fake/command")" = zsh ] || fail "$variant: a refused relaunch started an agent"
+  done
+  pass "relaunch refuses held or blocked Queued, Done, and missing rows without touching the record or backlog"
+}
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
+test_relaunch_keeps_the_pr_poll_identity_readable
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
@@ -2462,3 +2595,5 @@ test_herdr_reclaim_of_a_secondmate_names_its_own_owner
 test_herdr_rebind_failure_from_a_plain_shell_names_the_real_cause
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
+test_relaunch_keeps_a_held_or_blocked_in_flight_item_exactly_as_it_was
+test_spawn_relaunch_refuses_rows_that_are_not_a_dispatched_task
