@@ -346,6 +346,14 @@ test_lock_ownership_decides_authority() {
   # harness-shaped process.
   "$FAKE_CLAUDE" -c 'sleep 60; :' &
   holder=$!
+  # The backgrounded child is still a plain bash fork until it execs the fake
+  # harness; wait for the harness shape so the lock names a live owner.
+  local tries=0
+  until bash -c '. "$1"; fm_harness_pid_alive "$2"' _ "$ROOT/bin/fm-session-lock-lib.sh" "$holder"; do
+    tries=$((tries + 1))
+    [ "$tries" -lt 50 ] || fail "the fake lock holder never became a live harness"
+    sleep 0.1
+  done
   printf '%s\n' "$holder" > "$dir/state/.lock"
   # In production Claude runs the hook, so this session's own harness ancestry
   # resolves; a second fake harness gives the hook that ancestry here.
