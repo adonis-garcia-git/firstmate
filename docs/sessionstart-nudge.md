@@ -131,7 +131,8 @@ It owns only its marked block in that note, so conversation threads a `/stow` wr
 It records and never judges: filing work and correcting records stays with `/stow` and the agent.
 
 The compaction's `compact` digest prints that block in its fleet-state stage.
-When no block was recorded for this compaction, the recorded one is stale, or the hook failed, the digest says so and names the pre-compaction transcript to read instead, because the transcript file outlives the compaction.
+When no result was recorded at all, or the recorded one is stale, the digest says so and warns that conversation-only decisions or open work may be missing from the summary.
+When the hook failed for this compaction, or its result is fresh but the block is gone from the note, the digest says so and names the pre-compaction transcript the result recorded, to read instead, because the transcript file outlives the compaction.
 
 The hook never blocks or fails the compaction.
 Claude Code blocks a compaction only on a `PreCompact` exit 2 or a `decision: block` object, and the hook always exits 0 with empty stdout, recording any failure with its reason.
