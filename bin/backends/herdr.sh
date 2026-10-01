@@ -3577,6 +3577,18 @@ fm_backend_herdr_composer_literal_tail() {  # <text> <after>
   [ "${text:$(( ${#text} - ${#after} ))}" = "$after" ]
 }
 
+# fm_backend_herdr_text_has_key_controls: 0 when <text> holds a control
+# character other than a line break - a tab, an escape, a carriage return, or
+# any other C0 character or DEL. Claude reads a short burst as keys, so typing
+# such text in the short pieces of fm_backend_herdr_composer_retype would send
+# that character as a key: a carriage return as Enter, which submits the draft
+# typed so far, and a tab as a key press that drops it (verified live, Claude
+# Code 2.1.286 on Herdr 0.8.2).
+fm_backend_herdr_text_has_key_controls() {  # <text>
+  local LC_ALL=C text=${1//$'\n'/}
+  [[ $text == *[$'\x01'-$'\x1f\x7f']* ]]
+}
+
 # fm_backend_herdr_text_pieces: split <text> into the pieces
 # fm_backend_herdr_composer_retype types, printed NUL-separated: each at most
 # <size> bytes, ending at its first line break, else after its last space when
@@ -3626,7 +3638,9 @@ fm_backend_herdr_text_pieces() {  # <text> <size>
 # scrolls. A piece holds at most <width> times half the rows below the cap and
 # at most FM_BACKEND_HERDR_RAW_TEXT_MAX_BYTES, so it is typed as keys and fits
 # the composer with older rows to spare, and it ends at its first line break.
-# What this cannot see is a stretch of text dropped or doubled inside a
+# <text> must hold no control character but line breaks
+# (fm_backend_herdr_text_has_key_controls), because every piece is typed as
+# keys. What this cannot see is a stretch of text dropped or doubled inside a
 # repetition longer than the rows the composer shows, because those rows read
 # the same either way. FM_BACKEND_HERDR_RETYPE_PROVEN is the visible
 # characters proven. 1 on the first piece that cannot be typed or proven.
@@ -3756,6 +3770,15 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
       printf 'send-failed'
       return 0
     fi
+    # Claude reads a carriage return in a short burst as Enter, which submits
+    # the draft typed so far, and in a long burst as a line break (live, Claude
+    # Code 2.1.286 on Herdr 0.8.2: a 62-byte burst submitted the text before
+    # its CR, a 64-byte one kept it as a line break). Every CRLF pair and
+    # every CR is therefore typed as the line break a long burst makes of it,
+    # so no carriage return can submit part of the message, at any length or
+    # in any piece typed again below.
+    text=${text//$'\r\n'/$'\n'}
+    text=${text//$'\r'/$'\n'}
   fi
   fm_backend_herdr_send_composer_text "$target" "$text" || send_rc=$?
   if [ "$send_rc" != 0 ] && [ "$send_rc" != 2 ]; then
@@ -3772,7 +3795,10 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
     refused=1
   elif [ "$proof" = 1 ] && ! fm_backend_herdr_composer_payload_wait "$target" "$text" "$FM_BACKEND_HERDR_PROOF_CAPTURE_LINES"; then
     total=$(fm_backend_herdr_visible_chars "$text")
-    if [ "$FM_BACKEND_HERDR_PROOF_SCROLLED" = 1 ]; then
+    if [ "$FM_BACKEND_HERDR_PROOF_SCROLLED" = 1 ] && fm_backend_herdr_text_has_key_controls "$text"; then
+      refused=1
+      echo "warning: herdr: after $FM_BACKEND_HERDR_PROOF_READS read(s) the Claude composer in $FM_BACKEND_HERDR_PANE showed only the last $FM_BACKEND_HERDR_PROOF_SEEN of $total characters of the message, which holds a tab or another control character that typing it again in pieces would send as a key, so Enter was not pressed" >&2
+    elif [ "$FM_BACKEND_HERDR_PROOF_SCROLLED" = 1 ]; then
       rows=$FM_BACKEND_HERDR_VIEW_ROWS
       width=$FM_BACKEND_HERDR_VIEW_WIDTH
       if ! fm_backend_herdr_composer_clear "$target" "$text" 1; then

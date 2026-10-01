@@ -8,13 +8,15 @@
 # idle steer, to submit a long multi-line message and short messages with a
 # paragraph break (helm's text-plus-attachment shape, whose attachment line
 # ends in ` |`) whole, as Claude's own session transcript records it, both
-# idle and while Claude is mid-turn, and to refuse a composer that shows only
-# part of the payload. In a pane short enough that Claude's composer scrolls a
-# long message, it requires the proof to type the message again in proven
-# pieces and submit it whole, single-paragraph or multi-paragraph, to refuse a
-# composer whose visible rows are blank lines below a hidden draft, and to
-# clear that draft and a long draft in a narrow pane completely. It fails
-# naming the harness and version rather than degrading quietly.
+# idle and while Claude is mid-turn, to submit a message holding a carriage
+# return once and whole, and to refuse a composer that shows only part of the
+# payload. In a pane short enough that Claude's composer scrolls a long
+# message, it requires the proof to type the message again in proven pieces
+# and submit it whole, single-paragraph, multi-paragraph, or holding a
+# carriage return, to refuse a composer whose visible rows are blank lines
+# below a hidden draft, and to clear that draft and a long draft in a narrow
+# pane completely. It fails naming the harness and version rather than
+# degrading quietly.
 #
 # Run explicitly with FM_HERDR_SUBMIT_CONFIRM_LIVE=1 after a Herdr or Claude
 # upgrade, and before trusting a refreshed docs/verification/runtime-backends.md
@@ -297,6 +299,23 @@ submitted=$(submitted_shape "$msg" "$LATE_TOKEN")
   || fail "Claude Code ($VERSION) on $HERDR_VER: the ${#msg}-char message drawn late was not submitted whole (${submitted:-absent})"
 pass "live Herdr late render: Claude Code ($VERSION) on $HERDR_VER re-reads a ${#msg}-char message drawn 0.8s after the send and submits it whole"
 
+# Carriage returns: Claude reads a CR in a short burst as Enter, which would
+# submit the text before it. The adapter types it as a line break, so the
+# whole message is submitted once, with no partial prompt before it.
+wait_idle 60 || true
+CR_TOKEN="FMCR$$x$RANDOM"
+msg="${CR_TOKEN}A one"$'\r'"${CR_TOKEN}END two."
+[ "$(printf '%s' "$msg" | wc -c)" -lt 56 ] \
+  || fail "the carriage-return case is ${#msg} bytes, too long for Claude to read it as keys, so it would prove nothing"
+verdict=$(fm_backend_herdr_send_text_submit "$TARGET" "$msg" 3 0.4 0.3) \
+  || fail "send_text_submit failed to run the short carriage-return message against Claude Code ($VERSION) on $HERDR_VER"
+[ "$verdict" = empty ] \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: a ${#msg}-char message with a carriage return must confirm empty, got '$verdict'"
+submitted=$(submitted_shape "${msg//$'\r'/$'\n'}" "$CR_TOKEN")
+[ "$submitted" = whole ] \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: the ${#msg}-char carriage-return message was not submitted once whole (${submitted:-absent})"
+pass "live Herdr carriage return: Claude Code ($VERSION) on $HERDR_VER submits a ${#msg}-char message with a carriage return once, whole, with a line break"
+
 # The captain sends from helm while firstmate is mid-turn: the same attachment
 # shape must land in a busy Claude, which queues it, and be submitted whole.
 wait_idle 60 || true
@@ -472,6 +491,21 @@ submitted=$(submitted_shape "$msg" "$NARROW_TOKEN")
 [ "$submitted" = whole ] \
   || fail "Claude Code ($VERSION) on $HERDR_VER: the ${#msg}-char message in a $cols-column pane was not submitted whole (${submitted:-absent})"
 pass "live Herdr scrolled composer: Claude Code ($VERSION) on $HERDR_VER submits a ${#msg}-char message whole in a $cols-column pane"
+# The narrow pane with a carriage return in a scrolled message: each piece
+# typed again is a burst of fewer than 30 bytes, where Claude reads a CR as
+# Enter.
+wait_idle 60 || true
+CR2_TOKEN="FMSCROLLCR$$x$RANDOM"
+msg="${CR2_TOKEN}A first part before a bare carriage return, then: ${scroll_msg#* }"$'\r'"${CR2_TOKEN}END SECOND PART AFTER IT, reply with only OK."
+verdict=$(fm_backend_herdr_send_text_submit "$TARGET" "$msg" 3 0.4 0.3) \
+  || fail "send_text_submit failed to run the scrolled carriage-return message against Claude Code ($VERSION) on $HERDR_VER"
+[ "$verdict" = empty ] \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: a ${#msg}-char message with a carriage return in a $cols-column pane must confirm empty, got '$verdict'"
+submitted=$(submitted_shape "${msg//$'\r'/$'\n'}" "$CR2_TOKEN")
+[ "$submitted" = whole ] \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: the ${#msg}-char scrolled carriage-return message was not submitted once whole (${submitted:-absent})"
+pass "live Herdr scrolled composer: Claude Code ($VERSION) on $HERDR_VER submits a ${#msg}-char message with a carriage return a $cols-column pane scrolls once, whole"
+
 env PATH="$ORIGINAL_PATH" "$LAB_HELPER" viewer stop "$SESSION" >/dev/null || true
 
 [ "$CHECKED" -gt 0 ] || fail "FM_HERDR_SUBMIT_CONFIRM_LIVE=1 checked no harness"

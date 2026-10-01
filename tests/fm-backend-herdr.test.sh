@@ -5012,11 +5012,16 @@ herdr_wrapped_composer() {  # <text> <width> <drop>
 # max(3, rows / 2 - 5) visible rows, and shows the rows around the cursor
 # (getViewportStartLine), which are the last rows while the cursor is at the
 # end. Typed text lands at the cursor, Ctrl+U deletes back to the start of the
-# cursor's wrapped row or one line break, and Enter submits the draft. It
-# models no cursor movement, because the proof never moves the cursor. Every
-# call is logged like make_herdr_fakebin's. <mangles> is a JSON list of faults
-# applied to typed text, each once unless it has "always": true, and each
-# after letting its first "skip" matching texts through -
+# cursor's wrapped row or one line break, and Enter submits the draft. Typed
+# text shorter than 64 bytes is read as keys, so a carriage return in it is
+# Enter and a tab is a key press that types nothing, while a longer burst
+# reads a carriage return as a line break, as live Claude Code 2.1.286 on
+# Herdr 0.8.2 did with a 62-byte and a 64-byte burst. It models no
+# cursor movement, because the proof never moves the cursor. Every call is
+# logged like make_herdr_fakebin's. <mangles> is a JSON list of faults applied
+# to typed text, each once unless it has "always": true, each only to texts
+# starting with its "when" if it has one, and each after letting its first
+# "skip" matching texts through -
 # {"kind":"drop","n":N} loses the first N characters, {"kind":"prefix",
 # "text":T} lands T first, {"kind":"dup","text":T} doubles T, and
 # {"kind":"wipe","before":T} empties the draft before text T is typed.
@@ -5077,7 +5082,7 @@ def viewport(rows, at):
 
 def mangle(text):
     for m in st["mangles"]:
-        if m.get("spent"):
+        if m.get("spent") or not text.startswith(m.get("when", "")):
             continue
         hit, saved, buf, cur = True, text, st["buf"], st["cur"]
         if m["kind"] == "drop":
@@ -5099,6 +5104,12 @@ def mangle(text):
         if not m.get("always"):
             m["spent"] = True
     return text
+
+def submit():
+    if st["buf"]:
+        st["submitted"].append(st["buf"])
+        st["cursor_at_end"].append(st["cur"] == len(st["buf"]))
+        st["buf"], st["cur"], st["status"] = "", 0, "working"
 
 def screen(ansi):
     rows, at, _ = where()
@@ -5125,14 +5136,19 @@ elif cmd == ["pane", "read"]:
 elif cmd == ["pane", "send-text"]:
     st["typed"].append(len(args[3].encode()))
     text = mangle(args[3])
-    b, c = st["buf"], st["cur"]
-    st["buf"], st["cur"] = b[:c] + text + b[c:], c + len(text)
+    if len(text.encode()) >= 64:
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+    else:
+        text = text.replace("\t", "")
+    for i, part in enumerate(text.split("\r")):
+        if i:
+            submit()
+        b, c = st["buf"], st["cur"]
+        st["buf"], st["cur"] = b[:c] + part + b[c:], c + len(part)
 elif cmd == ["pane", "send-keys"]:
     for key in args[3:]:
-        if key == "enter" and st["buf"]:
-            st["submitted"].append(st["buf"])
-            st["cursor_at_end"].append(st["cur"] == len(st["buf"]))
-            st["buf"], st["cur"], st["status"] = "", 0, "working"
+        if key == "enter":
+            submit()
         elif key == "ctrl+u":
             b, c = st["buf"], st["cur"]
             if c > 0 and b[c - 1] == "\n":
@@ -5615,6 +5631,66 @@ test_send_text_submit_refuses_a_claude_draft_wiped_during_the_retype() {
   jq -e '.buf == "" and .submitted == []' "$dir/sim.json" >/dev/null \
     || fail "a wiped draft must be cleared and never submitted: $(jq -c '{buf, submitted}' "$dir/sim.json")"
   pass "fm_backend_herdr_send_text_submit: a Claude draft wiped while it is typed again is refused, even behind blank lines"
+}
+
+# Claude reads a carriage return in a short burst as Enter, and every piece
+# typed again is short, so a CR typed as a key submitted the part of the
+# message before it while the send reported send-failed. Every CR and CRLF is
+# typed as the line break a long burst makes of it, so the whole message is
+# submitted once, scrolled or not, long or short.
+test_send_text_submit_never_submits_part_of_a_message_at_a_carriage_return() {
+  local case geometry text want dir fb out helm
+  helm=$(herdr_helm_message)
+  for case in scrolled-cr scrolled-crlf short-cr; do
+    case "$case" in
+      scrolled-cr) geometry=33x16; text="First part before a bare carriage return, then: $helm"$'\r'" SECOND PART AFTER IT, reply with only OK." ;;
+      scrolled-crlf) geometry=33x16; text="${helm:0:150}"$'\r\n'"${helm:150}" ;;
+      short-cr) geometry=85x35; text=$'alpha\rbeta' ;;
+    esac
+    want=${text//$'\r\n'/$'\n'}
+    want=${want//$'\r'/$'\n'}
+    dir="$TMP_ROOT/submit-cr-$case"; mkdir -p "$dir"; : > "$dir/log"
+    fb=$(make_herdr_claude_sim "$dir" "${geometry%x*}" "${geometry#*x}")
+    out=$(herdr_sim_submit "$dir" "$fb" "$text")
+    [ "$out" = empty ] || fail "a $case message should be delivered whole, got '$out': $(cat "$dir/stderr")"
+    herdr_sim_delivered "$dir" "$want" \
+      || fail "a $case message must be submitted once, whole, with its carriage returns as line breaks: $(jq -c .submitted "$dir/sim.json")"
+  done
+  pass "fm_backend_herdr_send_text_submit: a carriage return never submits part of a message to Claude, scrolled or not"
+}
+
+# A tab typed as a key in a short piece is a key press that drops it, which
+# the whitespace-blind proof cannot see, so a scrolled message holding a tab
+# or another control character is refused rather than typed again in pieces.
+test_send_text_submit_refuses_to_retype_a_message_holding_a_tab() {
+  local dir fb out text helm
+  helm=$(herdr_helm_message)
+  text="${helm:0:150}"$'\t'"${helm:150}"
+  dir="$TMP_ROOT/submit-tab-retype"; mkdir -p "$dir"; : > "$dir/log"
+  fb=$(make_herdr_claude_sim "$dir" 33 16)
+  out=$(herdr_sim_submit "$dir" "$fb" "$text")
+  [ "$out" = send-failed ] || fail "a scrolled message holding a tab should be refused, got '$out': $(cat "$dir/stderr")"
+  grep -F 'which holds a tab or another control character that typing it again in pieces would send as a key, so Enter was not pressed' "$dir/stderr" >/dev/null \
+    || fail "the refusal must name the control character: $(cat "$dir/stderr")"
+  jq -e '.buf == "" and .submitted == [] and (.typed | length) == 1' "$dir/sim.json" >/dev/null \
+    || fail "the tab-bearing draft must be cleared, never submitted, and never typed again: $(jq -c '{buf, submitted, typed}' "$dir/sim.json")"
+  pass "fm_backend_herdr_send_text_submit: a scrolled message holding a tab is refused and cleared, not typed again as keys"
+}
+
+# A blank top row joins a piece to the blank line typed before it only when
+# the read shows the whole piece: a piece that lost its head right after blank
+# lines is refused.
+test_send_text_submit_refuses_a_piece_that_lost_its_head_after_blank_lines() {
+  local dir fb out text helm
+  helm=$(herdr_helm_message)
+  text="${helm:0:200}"$'\n\n\n'"${helm:209}"
+  dir="$TMP_ROOT/submit-head-after-blank"; mkdir -p "$dir"; : > "$dir/log"
+  fb=$(make_herdr_claude_sim "$dir" 33 16 "[{\"kind\":\"drop\",\"n\":5,\"when\":\"${helm:209:7}\"}]")
+  out=$(herdr_sim_submit "$dir" "$fb" "$text")
+  [ "$out" = send-failed ] || fail "a piece that lost its head after blank lines should be refused, got '$out': $(cat "$dir/stderr")"
+  jq -e '.buf == "" and .submitted == []' "$dir/sim.json" >/dev/null \
+    || fail "the draft must be cleared and never submitted: $(jq -c '{buf, submitted}' "$dir/sim.json")"
+  pass "fm_backend_herdr_send_text_submit: a piece typed again that lost its head right after blank lines is refused"
 }
 
 # The refused-draft clear judges emptiness the same way: a draft whose
@@ -6618,6 +6694,9 @@ test_send_text_submit_refuses_a_claude_draft_that_keeps_losing_its_head
 test_send_text_submit_never_submits_text_that_lands_above_the_message
 test_send_text_submit_never_submits_a_doubled_line
 test_send_text_submit_refuses_a_claude_draft_wiped_during_the_retype
+test_send_text_submit_never_submits_part_of_a_message_at_a_carriage_return
+test_send_text_submit_refuses_to_retype_a_message_holding_a_tab
+test_send_text_submit_refuses_a_piece_that_lost_its_head_after_blank_lines
 test_composer_clear_empties_a_claude_draft_hidden_above_blank_rows
 test_send_text_submit_reads_a_tall_claude_composer_whole
 test_send_text_submit_clears_a_long_refused_draft_in_a_narrow_pane
