@@ -1616,8 +1616,28 @@ _fm_composer_select_cursorless() {
 }
 
 fm_composer_extract_selected_content() {  # <caps> <screen>
-  local caps=$1 screen=$2 styled=0 kv plain row raw content glyph joined='' footer_re prompt_row=-1
-  local leading_blank=1 placeholder_position=0 prompt_is_shell=0
+  local view line joined=''
+  view=$(fm_composer_selected_rows_view "$1" "$2") || return 1
+  while IFS= read -r line; do
+    case "$line" in t$'\t'*) joined="${joined}${joined:+ }${line#t$'\t'}" ;; esac
+  done <<EOF
+$view
+EOF
+  printf '%s\n' "$joined" | LC_ALL=C awk '{$1=$1; printf "%s", $0}'
+}
+
+# fm_composer_selected_rows_view: every screen row of the composer that
+# fm_composer_extract_selected_content reads, one line per row: `t<TAB><text>`
+# for a row of typed text, `b` for a blank row, and `g` for a row whose only
+# text is the harness's own ghost, placeholder, or footer furniture. A ruled
+# bare composer like Claude Code's also reports the blank rows below its last
+# text, down to its closing rule, because a draft can end in blank lines. A
+# harness that caps its composer height and scrolls a longer draft shows
+# exactly its cap here, and blank rows below the glyph row are text the
+# harness wrapped out of view or typed blank lines, never an empty composer.
+fm_composer_selected_rows_view() {  # <caps> <screen>
+  local caps=$1 screen=$2 styled=0 kv plain row raw content bare_text glyph footer_re prompt_row=-1
+  local leading_blank=1 placeholder_position=0 prompt_is_shell=0 close trimmed
   footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
   while IFS= read -r kv; do
     [ "$kv" = styled=1 ] && styled=1
@@ -1632,19 +1652,26 @@ EOF
     raw=$(_fm_composer_screen_row "$row" "$screen")
     if [ "$FM_COMPOSER_SELECTED_KIND" = bare ]; then
       content=$(_fm_composer_row_content "$raw" "$styled" 0)
+      bare_text=$(_fm_composer_row_content "$raw" 0 0)
     else
       content=$(_fm_composer_row_content "$raw" "$styled")
+      bare_text=$(_fm_composer_row_content "$raw" 0)
     fi
     placeholder_position=0
     case "$FM_COMPOSER_SELECTED_KIND" in
       bare)
-        if [ "$row" -eq "$FM_COMPOSER_SELECTED_FIRST" ] \
-           && fm_composer_leading_agent_glyph_var glyph "$content"; then
-          content=${content#*"$glyph"}
+        if [ "$row" -eq "$FM_COMPOSER_SELECTED_FIRST" ]; then
+          if fm_composer_leading_agent_glyph_var glyph "$content"; then
+            content=${content#*"$glyph"}
+          fi
+          if fm_composer_leading_agent_glyph_var glyph "$bare_text"; then
+            bare_text=${bare_text#*"$glyph"}
+          fi
         fi
         ;;
       leftbar)
         case "$content" in '┃'*) content=${content#┃} ;; esac
+        case "$bare_text" in '┃'*) bare_text=${bare_text#┃} ;; esac
         fm_composer_normalize_trim_var content
         if [ -z "$content" ]; then
           :
@@ -1667,10 +1694,14 @@ EOF
         elif [ "$prompt_row" -lt 0 ]; then
           placeholder_position=1
         fi
+        if fm_composer_leading_prompt_glyph_var glyph "$bare_text"; then
+          bare_text=${bare_text#*"$glyph"}
+        fi
         ;;
     esac
     fm_composer_normalize_spaces_var content
     fm_composer_normalize_trim_var content
+    fm_composer_normalize_trim_var bare_text
     # A styled agent-glyph placeholder disappears above when ghost stripping
     # proves it is furniture. If the same placeholder-looking bytes survive
     # styling, they are real user input and must remain in the extracted content
@@ -1686,13 +1717,23 @@ EOF
        || { [ "$FM_COMPOSER_SELECTED_KIND" = leftbar ] \
             && [ "$row" -eq "$FM_COMPOSER_SELECTED_LAST" ] \
             && fm_composer_idle_matches "$content" "$footer_re" sensitive; }; then
+      if [ -z "$bare_text" ]; then printf 'b\n'; else printf 'g\n'; fi
       row=$((row + 1))
       continue
     fi
-    joined="${joined}${joined:+ }$content"
+    printf 't\t%s\n' "$content"
     row=$((row + 1))
   done
-  printf '%s\n' "$joined" | LC_ALL=C awk '{$1=$1; printf "%s", $0}'
+  if [ "$FM_COMPOSER_SELECTED_KIND" = bare ] \
+     && close=$(_fm_composer_bare_ruled_close "$plain" "$FM_COMPOSER_SELECTED_FIRST"); then
+    while [ "$row" -lt "$close" ]; do
+      trimmed=$(_fm_composer_screen_row "$row" "$plain")
+      fm_composer_normalize_trim_var trimmed
+      [ -z "$trimmed" ] || break
+      printf 'b\n'
+      row=$((row + 1))
+    done
+  fi
 }
 
 fm_composer_classify_screen() {  # <caps> <screen> [cursor_row] [identity]

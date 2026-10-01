@@ -8,8 +8,14 @@
 # idle steer, to submit a long multi-line message and short messages with a
 # paragraph break (helm's text-plus-attachment shape, whose attachment line
 # ends in ` |`) whole, as Claude's own session transcript records it, both
-# idle and while Claude is mid-turn, and to refuse a composer that shows only
-# part of the payload. It fails naming the harness and version rather than
+# idle and while Claude is mid-turn, to submit a message holding a carriage
+# return once and whole, and to refuse a composer that shows only part of the
+# payload. In a pane short enough that Claude's composer scrolls a long
+# message, it requires the proof to type the message again in proven pieces
+# and submit it whole, single-paragraph, multi-paragraph, or holding a
+# carriage return, to refuse a composer whose visible rows are blank lines
+# below a hidden draft, and to clear that draft and a long draft in a narrow
+# pane completely. It fails naming the harness and version rather than
 # degrading quietly.
 #
 # Run explicitly with FM_HERDR_SUBMIT_CONFIRM_LIVE=1 after a Herdr or Claude
@@ -293,6 +299,23 @@ submitted=$(submitted_shape "$msg" "$LATE_TOKEN")
   || fail "Claude Code ($VERSION) on $HERDR_VER: the ${#msg}-char message drawn late was not submitted whole (${submitted:-absent})"
 pass "live Herdr late render: Claude Code ($VERSION) on $HERDR_VER re-reads a ${#msg}-char message drawn 0.8s after the send and submits it whole"
 
+# Carriage returns: Claude reads a CR in a short burst as Enter, which would
+# submit the text before it. The adapter types it as a line break, so the
+# whole message is submitted once, with no partial prompt before it.
+wait_idle 60 || true
+CR_TOKEN="FMCR$$x$RANDOM"
+msg="${CR_TOKEN}A one"$'\r'"${CR_TOKEN}END two."
+[ "$(printf '%s' "$msg" | wc -c)" -lt 56 ] \
+  || fail "the carriage-return case is ${#msg} bytes, too long for Claude to read it as keys, so it would prove nothing"
+verdict=$(fm_backend_herdr_send_text_submit "$TARGET" "$msg" 3 0.4 0.3) \
+  || fail "send_text_submit failed to run the short carriage-return message against Claude Code ($VERSION) on $HERDR_VER"
+[ "$verdict" = empty ] \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: a ${#msg}-char message with a carriage return must confirm empty, got '$verdict'"
+submitted=$(submitted_shape "${msg//$'\r'/$'\n'}" "$CR_TOKEN")
+[ "$submitted" = whole ] \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: the ${#msg}-char carriage-return message was not submitted once whole (${submitted:-absent})"
+pass "live Herdr carriage return: Claude Code ($VERSION) on $HERDR_VER submits a ${#msg}-char message with a carriage return once, whole, with a line break"
+
 # The captain sends from helm while firstmate is mid-turn: the same attachment
 # shape must land in a busy Claude, which queues it, and be submitted whole.
 wait_idle 60 || true
@@ -337,7 +360,7 @@ for part in tail head; do
   lab pane send-text "$PANE" "$typed" >/dev/null \
     || fail "could not type the $part of the truncation probe into the lab composer"
   sleep 0.5
-  content=$(fm_backend_herdr_composer_content "$TARGET" "$(fm_backend_herdr_proof_lines "$cut_msg")") \
+  content=$(fm_backend_herdr_composer_content "$TARGET" "$FM_BACKEND_HERDR_PROOF_CAPTURE_LINES") \
     || fail "Claude Code ($VERSION) on $HERDR_VER: could not read back the composer holding the $part"
   case "$content" in
     *"$typed"*) ;;
@@ -346,9 +369,143 @@ for part in tail head; do
   if fm_backend_herdr_composer_payload_shown "$cut_msg" "$content"; then
     fail "Claude Code ($VERSION) on $HERDR_VER: the payload proof accepted a composer showing only the $part"
   fi
-  fm_backend_herdr_composer_clear "$TARGET" "$cut_msg" \
+  fm_backend_herdr_composer_clear "$TARGET" "$cut_msg" 1 \
     || fail "Claude Code ($VERSION) on $HERDR_VER: could not clear the truncation probe's $part from the composer"
 done
 pass "live Herdr payload proof: Claude Code ($VERSION) on $HERDR_VER refuses a composer showing only the head or only the tail"
+
+# A composer too short for the message (Helm's long captain chat while
+# firstmate sat idle): Claude's fullscreen view caps its composer at about half
+# the pane's rows and scrolls a longer draft, so the read-back shows only the
+# message's last rows. A lab pane has its real size only while a client is
+# attached, so the viewer attaches before the pane is split to about 16 rows,
+# which leaves Claude three composer rows for a message that wraps over five.
+wait_idle 60 || true
+# The viewer runs `herdr --session <name>` from PATH, so it gets the real
+# Herdr rather than this guard's session-checking wrapper.
+env PATH="$ORIGINAL_PATH" "$LAB_HELPER" viewer start "$SESSION" >/dev/null \
+  || fail "could not attach the lab viewer that gives the Claude pane a real size"
+lab pane split "$PANE" --direction down --ratio 0.4 >/dev/null \
+  || fail "could not split the lab pane to shorten Claude's composer"
+rows=''
+i=0
+while [ "$i" -lt 20 ]; do
+  rows=$(lab pane get "$PANE" 2>/dev/null | jq -r '.result.pane.scroll.viewport_rows // empty')
+  case "$rows" in ''|*[!0-9]*) ;; *) [ "$rows" -le 16 ] && break ;; esac
+  i=$((i + 1))
+  sleep 0.5
+done
+case "$rows" in ''|*[!0-9]*) rows=99 ;; esac
+[ "$rows" -le 16 ] || fail "the split lab pane never shrank to 16 rows (viewport rows: $rows)"
+wait_idle 30 || true
+SCROLL_TOKEN="FMSCROLL$$x$RANDOM"
+msg="${SCROLL_TOKEN}END All right. Regarding the stuff you said, waiting on me for number one, look into it. Make sure that he didn't actually do anything, and that we have a better understanding of this situation before I ask anything. For number two and three, elaborate on them with your recommendation and how. Same thing for number five. Reply with only the word OK."
+verdict=$(fm_backend_herdr_send_text_submit "$TARGET" "$msg" 3 0.4 0.3) \
+  || fail "send_text_submit failed to run the scrolled-composer message against Claude Code ($VERSION) on $HERDR_VER"
+[ "$verdict" = empty ] \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: a ${#msg}-char message that Claude's $rows-row pane scrolls in its composer must confirm empty, got '$verdict'"
+scroll_msg=$msg
+submitted=$(submitted_shape "$msg" "$SCROLL_TOKEN")
+[ "$submitted" = whole ] \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: the ${#msg}-char message scrolled in the composer was not submitted whole (${submitted:-absent})"
+pass "live Herdr scrolled composer: Claude Code ($VERSION) on $HERDR_VER types a ${#msg}-char message its $rows-row pane scrolls again in proven pieces and submits it whole"
+
+# The same pane with a multi-paragraph message: blank lines between its
+# paragraphs and list sit at the top of some proof reads.
+wait_idle 60 || true
+PARA2_TOKEN="FMSCROLLPARA$$x$RANDOM"
+msg="Captain notes ${PARA2_TOKEN}END, reply with only OK:"$'\n\n'"first paragraph about the release, which should go out after the review is done and the docs are fixed."$'\n\n'"- item one: rebase the branch"$'\n'"- item two: rerun the checks"$'\n'"- item three: update the report"$'\n\n'"last line, including the docs."
+verdict=$(fm_backend_herdr_send_text_submit "$TARGET" "$msg" 3 0.4 0.3) \
+  || fail "send_text_submit failed to run the scrolled multi-paragraph message against Claude Code ($VERSION) on $HERDR_VER"
+[ "$verdict" = empty ] \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: a ${#msg}-char multi-paragraph message that Claude's $rows-row pane scrolls must confirm empty, got '$verdict'"
+submitted=$(submitted_shape "$msg" "$PARA2_TOKEN")
+[ "$submitted" = whole ] \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: the ${#msg}-char multi-paragraph message scrolled in the composer was not submitted whole (${submitted:-absent})"
+pass "live Herdr scrolled composer: Claude Code ($VERSION) on $HERDR_VER submits a ${#msg}-char multi-paragraph message its $rows-row pane scrolls whole"
+
+# A draft hidden above blank lines: Claude's capped composer shows only the
+# blank rows, so the composer looks empty. The send must be refused before
+# anything is typed, and the Claude-aware clear must then empty the draft.
+wait_idle 60 || true
+HIDDEN_TOKEN="FMHIDDEN$$x$RANDOM"
+hidden="STALE-FRAGMENT ${HIDDEN_TOKEN} rm the release branch"$'\n\n\n\n'
+lab pane send-text "$PANE" "$hidden" >/dev/null \
+  || fail "could not type the hidden draft into the lab composer"
+sleep 0.5
+fm_backend_herdr_composer_view "$TARGET" "$FM_BACKEND_HERDR_PROOF_CAPTURE_LINES" \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: could not read the composer holding the hidden draft"
+[ -z "${FM_BACKEND_HERDR_VIEW_TEXT//[$' \t']/}" ] \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: the $rows-row pane still shows the hidden draft ('$FM_BACKEND_HERDR_VIEW_TEXT'), so this case proves nothing about blank rows"
+HIDDEN_MSG_TOKEN="FMHIDDENMSG$$x$RANDOM"
+verdict=$(fm_backend_herdr_send_text_submit "$TARGET" "${HIDDEN_MSG_TOKEN}END reply with only OK." 3 0.4 0.3 2>"$TMP_ROOT/hidden.err") \
+  || fail "send_text_submit failed to run against the hidden draft in Claude Code ($VERSION) on $HERDR_VER"
+{ [ "$verdict" = send-failed ] && grep -q 'visible rows are blank before typing, so nothing was typed' "$TMP_ROOT/hidden.err"; } \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: a send over a draft hidden above blank rows must be refused before typing, got '$verdict': $(cat "$TMP_ROOT/hidden.err")"
+fm_backend_herdr_composer_clear "$TARGET" "$hidden" 1 \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: could not clear the draft hidden above blank rows"
+{ fm_backend_herdr_composer_view "$TARGET" "$FM_BACKEND_HERDR_PROOF_CAPTURE_LINES" && [ "$FM_BACKEND_HERDR_VIEW_EMPTY" = 1 ]; } \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: the cleared composer does not show one empty row"
+if grep -q "$HIDDEN_TOKEN" "$TRANSCRIPT" 2>/dev/null; then
+  fail "Claude Code ($VERSION) on $HERDR_VER: the hidden draft reached Claude's transcript"
+fi
+pass "live Herdr hidden draft: Claude Code ($VERSION) on $HERDR_VER refuses to type over a draft hidden above blank composer rows in its $rows-row pane and clears it"
+
+# A refused long draft in a narrow pane: Claude's Ctrl+U deletes one wrapped
+# row per press, so the clear needs one press per row the draft really wraps
+# to, more than a 40-characters-per-row estimate allows at this width.
+lab pane split "$PANE" --direction right --ratio 0.35 >/dev/null \
+  || fail "could not split the lab pane to narrow Claude's composer"
+cols=''
+i=0
+while [ "$i" -lt 20 ]; do
+  cols=$(lab pane layout --pane "$PANE" 2>/dev/null | jq -r --arg p "$PANE" '.result.layout.panes[] | select(.pane_id == $p) | .rect.width')
+  case "$cols" in ''|*[!0-9]*) ;; *) [ "$cols" -le 40 ] && break ;; esac
+  i=$((i + 1))
+  sleep 0.5
+done
+case "$cols" in ''|*[!0-9]*) cols=999 ;; esac
+[ "$cols" -le 40 ] || fail "the split lab pane never narrowed to 40 columns (width: $cols)"
+sleep 1
+draft="${scroll_msg} ${scroll_msg}"
+draft=${draft:0:700}
+lab pane send-text "$PANE" "$draft" >/dev/null \
+  || fail "could not type the long draft into the narrow lab composer"
+sleep 0.5
+fm_backend_herdr_composer_clear "$TARGET" "$draft" 1 \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: a ${#draft}-char draft in a $cols-column pane was not cleared back to empty"
+{ fm_backend_herdr_composer_view "$TARGET" "$FM_BACKEND_HERDR_PROOF_CAPTURE_LINES" && [ "$FM_BACKEND_HERDR_VIEW_EMPTY" = 1 ]; } \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: the $cols-column composer still holds part of the cleared draft"
+pass "live Herdr composer clear: Claude Code ($VERSION) on $HERDR_VER clears a ${#draft}-char draft in a $cols-column pane row by row"
+
+# The same narrow pane: the scrolled message is typed again in more, smaller
+# pieces, and must still be submitted whole.
+wait_idle 60 || true
+NARROW_TOKEN="FMNARROW$$x$RANDOM"
+msg="${NARROW_TOKEN}END Make sure that he didn't actually do anything, and that we have a better understanding of this situation before I ask anything. For number two and three, elaborate on them with your recommendation and how. Reply with only the word OK."
+verdict=$(fm_backend_herdr_send_text_submit "$TARGET" "$msg" 3 0.4 0.3) \
+  || fail "send_text_submit failed to run the narrow scrolled message against Claude Code ($VERSION) on $HERDR_VER"
+[ "$verdict" = empty ] \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: a ${#msg}-char message in a $cols-column pane must confirm empty, got '$verdict'"
+submitted=$(submitted_shape "$msg" "$NARROW_TOKEN")
+[ "$submitted" = whole ] \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: the ${#msg}-char message in a $cols-column pane was not submitted whole (${submitted:-absent})"
+pass "live Herdr scrolled composer: Claude Code ($VERSION) on $HERDR_VER submits a ${#msg}-char message whole in a $cols-column pane"
+# The narrow pane with a carriage return in a scrolled message: each piece
+# typed again is a burst of fewer than 30 bytes, where Claude reads a CR as
+# Enter.
+wait_idle 60 || true
+CR2_TOKEN="FMSCROLLCR$$x$RANDOM"
+msg="${CR2_TOKEN}A first part before a bare carriage return, then: ${scroll_msg#* }"$'\r'"${CR2_TOKEN}END SECOND PART AFTER IT, reply with only OK."
+verdict=$(fm_backend_herdr_send_text_submit "$TARGET" "$msg" 3 0.4 0.3) \
+  || fail "send_text_submit failed to run the scrolled carriage-return message against Claude Code ($VERSION) on $HERDR_VER"
+[ "$verdict" = empty ] \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: a ${#msg}-char message with a carriage return in a $cols-column pane must confirm empty, got '$verdict'"
+submitted=$(submitted_shape "${msg//$'\r'/$'\n'}" "$CR2_TOKEN")
+[ "$submitted" = whole ] \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: the ${#msg}-char scrolled carriage-return message was not submitted once whole (${submitted:-absent})"
+pass "live Herdr scrolled composer: Claude Code ($VERSION) on $HERDR_VER submits a ${#msg}-char message with a carriage return a $cols-column pane scrolls once, whole"
+
+env PATH="$ORIGINAL_PATH" "$LAB_HELPER" viewer stop "$SESSION" >/dev/null || true
 
 [ "$CHECKED" -gt 0 ] || fail "FM_HERDR_SUBMIT_CONFIRM_LIVE=1 checked no harness"

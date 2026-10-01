@@ -1244,6 +1244,60 @@ With the single read, the same guard failed:
 not ok - Claude Code (2.1.285 (Claude Code)) on herdr 0.8.2: a 258-char message drawn 0.8s late must confirm empty, got 'send-failed'
 ```
 
+### Scrolled composer
+
+Measured 2026-09-30 against Herdr 0.8.2 and Claude Code 2.1.285 and 2.1.286 in isolated `fm-lab-` sessions with the lab viewer attached, which is what gives a split lab pane its real size.
+
+Claude's fullscreen view caps its composer at `max(3, rows / 2 - 5)` visible rows, as its bundled prompt input computes it, which was 3 visible rows in a 16-row pane.
+It shows the rows around the cursor, which are the draft's last rows while the cursor is at the end, so a message that landed whole reads back as its own end, and the payload proof refused it as a draft that lost its head.
+Helm's 379-character single-paragraph chat message, sent through `bin/fm-send.sh` with an explicit pane target as Helm sends it, exited 1 in a 33-by-16 pane with "after 6 read(s) the Claude composer ... showed 49 of 312 characters of the message", although the whole message was in the composer.
+A 20-row tail capture also cut the top off a composer taller than the capture.
+A draft typed as `STALE-FRAGMENT rm the release branch` followed by four line breaks leaves the 3-row composer showing only blank rows, so a composer whose visible rows are blank is not empty, and a proof that only reads the rows it can see submits such hidden text ahead of the message.
+Claude's Ctrl+U deletes one wrapped row per press, or one line break, and a press on an empty composer does nothing.
+`fm_backend_herdr_composer_retype` in `bin/backends/herdr.sh` clears a draft that reads back as the message's end and types the message again in proven pieces with no cursor movement, `fm_backend_herdr_composer_view` treats only a one-row composer as empty, and `tests/fm-backend-herdr.test.sh` pins the pieces, each proof rule, and the hidden-draft refusal and clear through a stateful composer simulator.
+With the retype, Helm's exact call delivered that message once, byte for byte in Claude's session transcript, with `bin/fm-send.sh` exiting 0, in 12-, 20-, and 33-column panes 37 rows tall and in 94-, 33-, and 20-column panes 14 rows tall, taking 2.2 to 10.1 seconds.
+The live guard above refreshes the Claude proof in a split pane of about 16 rows, and the clear and a delivery in a pane of about 33 columns.
+Observed 2026-09-30 with Claude Code 2.1.286:
+
+```text
+ok - live Herdr scrolled composer: Claude Code (2.1.286 (Claude Code)) on herdr 0.8.2 types a 369-char message its 14-row pane scrolls again in proven pieces and submits it whole
+ok - live Herdr scrolled composer: Claude Code (2.1.286 (Claude Code)) on herdr 0.8.2 submits a 289-char multi-paragraph message its 14-row pane scrolls whole
+ok - live Herdr hidden draft: Claude Code (2.1.286 (Claude Code)) on herdr 0.8.2 refuses to type over a draft hidden above blank composer rows in its 14-row pane and clears it
+ok - live Herdr composer clear: Claude Code (2.1.286 (Claude Code)) on herdr 0.8.2 clears a 700-char draft in a 33-column pane row by row
+ok - live Herdr scrolled composer: Claude Code (2.1.286 (Claude Code)) on herdr 0.8.2 submits a 255-char message whole in a 33-column pane
+```
+
+With the pre-fix proof, the same guard failed:
+
+```text
+not ok - Claude Code (2.1.285 (Claude Code)) on herdr 0.8.2: a 369-char message that Claude's 14-row pane scrolls in its composer must confirm empty, got 'send-failed'
+```
+
+### Carriage returns and tabs in Claude text
+
+Measured 2026-09-30 against Herdr 0.8.2 and Claude Code 2.1.286 in isolated `fm-lab-` sessions, typing raw `pane send-text` bursts into an empty composer and reading Claude's session transcript.
+
+Claude reads a short burst as keys and a longer one as a paste.
+A carriage return in bursts of 10, 28, and 56 to 62 bytes submitted the text before it as a prompt, and so did one in a 12-byte CRLF burst.
+In bursts of 64, 117, 242, and 456 bytes it stayed in the draft as a line break, and a line feed stayed a line break in a 10-byte burst.
+A tab in a 10-byte burst typed nothing, while in a 78-byte burst it arrived as a space.
+Every piece `fm_backend_herdr_composer_retype` types is such a short burst, so a message holding a carriage return that the composer scrolled submitted the part before it mid-retype while the send reported `send-failed`, and a short message holding one was cut at it the same way.
+`fm_backend_herdr_send_text_submit` in `bin/backends/herdr.sh` now types every CRLF pair and lone carriage return to a Claude pane as a line break, and refuses to type a scrolled message holding a tab or another control character again in pieces; `tests/fm-backend-herdr.test.sh` pins both through the composer simulator, which reads typed text shorter than 64 bytes as keys.
+The live guard above refreshes this with a short message and with a message scrolled in a 33-column pane, each holding a carriage return.
+Observed 2026-09-30:
+
+```text
+ok - live Herdr carriage return: Claude Code (2.1.286 (Claude Code)) on herdr 0.8.2 submits a 44-char message with a carriage return once, whole, with a line break
+ok - live Herdr scrolled composer: Claude Code (2.1.286 (Claude Code)) on herdr 0.8.2 submits a 485-char message with a carriage return a 33-column pane scrolls once, whole
+```
+
+With the carriage return typed as a key, the same guard failed:
+
+```text
+warning: herdr: after 1 read(s) the Claude composer in w1:p1 showed only the last 20 of 37 characters of the message, and typing it again in pieces proved only the first 14, so Enter was not pressed
+not ok - Claude Code (2.1.286 (Claude Code)) on herdr 0.8.2: a 40-char message with a carriage return must confirm empty, got 'send-failed'
+```
+
 ### Prune and respawn
 
 The real label-collision reproduction is owned by:
