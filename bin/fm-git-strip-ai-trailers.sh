@@ -20,7 +20,11 @@
 #       inherits it) carries the override there, and a lookup that honored it
 #       would find this directory again and never run the repository's own
 #       hook - a skipped pre-push guard. A lookup that fails exits nonzero
-#       rather than skipping the repository's hook. Does not touch the
+#       rather than skipping the repository's hook. When the repository sets
+#       core.hooksPath but that directory is missing (a husky prepare that never
+#       ran), the pre-commit, pre-merge-commit, and pre-push wrappers each print
+#       one warning to stderr and let the operation proceed, because git itself
+#       would skip the hook silently. Does not touch the
 #       project's git config; the caller prefixes the pane with
 #       GIT_CONFIG_COUNT / GIT_CONFIG_KEY_0 / GIT_CONFIG_VALUE_0.
 #
@@ -154,8 +158,13 @@ write_executable() {
 # core.hooksPath; only the repository's config files name its own hooks. Skip
 # when the lookup still names this launch's own hooks dir, meaning those files
 # point here, so the wrapper cannot recurse into itself.
+# Pass warn as the second argument for the one gate hook each commit, merge, or
+# push fires first; its wrapper then prints one warning when the repository
+# configures core.hooksPath but that directory does not exist. Git itself skips
+# a missing hooks directory silently, which hid a project whose hook manager
+# (husky's prepare script) never installed in that checkout.
 runtime_chain_body() {
-  local ours=$1
+  local ours=$1 warn=${2:-}
   cat <<EOF
 unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
 ours=$(quote_for_hook "$ours")
@@ -167,6 +176,15 @@ orig=\$(unset GIT_CONFIG_PARAMETERS; git rev-parse --path-format=absolute --git-
 if [ "\$orig" = "\$ours" ]; then
   exit 0
 fi
+EOF
+  if [ "$warn" = warn ]; then
+    cat <<'EOF'
+if [ ! -d "$orig" ] && configured=$(unset GIT_CONFIG_PARAMETERS; git config --get core.hooksPath); then
+  echo "fm-git-strip-ai-trailers: warning: this repository sets core.hooksPath=$configured but $orig does not exist, so its $name hook did not run; install the project's hook manager (for husky, run the project's install so its prepare script runs)" >&2
+fi
+EOF
+  fi
+  cat <<EOF
 if [ -x "\$orig/\$name" ]; then
   exec "\$orig/\$name" "\$@"
 fi
@@ -202,7 +220,7 @@ pre-merge-commit prepare-commit-msg post-commit pre-rebase post-checkout
 post-merge pre-push post-rewrite pre-auto-gc sendemail-validate'
 
 install_hooks() {
-  local hooks_dir=$1 wt=$2 name
+  local hooks_dir=$1 wt=$2 name warn
   [ -n "$hooks_dir" ] && [ -n "$wt" ] || usage
   [ -d "$wt" ] || {
     echo "error: worktree is not a directory: $wt" >&2
@@ -226,10 +244,14 @@ $(runtime_chain_body "$hooks_dir")
 EOF
 
   for name in $FM_GIT_CLIENT_HOOKS; do
+    case "$name" in
+    pre-commit | pre-merge-commit | pre-push) warn=warn ;;
+    *) warn= ;;
+    esac
     write_executable "$hooks_dir/$name" <<EOF
 #!/usr/bin/env bash
 set -u
-$(runtime_chain_body "$hooks_dir")
+$(runtime_chain_body "$hooks_dir" "$warn")
 EOF
   done
   chmod 500 "$hooks_dir"

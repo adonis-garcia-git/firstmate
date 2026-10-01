@@ -215,6 +215,66 @@ test_project_hook_generated_after_install_still_runs() {
   pass "a project hook that appears after install still runs for the rest of the task"
 }
 
+# A fleet task copy is a linked worktree sharing the main clone's config, so a
+# relative core.hooksPath set once there names a different directory in each
+# copy, and only copies whose hook manager installed have it. Each copy must
+# run its own installed hook, and a copy without one must say so on stderr
+# instead of committing as silently as git alone would.
+test_linked_worktree_runs_its_own_hooks_or_warns() {
+  local main installed missing err
+  main="$TMP_ROOT/linked-main"
+  installed="$TMP_ROOT/linked-installed"
+  missing="$TMP_ROOT/linked-missing"
+  make_repo "$main"
+  git -C "$main" config core.hooksPath .husky/_
+  git -C "$main" worktree add -q --detach "$installed"
+  git -C "$main" worktree add -q --detach "$missing"
+  mkdir -p "$installed/.husky/_"
+  write_marker_hook "$installed/.husky/_/pre-commit" installed-pre-commit
+  "$STRIP" install "$TMP_ROOT/hooks-linked-installed" "$installed" || fail "install should succeed in a linked worktree"
+  "$STRIP" install "$TMP_ROOT/hooks-linked-missing" "$missing" || fail "install should succeed in a linked worktree"
+
+  err=$(with_hooks_env "$TMP_ROOT/hooks-linked-installed" git -C "$installed" commit -q --allow-empty -m 'fix: installed' 2>&1) ||
+    fail "commit in the installed linked worktree failed: $err"
+  [ -f "$installed/installed-pre-commit.ran" ] || fail "the linked worktree's own husky pre-commit did not run"
+  assert_not_contains "$err" "warning" "a linked worktree with its hooks installed printed a warning"
+
+  err=$(with_hooks_env "$TMP_ROOT/hooks-linked-missing" git -C "$missing" commit -q --allow-empty -m 'fix: missing' 2>&1) ||
+    fail "a missing hooks directory must not block the commit: $err"
+  [ -f "$missing/installed-pre-commit.ran" ] && fail "another worktree's hook ran in the copy without its own"
+  assert_contains "$err" "core.hooksPath=.husky/_" "the missing-hooks warning did not name the configured path"
+  assert_contains "$err" "$missing/.husky/_ does not exist" "the missing-hooks warning did not name the resolved directory"
+  [ "$(printf '%s\n' "$err" | grep -c 'warning')" -eq 1 ] || fail "expected exactly one warning per commit, got: $err"
+  pass "each linked worktree runs its own configured hooks, and one without them warns once"
+}
+
+test_missing_hookspath_warns_on_push() {
+  local repo remote err
+  repo="$TMP_ROOT/push-missing"
+  remote="$TMP_ROOT/push-missing.git"
+  make_repo "$repo"
+  git init -q --bare "$remote"
+  git -C "$repo" remote add origin "$remote"
+  git -C "$repo" config core.hooksPath .husky/_
+  "$STRIP" install "$TMP_ROOT/hooks-push-missing" "$repo" || fail "install should succeed"
+  err=$(with_hooks_env "$TMP_ROOT/hooks-push-missing" git -C "$repo" push -q origin HEAD:refs/heads/main 2>&1) ||
+    fail "a missing hooks directory must not block the push: $err"
+  [ "$(printf '%s\n' "$err" | grep -c 'its pre-push hook did not run')" -eq 1 ] || fail "expected one pre-push warning, got: $err"
+  pass "a push with a configured but missing hooks directory warns once"
+}
+
+test_unset_hookspath_does_not_warn() {
+  local repo err
+  repo="$TMP_ROOT/default-hooks"
+  make_repo "$repo"
+  rm -rf "$repo/.git/hooks"
+  "$STRIP" install "$TMP_ROOT/hooks-default" "$repo" || fail "install should succeed"
+  err=$(with_hooks_env "$TMP_ROOT/hooks-default" git -C "$repo" commit -q --allow-empty -m 'fix: default hooks' 2>&1) ||
+    fail "commit failed: $err"
+  assert_not_contains "$err" "warning" "a repository with no core.hooksPath warned about its default hooks directory"
+  pass "a repository without core.hooksPath commits without a warning"
+}
+
 test_pane_hookspath_does_not_reroute_another_repository() {
   local repo other hooks
   repo="$TMP_ROOT/task-wt"
@@ -310,6 +370,9 @@ test_previous_commit_msg_hook_still_runs
 test_relative_project_hookspath_still_runs
 test_inherited_hookspath_env_does_not_decide_the_chain
 test_project_hook_generated_after_install_still_runs
+test_linked_worktree_runs_its_own_hooks_or_warns
+test_missing_hookspath_warns_on_push
+test_unset_hookspath_does_not_warn
 test_pane_hookspath_does_not_reroute_another_repository
 test_repository_pre_push_runs_on_every_override_channel
 test_git_c_override_still_strips_and_chains_commit_hooks
