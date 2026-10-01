@@ -339,8 +339,9 @@
 #   malformed, the root is unusable, or the runner's own check says it is not
 #   signed in. config/claude-account may declare several named Claude
 #   accounts; a Claude launch then takes --account <name> when given, a
-#   relaunch the Claude account its task record names, and otherwise the
-#   declared account with the most weighted remaining quota. A pinned Claude
+#   relaunch the named account its task record names while it is still
+#   declared, signed in, and not exhausted_now, and otherwise the declared
+#   account with the most weighted remaining quota. A pinned Claude
 #   launch sheds the environment credentials Claude ranks above the root's
 #   login; a pinned Pi launch needs --model <provider>/<id> for a declared
 #   provider and also carries --provider, and a raw Pi command refuses. The
@@ -2420,7 +2421,8 @@ fi
 # Worker account pin (header above): resolved before any endpoint, worktree, or
 # record exists. An absent pin selects nothing and leaves every later launch
 # step exactly as it was. A relaunch hands the library the account its own
-# record names, so the replacement keeps it unless --account moves it. A
+# record names, which the replacement keeps only while it is still declared,
+# signed in, and not exhausted_now, unless --account moves it. A
 # pinned Claude root is exported here as well, so the trust registration below
 # writes the store the worker will actually read.
 RAW_COMMAND=

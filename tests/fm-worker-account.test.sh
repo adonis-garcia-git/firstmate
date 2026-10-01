@@ -539,6 +539,78 @@ test_explicit_account_and_named_file_refusals() {
   pass "undeclared, misdirected, and unnamed --account values, raw overrides, and malformed named lines refuse; one named account needs no quota"
 }
 
+# select_recorded <account> <root>: the launch-time selection a relaunch makes
+# for a task whose record names that Claude account, run through the library
+# with the case's fakes and its own user home.
+select_recorded() {
+  (
+    PATH="$FAKEBIN:$PATH" HOME="$HOME_DIR/user-home"
+    # shellcheck source=bin/fm-worker-account-lib.sh
+    . "$ROOT/bin/fm-worker-account-lib.sh"
+    fm_worker_account_select claude "$HOME_DIR/config" "" claude "" "" "$1" "$2" ""
+  ) 2>&1
+}
+
+test_recorded_named_account_is_kept_only_while_usable() {
+  local out rc
+  new_case recorded claude
+  signed_in_claude_root "$CASE/one"
+  signed_in_claude_root "$CASE/two"
+  named_accounts "one | $CASE/one | 1" "two | $CASE/two | 1"
+  quota_reading "$CASE/one" "40 40 40"
+  quota_reading "$CASE/two" "90 90 90"
+  out=$(select_recorded one "$CASE/one"); rc=$?
+  expect_code 0 "$rc" "a usable recorded account should be selected: $out"
+  [ "$out" = "$CASE/one"$'\t'"$CASE/one"$'\t\t'"one"$'\t'"recorded" ] ||
+    fail "a recorded account with quota must keep the worker even when another has more: $out"
+
+  quota_reading "$CASE/one" "unreadable keychain_prompt_required"
+  out=$(select_recorded one "$CASE/one"); rc=$?
+  expect_code 0 "$rc" "an unreadable recorded reading should still select: $out"
+  assert_contains "$out" "one"$'\t'"recorded" "an unreadable quota reading is not evidence of exhaustion"
+
+  quota_reading "$CASE/one" "0 0 70 exhausted_now"
+  out=$(select_recorded one "$CASE/one"); rc=$?
+  expect_code 0 "$rc" "a 5-hour-exhausted recorded account should yield: $out"
+  assert_contains "$out" "notice: moving this worker off its recorded Claude account one, which is exhausted_now on the 5-hour window (session 0%, week 70%)" \
+    "the notice should name the recorded account and the exhausted window"
+  assert_contains "$out" "two"$'\t'"quota" "the weighted choice should take the worker"
+
+  quota_reading "$CASE/one" "0 30 0 exhausted_now"
+  out=$(select_recorded one "$CASE/one"); rc=$?
+  expect_code 0 "$rc" "a weekly-exhausted recorded account should yield: $out"
+  assert_contains "$out" "which is exhausted_now on the weekly window (session 30%, week 0%)" "the notice should name the weekly window"
+  assert_contains "$out" "two"$'\t'"quota" "the weighted choice should take the worker"
+
+  quota_reading "$CASE/one" "40 40 40"
+  rm "$CASE/one/.credentials.json"
+  out=$(select_recorded one "$CASE/one"); rc=$?
+  expect_code 0 "$rc" "a signed-out recorded account should yield: $out"
+  assert_contains "$out" "account one, which is not signed in" "the notice should say the recorded account is signed out"
+  assert_contains "$out" "two"$'\t'"quota" "the weighted choice should take the worker"
+
+  signed_in_claude_root "$CASE/one"
+  out=$(select_recorded gone "$CASE/gone"); rc=$?
+  expect_code 0 "$rc" "an undeclared recorded account should yield: $out"
+  assert_contains "$out" "account gone, which is no longer declared by name in config/claude-account" \
+    "the notice should say the recorded account is no longer declared"
+  assert_contains "$out" "two"$'\t'"quota" "the weighted choice should take the worker"
+
+  printf '%s\n' "$CASE/two" > "$HOME_DIR/config/claude-account"
+  out=$(select_recorded "$CASE/one" ""); rc=$?
+  expect_code 0 "$rc" "an unnamed recorded root under a single-line pin should select the pin: $out"
+  [ "$out" = "$CASE/two"$'\t'"$CASE/two"$'\t\t\t'"pin" ] || fail "a single-line pin must replace an older recorded root: $out"
+  out=$(select_recorded one "$CASE/one"); rc=$?
+  assert_contains "$out" "account one, which is no longer declared by name" "a single-line pin declares no named account"
+  [ "$(printf '%s\n' "$out" | tail -1)" = "$CASE/two"$'\t'"$CASE/two"$'\t\t\t'"pin" ] || fail "a single-line pin must replace a recorded named account: $out"
+
+  rm "$HOME_DIR/config/claude-account" "$CASE/one/.credentials.json"
+  out=$(select_recorded "$CASE/one" ""); rc=$?
+  expect_code 0 "$rc" "a recorded root with no file should select the ambient account: $out"
+  [ -z "$out" ] || fail "with no file a relaunch must launch like any unpinned launch, not on its recorded root: $out"
+  pass "a recorded named account is kept only while declared, signed in, and not exhausted_now; an unnamed root never is"
+}
+
 test_absent_pin_keeps_the_launch_unchanged
 test_claude_pin_selects_the_root_and_sheds_ambient_credentials
 test_claude_pin_refuses_a_signed_out_root_despite_an_ambient_login
@@ -555,5 +627,6 @@ test_local_secondmate_reads_the_launching_home_pin
 test_named_accounts_choose_the_most_weighted_remaining_quota
 test_named_accounts_skip_an_account_that_cannot_take_the_worker
 test_explicit_account_and_named_file_refusals
+test_recorded_named_account_is_kept_only_while_usable
 
 echo "# all fm-worker-account tests passed"

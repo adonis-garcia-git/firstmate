@@ -75,12 +75,12 @@
 #              A replacement Claude or Pi profile must also pass this home's
 #              worker account pin (bin/fm-worker-account-lib.sh) here, so a pin
 #              that no longer resolves or is signed out refuses before the old
-#              agent stops. A Claude replacement stays on the Claude account
-#              its task record names, never the home's current choice, unless
-#              --account names another declared account; a task whose record
-#              names none takes the home's selection, and an account chosen
-#              here by quota is handed to the launch as --account so it is
-#              not chosen twice.
+#              agent stops. A Claude replacement stays on the named Claude
+#              account its task record names while that account is still
+#              declared, signed in, and not exhausted_now, unless --account
+#              names another declared account; otherwise it takes the home's
+#              selection. The named account chosen here is handed to the
+#              launch as --account so it is not chosen twice.
 #              --note is required for a ship or scout, whose replacement
 #              inherits the local copy but none of the conversation; a
 #              secondmate reconciles its own home's records at startup, so its
@@ -865,15 +865,14 @@ resolve_relaunch_profile() {
   # The launch owner applies this home's worker account pin too, but only after
   # the old agent has been stopped, so a pin that no longer resolves or is
   # signed out must refuse here, while nothing has changed yet. It sees the
-  # same explicit and recorded account the launch owner will, and an account
-  # chosen by quota is passed on so the launch cannot choose differently.
+  # same explicit and recorded account the launch owner will, and the named
+  # account chosen here is passed on so the launch cannot choose differently.
   local account_model=$TARGET_MODEL selection
   [ "$account_model" != default ] || account_model=
   selection=$(fm_worker_account_select "$TARGET_HARNESS" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" \
     "$account_model" "$TARGET_HARNESS" "" "$NEW_ACCOUNT" "$(fm_meta_get "$META" account)" \
     "$(fm_meta_get "$META" account_root)" "$(fm_meta_get "$META" account_provider)") || return 1
-  TARGET_ACCOUNT=$(printf '%s\n' "$selection" | awk -F '\t' '$5 == "quota" { print $4 }')
-  [ -n "$TARGET_ACCOUNT" ] || TARGET_ACCOUNT=$NEW_ACCOUNT
+  TARGET_ACCOUNT=$(printf '%s\n' "$selection" | awk -F '\t' '{ print $4 }')
 }
 
 # safe_checkpoint: prove, before anything is stopped, that the work a relaunch

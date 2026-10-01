@@ -31,11 +31,15 @@
 # and 6.25 for a Team Premium seat, each a multiple of Pro). A Claude launch
 # selects its account in this order:
 #   1. an explicit --account <name>, which must name a declared account;
-#   2. on a relaunch, the Claude account the task's own record names
-#      (account=, plus account_root= for a named account; a record that also
-#      carries account_provider= names a Pi account and is ignored here), so a
-#      replacement stays on the account its worker used even after the file
-#      changes;
+#   2. on a relaunch, the named Claude account the task's own record names
+#      (account= plus account_root=), while it is still declared by name, its
+#      root is usable, it is signed in, and, when another account is
+#      declared, quota-axi does not read it as exhausted_now on the 5-hour or
+#      weekly window; an unreadable reading keeps it. Otherwise one notice
+#      names the account and why the worker moves off it, and selection
+#      continues below. A recorded unnamed root and a Pi record
+#      (account_provider=) are never kept, so with no file a relaunch takes
+#      the ambient account and with a single-line pin the current pin;
 #   3. the only declared account (either form);
 #   4. among several declared accounts, the one with the most weighted
 #      remaining quota: weight x quota-axi's all-models effectivePercentRemaining,
@@ -453,11 +457,46 @@ fm_worker_account_claude_choose() {
   printf '%s\n' "$chosen"
 }
 
+# fm_worker_account_claude_recorded_reason <executable> <declared-lines> <recorded-name>
+# Step 2 of the header's selection order. Prints nothing when the recorded
+# named account may keep the worker: it is still declared by name, its root is
+# usable, it is signed in, and, when another account is declared, its quota
+# reading is not exhausted_now. Otherwise prints why the worker moves off it.
+# An unreadable quota reading is not evidence of exhaustion.
+fm_worker_account_claude_recorded_reason() {
+  local executable=$1 lines=$2 rec=$3 line declared root reading kind pct runway session weekly
+  line=$(printf '%s\n' "$lines" | awk -F '\t' -v n="$rec" '$1 != "" && $1 == n { print; exit }')
+  if [ -z "$line" ]; then
+    echo "is no longer declared by name in config/claude-account"
+    return 0
+  fi
+  declared=${line#*$'\t'}
+  declared=${declared%%$'\t'*}
+  if ! root=$(fm_worker_account_root claude "$declared"); then
+    echo "names $root, which is not a readable, searchable existing directory"
+    return 0
+  fi
+  if ! fm_worker_account_check claude "$declared" "$root" "$executable" 2>/dev/null; then
+    echo "is not signed in (claude auth status)"
+    return 0
+  fi
+  [ "$(printf '%s\n' "$lines" | awk 'END { print NR }')" -gt 1 ] && command -v quota-axi >/dev/null 2>&1 || return 0
+  reading=$(fm_worker_account_claude_quota "$root")
+  [ "${reading%%$'\t'*}" = known ] || return 0
+  IFS=$'\t' read -r kind pct runway session weekly <<<"$reading"
+  LC_ALL=C awk -v r="$runway" -v p="$pct" -v s="$session" -v w="$weekly" 'BEGIN {
+    if (r != "exhausted_now" && p + 0 > 0) exit
+    if (w == "?" || (s != "?" && s + 0 <= w + 0)) win = "5-hour"
+    else win = "weekly"
+    printf "is exhausted_now on the %s window (session %s%%, week %s%%)\n", win, s, w
+  }'
+}
+
 # fm_worker_account_select_claude <config-dir> <executable> <raw-command> <account> <recorded-account> <recorded-account-root> <recorded-account-provider>
 # fm_worker_account_select's Claude branch; see that function and the header.
 fm_worker_account_select_claude() {
   local config=$1 executable=$2 raw=$3 explicit=$4 rec_account=$5 rec_root=$6 rec_provider=$7
-  local cfg="$config/claude-account" list line name declared root how label names
+  local cfg="$config/claude-account" list line name declared root how label names reason
   list=$(fm_worker_account_declared claude "$config") || return 1
   if [ -n "$explicit" ]; then
     line=$(printf '%s\n' "$list" | awk -F '\t' -v n="$explicit" '$1 != "" && $1 == n { print; exit }')
@@ -466,50 +505,48 @@ fm_worker_account_select_claude() {
       if [ -n "$names" ]; then
         echo "error: --account '$explicit' is not one of the Claude accounts config/claude-account declares ($names)" >&2
       else
-        echo "error: --account '$explicit' names a Claude account, but config/claude-account declares none by name; declare each account as a '<name> | <root> | <weight>' line" >&2
+        echo "error: --account '$explicit' names a Claude account, but config/claude-account declares none by name; drop --account, or declare each account as a '<name> | <root> | <weight>' line" >&2
       fi
       return 1
     fi
     how=explicit
-  elif [ -n "$rec_account" ] && [ -z "$rec_provider" ]; then
-    if [ -n "$rec_root" ]; then
-      line=$rec_account$'\t'$rec_root$'\t'
-    else
-      line=$'\t'$rec_account$'\t'
-    fi
-    how=recorded
-  elif [ -z "$list" ]; then
-    return 0
-  elif [ "$(printf '%s\n' "$list" | awk 'END { print NR }')" -gt 1 ]; then
-    fm_worker_account_claude_raw_guard "$raw" || return 1
-    line=$(fm_worker_account_claude_choose "$executable" "$list") || return 1
-    name=${line%%$'\t'*}
-    declared=${line#*$'\t'}
-    root=${declared#*$'\t'}
-    declared=${declared%%$'\t'*}
-    printf '%s\t%s\t\t%s\tquota\n' "$declared" "$root" "$name"
-    return 0
   else
+    if [ -n "$rec_account" ] && [ -n "$rec_root" ] && [ -z "$rec_provider" ]; then
+      reason=$(fm_worker_account_claude_recorded_reason "$executable" "$list" "$rec_account")
+      if [ -z "$reason" ]; then
+        line=$(printf '%s\n' "$list" | awk -F '\t' -v n="$rec_account" '$1 == n { print; exit }')
+        declared=${line#*$'\t'}
+        declared=${declared%%$'\t'*}
+        root=$(fm_worker_account_root claude "$declared")
+        fm_worker_account_claude_raw_guard "$raw" || return 1
+        printf '%s\t%s\t\t%s\trecorded\n' "$declared" "$root" "$rec_account"
+        return 0
+      fi
+      echo "notice: moving this worker off its recorded Claude account $rec_account, which $reason" >&2
+    fi
+    if [ -z "$list" ]; then
+      return 0
+    elif [ "$(printf '%s\n' "$list" | awk 'END { print NR }')" -gt 1 ]; then
+      fm_worker_account_claude_raw_guard "$raw" || return 1
+      line=$(fm_worker_account_claude_choose "$executable" "$list") || return 1
+      name=${line%%$'\t'*}
+      declared=${line#*$'\t'}
+      root=${declared#*$'\t'}
+      declared=${declared%%$'\t'*}
+      printf '%s\t%s\t\t%s\tquota\n' "$declared" "$root" "$name"
+      return 0
+    fi
     line=$list
     how=pin
   fi
   name=${line%%$'\t'*}
   declared=${line#*$'\t'}
   declared=${declared%%$'\t'*}
-  case "$declared" in
-  ordinary | /*) ;;
-  *)
-    echo "error: the task record names Claude account '$declared', which is neither ordinary nor an absolute path; pass --account <name> to choose a declared account" >&2
-    return 1
-    ;;
-  esac
   label=$declared
   [ -z "$name" ] || label="$name ($declared)"
   fm_worker_account_claude_raw_guard "$raw" || return 1
   if ! root=$(fm_worker_account_root claude "$declared"); then
-    if [ "$how" = recorded ]; then
-      echo "error: the task record's Claude account $label names $root, which is not a readable, searchable existing directory; pass --account <name> to move the worker to a declared account" >&2
-    elif [ -n "$name" ]; then
+    if [ -n "$name" ]; then
       echo "error: config/claude-account account $name names $root, which is not a readable, searchable existing directory: $cfg" >&2
     else
       # shellcheck disable=SC2088  # The fallback is literal text for the refusal.
@@ -520,11 +557,7 @@ fm_worker_account_select_claude() {
   if [ "$how" = pin ]; then
     fm_worker_account_check claude "$declared" "$root" "$executable" || return 1
   elif ! fm_worker_account_check claude "$declared" "$root" "$executable" 2>/dev/null; then
-    if [ "$how" = recorded ]; then
-      echo "error: the task record's Claude account $label is not signed in (claude auth status); sign in with $(fm_worker_account_claude_hint "$root") claude, then /login, or pass --account <name> to move the worker to another declared account" >&2
-    else
-      echo "error: --account '$name' selects Claude account $declared, which is not signed in (claude auth status); sign in with $(fm_worker_account_claude_hint "$root") claude, then /login" >&2
-    fi
+    echo "error: --account '$name' selects Claude account $label, which is not signed in (claude auth status); sign in with $(fm_worker_account_claude_hint "$root") claude, then /login" >&2
     return 1
   fi
   printf '%s\t%s\t\t%s\t%s\n' "$declared" "$root" "$name" "$how"
