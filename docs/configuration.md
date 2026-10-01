@@ -990,6 +990,7 @@ Every fleet launch, Claude included, also receives a pane-scoped `GIT_CONFIG` `c
 `bin/fm-git-strip-ai-trailers.sh` owns the identities, the install, and chaining the hooks of whichever repository git is running in, including when `git -c core.hooksPath` supplies the pane's hook override, so a project hook such as husky still runs.
 If the wrapper cannot resolve that repository's hooks directory, the git operation fails rather than silently skipping a project hook such as a pre-push guard.
 That directory is read-only, so a hook manager run inside a fleet pane (lefthook's npm postinstall, `pre-commit install`) fails instead of displacing the strip; install a project's hooks from outside the pane, where the wrappers chain them.
+If the repository sets `core.hooksPath` but that directory is missing (for example husky's prepare script never ran in that checkout), the `pre-commit`, `pre-merge-commit`, and `pre-push` wrappers print one stderr warning and let the operation proceed, as git itself would, so run the project's hook-manager install to restore its hooks.
 Per-machine Cursor `cli-config.json` attribution-off is not this contract: it does not travel with Firstmate, defaults back to on when unset, and only feeds the CLI's request to the server, so it suppresses the trailer rather than preventing it.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
