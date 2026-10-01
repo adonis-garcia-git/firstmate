@@ -617,6 +617,39 @@ skip-runner: pi-signed is not installed, so its pin check was not exercised
 
 The guard submits no prompt and spends no tokens, so it runs by default wherever a runner is installed; rerun it after every Claude or Pi upgrade.
 
+### Per-account Claude quota read
+
+Choosing among several declared Claude accounts reads each root's quota from quota-axi's JSON, under only that root's `CLAUDE_CONFIG_DIR` in the same cleared environment.
+The same guard asks the real quota-axi about an empty root under the throwaway `HOME`: its answer must validate as a quota snapshot and read as unreadable, so neither a schema drift nor another account's reading can pass for that root.
+
+Verified 2026-10-01 on Claude Code 2.1.287 and quota-axi 0.1.55 on macOS; pi and pi-signed were not installed.
+
+```sh
+bash tests/fm-worker-account-live-e2e.test.sh
+```
+
+```
+ok - claude 2.1.287 (Claude Code): the pin check accepts a signed-in root and refuses an empty one despite an ambient API key
+skip-runner: pi is not installed, so its pin check was not exercised
+skip-runner: pi-signed is not installed, so its pin check was not exercised
+ok - quota-axi 0.1.55: an empty Claude root reads as unreadable in a valid snapshot (credentials_missing), never as another account's quota
+# worker account live guard checked: claude quota-axi
+```
+
+The positive read needs a real login, so it is not in the guard.
+On the same Mac, a signed-in `ordinary` root and a signed-in non-default root whose macOS Keychain entry quota-axi had not yet been approved to read answered:
+
+```sh
+bash -c '. bin/fm-worker-account-lib.sh; fm_worker_account_claude_quota ""; fm_worker_account_claude_quota "$HOME/.claude-work"'
+```
+
+```
+known	78	through_reset	88	78
+unreadable	keychain_prompt_required	quota-axi --allow-keychain-prompt
+```
+
+Rerun the guard after every quota-axi upgrade.
+
 ## Codex hook trust
 
 Verified 2026-09-16 on codex-cli 0.151.0, macOS arm64, in a fresh linked worktree of this repository.

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Default-on live guard for the worker account pin's sign-in check
-# (bin/fm-worker-account-lib.sh) against every installed runner it supports.
+# (bin/fm-worker-account-lib.sh) against every installed runner it supports,
+# and for the per-account Claude quota read against the installed quota-axi.
 #
 # The check's verdict comes from vendor output - the exit status of
 # `claude auth status`, the JSON of `pi auth check`, and the table of
@@ -12,6 +13,9 @@
 # it depends on: the same runner, with a credential variable left in its
 # environment, answers signed in, so the refusal is the check's own cleared
 # environment at work rather than a root the runner could never accept.
+# The quota case asks the real quota-axi about an empty Claude root: its
+# answer must validate as a quota snapshot and read as unreadable, so neither
+# a schema drift nor another account's reading can pass for that root.
 #
 # It submits no prompt and spends no tokens, so the shared live gate runs it by
 # default wherever a runner is installed. Run it after every Claude or Pi
@@ -111,22 +115,41 @@ pi_live_cases() {
   CHECKED="$CHECKED $exe"
 }
 
-for runner in claude pi pi-signed; do
+claude_quota_live_case() {
+  local version empty reading
+  version=$(quota-axi --version 2>/dev/null | head -1)
+  empty="$TMP_ROOT/claude-quota-empty"
+  mkdir -p "$empty"
+  reading=$(fm_worker_account_claude_quota "$empty")
+  case "$reading" in
+    unreadable$'\t'"quota-axi printed no valid quota snapshot"*)
+      fail "quota-axi $version: its answer for an empty Claude root no longer validates as a quota snapshot ($reading); revisit fm_worker_account_claude_quota"
+      ;;
+    unreadable$'\t'*) ;;
+    *) fail "quota-axi $version: an empty Claude root read as quota ($reading), so another account answered for it" ;;
+  esac
+  reading=${reading#unreadable$'\t'}
+  pass "quota-axi $version: an empty Claude root reads as unreadable in a valid snapshot (${reading%%$'\t'*}), never as another account's quota"
+  CHECKED="$CHECKED quota-axi"
+}
+
+for runner in claude pi pi-signed quota-axi; do
   if ! command -v "$runner" >/dev/null 2>&1; then
     printf 'skip-runner: %s is not installed, so its pin check was not exercised\n' "$runner"
     continue
   fi
   case "$runner" in
     claude) claude_live_cases ;;
+    quota-axi) claude_quota_live_case ;;
     *) pi_live_cases "$runner" ;;
   esac
 done
 
 if [ -z "$CHECKED" ]; then
   if [ "${FM_WORKER_ACCOUNT_LIVE_E2E:-${FM_LIVE:-}}" = 1 ]; then
-    fail "the worker account live guard was requested but no supported runner (claude, pi, pi-signed) is installed"
+    fail "the worker account live guard was requested but no supported runner (claude, pi, pi-signed, quota-axi) is installed"
   fi
-  echo "skip: live: no supported runner (claude, pi, pi-signed) installed"
+  echo "skip: live: no supported runner (claude, pi, pi-signed, quota-axi) installed"
   exit 0
 fi
 echo "# worker account live guard checked:$CHECKED"
