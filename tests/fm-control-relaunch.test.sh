@@ -915,6 +915,15 @@ test_relaunch_keeps_a_recorded_named_account_only_while_usable() {
   [ "$(meta_field "$dir" "$id" account)" = three ] || fail "a recorded account no longer declared must yield"
   assert_contains "$out" "notice: moving this worker off its recorded Claude account two, which is no longer declared by name in config/claude-account" \
     "the notice should say the recorded account is no longer declared"
+
+  printf '%s\n' "$dir/two" > "$dir/home/config/claude-account"
+  : > "$dir/fake/literal"
+  out=$(run_control "$dir" "$id" relaunch --note "single-line pin"); rc=$?
+  expect_code 0 "$rc" "a relaunch from a named account onto a single-line pin should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" "$id" account)" = "$dir/two" ] || fail "a relaunch under a single-line pin must take the pin"
+  assert_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR='$dir/two'" "the replacement should launch under the pin"
+  [ "$(printf '%s\n' "$out" | grep -c "notice: moving this worker off its recorded Claude account three")" = 1 ] ||
+    fail "the move off the recorded account should be decided, and announced, once:"$'\n'"$out"
   pass "fm-control relaunch: a recorded named account keeps the worker only while declared, signed in, and not exhausted_now"
 }
 

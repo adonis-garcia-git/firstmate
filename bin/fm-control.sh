@@ -80,7 +80,8 @@
 #              declared, signed in, and not exhausted_now, unless --account
 #              names another declared account; otherwise it takes the home's
 #              selection. The named account chosen here is handed to the
-#              launch as --account so it is not chosen twice.
+#              launch as --account, and the launch does not consult the
+#              record again, so the account is not chosen twice.
 #              --note is required for a ship or scout, whose replacement
 #              inherits the local copy but none of the conversation; a
 #              secondmate reconciles its own home's records at startup, so its

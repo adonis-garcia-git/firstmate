@@ -2422,7 +2422,9 @@ fi
 # record exists. An absent pin selects nothing and leaves every later launch
 # step exactly as it was. A relaunch hands the library the account its own
 # record names, which the replacement keeps only while it is still declared,
-# signed in, and not exhausted_now, unless --account moves it. A
+# signed in, and not exhausted_now, unless --account moves it. Under
+# bin/fm-control.sh that rule already ran before the old agent stopped, and its
+# named choice arrives as --account, so the record is not consulted twice. A
 # pinned Claude root is exported here as well, so the trust registration below
 # writes the store the worker will actually read.
 RAW_COMMAND=
@@ -2430,7 +2432,7 @@ RAW_COMMAND=
 RECORDED_ACCOUNT=
 RECORDED_ACCOUNT_ROOT=
 RECORDED_ACCOUNT_PROVIDER=
-if [ "$RELAUNCH" -eq 1 ]; then
+if [ "$RELAUNCH" -eq 1 ] && [ "$SPAWN_CONTROL_PARENT" = 0 ]; then
   RECORDED_ACCOUNT=$(fm_meta_get "$RELAUNCH_META" account)
   RECORDED_ACCOUNT_ROOT=$(fm_meta_get "$RELAUNCH_META" account_root)
   RECORDED_ACCOUNT_PROVIDER=$(fm_meta_get "$RELAUNCH_META" account_provider)
