@@ -355,8 +355,12 @@ fm_worker_account_claude_raw_guard() {
 # reading, where percent is the all-models effectivePercentRemaining (the
 # lower of the session and weekly windows) and session and weekly are the
 # five_hour and seven_day windows' own remaining percentages (? when absent).
-# Otherwise prints "unreadable<TAB>reason<TAB>remedy", where remedy is
-# quota-axi's own remedy command or empty.
+# When quota-axi could not refresh (state.stale, for example a rate-limited
+# quota endpoint) but still holds both windows, prints
+# "stale<TAB>percent<TAB>reason<TAB>session<TAB>weekly", where percent is the
+# lower of the two stale windows. Otherwise prints
+# "unreadable<TAB>reason<TAB>remedy", where remedy is quota-axi's own remedy
+# command or empty.
 fm_worker_account_claude_quota() {
   local root=$1 out rc
   fm_worker_account_clean_env
@@ -377,8 +381,12 @@ fm_worker_account_claude_quota() {
     | if $row == null then "unreadable\tquota-axi reported no claude row\t"
       else
         ([$row.quotaSemantics.effectiveAvailability[] | select(.scope == "all_models")] | first) as $all
+        | ([$row.windows[]? | select(.id == "five_hour") | .percentRemaining | numbers] | first) as $session
+        | ([$row.windows[]? | select(.id == "seven_day") | .percentRemaining | numbers] | first) as $weekly
         | if $all != null and $all.status == "known" then
-            "known\t\($all.effectivePercentRemaining)\t\($all.runway.status)\t\(([$row.windows[]? | select(.id == "five_hour") | .percentRemaining] | first) // "?")\t\(([$row.windows[]? | select(.id == "seven_day") | .percentRemaining] | first) // "?")"
+            "known\t\($all.effectivePercentRemaining)\t\($all.runway.status)\t\($session // "?")\t\($weekly // "?")"
+          elif $row.state.stale == true and $session != null and $weekly != null then
+            "stale\t\([$session, $weekly] | min)\t\($row.state.error // "stale reading")\t\($session)\t\($weekly)"
           else
             "unreadable\t\($row.state.error // $row.state.status // "no all-models reading")\t\($row.state.remedyCommand // "")"
           end
@@ -389,7 +397,9 @@ fm_worker_account_claude_quota() {
 # Step 4 of the header's selection order, among two or more named accounts
 # given as fm_worker_account_read lines. Prints "name<TAB>declared<TAB>root"
 # for the chosen account, which has passed the sign-in check, and one notice
-# on stderr naming every account's reading. When no account qualifies prints
+# on stderr naming every account's reading. A stale reading ranks by its last
+# known windows, so a rate-limited quota endpoint does not refuse the spawn,
+# and the notice marks it stale. When no account qualifies prints
 # one error naming each account's reason and returns 1.
 fm_worker_account_claude_choose() {
   local executable=$1 lines=$2 line name declared weight root reading kind pct runway session weekly
@@ -411,7 +421,7 @@ fm_worker_account_claude_choose() {
     fi
     reading=$(fm_worker_account_claude_quota "$root")
     kind=${reading%%$'\t'*}
-    if [ "$kind" != known ]; then
+    if [ "$kind" != known ] && [ "$kind" != stale ]; then
       reason=${reading#*$'\t'}
       remedy=${reason#*$'\t'}
       reason=${reason%%$'\t'*}
@@ -428,7 +438,11 @@ fm_worker_account_claude_choose() {
       skipped+=("$name: out of quota (session $session%, week $weekly%)")
       continue
     fi
-    readings+=("$name $weight x $pct% = ${score#*$'\t'} (session $session%, week $weekly%)")
+    if [ "$kind" = stale ]; then
+      readings+=("$name $weight x $pct% = ${score#*$'\t'} (stale: $runway; session $session%, week $weekly%)")
+    else
+      readings+=("$name $weight x $pct% = ${score#*$'\t'} (session $session%, week $weekly%)")
+    fi
     ranked+=("${score%%$'\t'*}"$'\t'"$index"$'\t'"$name"$'\t'"$declared"$'\t'"$root")
   done <<<"$lines"
   while IFS= read -r line; do

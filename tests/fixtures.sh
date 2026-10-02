@@ -40,6 +40,8 @@ export FM_TEST_GH_AXI_VERSION=0.1.29
 # $HOME/.claude), in the schema 5 shape the real quota-axi prints:
 #   <percent> <session> <weekly> [<runway>]   a known all-models reading
 #   unreadable <error> [<remedy command...>]  the auth-required shape
+#   stale <session> <weekly>                  the rate-limited shape: last
+#                                             known windows, no all-models reading
 # A root with no file answers as unreadable credentials_missing.
 fm_test_fake_quota_axi() {
   local fakebin=$1 log=$2
@@ -54,6 +56,10 @@ if [ "\$1" = unreadable ]; then
   remedy=
   [ \$# -eq 0 ] || remedy=",\"remedyCommand\":\"\$*\""
   printf '{"schemaVersion":5,"providers":[{"provider":"claude","windows":[],"state":{"status":"auth_required","stale":false,"error":"%s"%s},"quotaSemantics":{"status":"unknown","effectiveAvailability":[]},"accountKeys":["default"]}]}\n' "\$error" "\$remedy"
+  exit 0
+fi
+if [ "\$1" = stale ]; then
+  printf '{"schemaVersion":5,"providers":[{"provider":"claude","plan":"max","windows":[{"id":"five_hour","label":"session","kind":"session","percentRemaining":%s,"pace":{"status":"unknown","reason":"stale"}},{"id":"seven_day","label":"week","kind":"weekly","percentRemaining":%s,"pace":{"status":"unknown","reason":"stale"}}],"state":{"status":"stale","stale":true,"error":"Claude quota endpoint rate limited"},"quotaSemantics":{"status":"unknown","effectiveAvailability":[{"scope":"all_models","status":"unknown","boundedBy":["five_hour","seven_day"],"runway":{"status":"unknown"}}]},"accountKeys":["default"]}]}\n' "\$2" "\$3"
   exit 0
 fi
 printf '{"schemaVersion":5,"providers":[{"provider":"claude","plan":"max","windows":[{"id":"five_hour","label":"session","kind":"session","percentRemaining":%s},{"id":"seven_day","label":"week","kind":"weekly","percentRemaining":%s}],"state":{"status":"fresh","stale":false},"quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":%s,"boundedBy":["five_hour","seven_day"],"runway":{"status":"%s","projectionConfidence":"established"},"selection":{"status":"known","spendPriority":1}}]},"accountKeys":["default"]}]}\n' "\$2" "\$3" "\$1" "\${4:-through_reset}"

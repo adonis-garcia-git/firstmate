@@ -877,6 +877,7 @@ A Claude launch takes its account in this order:
 4. Otherwise, the account whose weight times its remaining quota is highest.
 
 Remaining quota is quota-axi's all-models `effectivePercentRemaining`, the lower of the 5-hour session and weekly windows.
+When quota-axi cannot refresh a reading (for example, Claude's quota endpoint is rate-limited) but still holds both windows, the choice ranks that account by the lower of those stale windows, and the notice marks the reading stale.
 Each root is read with its own `CLAUDE_CONFIG_DIR`, unset for `ordinary`, in the same cleared environment as the sign-in check, so one account's reading never answers for another.
 An account whose root is missing, whose quota cannot be read, whose quota is exhausted, or that is not signed in is skipped and named.
 A tie goes to the account declared first.

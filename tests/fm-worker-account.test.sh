@@ -471,6 +471,21 @@ test_named_accounts_skip_an_account_that_cannot_take_the_worker() {
   assert_contains "$out" "personal: not signed in (sign in with env -u CLAUDE_CONFIG_DIR claude, then /login)" \
     "the notice should name the signed-out account and how to sign in"
 
+  signed_in_claude_root "$personal"
+  quota_reading "$personal" "stale 56 63"
+  quota_reading "$CASE/work" "unreadable keychain_prompt_required quota-axi --allow-keychain-prompt"
+  out=$(spawn_ship "$id-stale"); rc=$?
+  expect_code 0 "$rc" "a rate-limited account's stale windows should still let it take the worker: $out"
+  assert_contains "$out" "account=personal" "the account with stale windows should take the worker"
+  assert_contains "$out" "personal 20 x 56% = 1120 (stale: Claude quota endpoint rate limited; session 56%, week 63%)" \
+    "the notice should rank by the lower stale window and mark the reading stale"
+
+  quota_reading "$personal" "stale 10 10"
+  quota_reading "$CASE/work" "stale 80 80"
+  out=$(spawn_ship "$id-stale-rank"); rc=$?
+  expect_code 0 "$rc" "stale readings should still rank by weight: $out"
+  assert_contains "$out" "account=work" "the higher weighted stale reading should take the worker"
+
   quota_reading "$personal" "unreadable credentials_missing"
   quota_reading "$CASE/work" "unreadable keychain_prompt_required quota-axi --allow-keychain-prompt"
   out=$(spawn_ship "$id-none"); rc=$?
@@ -568,6 +583,11 @@ test_recorded_named_account_is_kept_only_while_usable() {
   out=$(select_recorded one "$CASE/one"); rc=$?
   expect_code 0 "$rc" "an unreadable recorded reading should still select: $out"
   assert_contains "$out" "one"$'\t'"recorded" "an unreadable quota reading is not evidence of exhaustion"
+
+  quota_reading "$CASE/one" "stale 0 70"
+  out=$(select_recorded one "$CASE/one"); rc=$?
+  expect_code 0 "$rc" "a stale recorded reading should still select: $out"
+  assert_contains "$out" "one"$'\t'"recorded" "a stale quota reading is not evidence of exhaustion"
 
   quota_reading "$CASE/one" "0 0 70 exhausted_now"
   out=$(select_recorded one "$CASE/one"); rc=$?
