@@ -44,7 +44,9 @@ wait_for_text() {
   while [ "$i" -lt 120 ]; do
     # Include recent scrollback: expanding a long restored transcript can move
     # the asserted tool output above the current viewport while the footer and
-    # editor remain visible.
+    # editor remain visible. Pi 1.0.0 defaults to a fullscreen TUI on the
+    # alternate screen, which keeps no scrollback, so every fixture that reads
+    # scrollback pins "tuiMode":"regular" in its Pi settings.
     tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S -600 >"$file" 2>/dev/null || true
     grep -Fq "$text" "$file" 2>/dev/null && return 0
     sleep 0.05
@@ -2152,7 +2154,7 @@ test_operational_followup_turn_e2e() {
   cp "$WORKING_SHIP" "$project/.pi/extensions/lib/fm-calm-working-ship.ts"
   cp "$WORKING_SHIP_SPRITE" "$project/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
   cp "$PI_OPERATIONAL_INPUT" "$project/.pi/extensions/lib/fm-operational-input.ts"
-  printf '%s\n' '{"followUpMode":"all"}' >"$config/settings.json"
+  printf '%s\n' '{"followUpMode":"all","tuiMode":"regular"}' >"$config/settings.json"
 
   cat >"$project/followup-e2e.ts" <<'TS'
 import {
@@ -2521,7 +2523,7 @@ test_queued_operational_escape_e2e() {
   cp "$WORKING_SHIP" "$project/.pi/extensions/lib/fm-calm-working-ship.ts"
   cp "$WORKING_SHIP_SPRITE" "$project/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
   cp "$PI_OPERATIONAL_INPUT" "$project/.pi/extensions/lib/fm-operational-input.ts"
-  printf '%s\n' '{"followUpMode":"all"}' >"$config/settings.json"
+  printf '%s\n' '{"followUpMode":"all","tuiMode":"regular"}' >"$config/settings.json"
 
   cat >"$project/queued-escape-e2e.ts" <<'TS'
 import { writeFileSync } from "node:fs";
@@ -4170,7 +4172,7 @@ export default function (pi: ExtensionAPI): void {
 }
 TS
   printf '%s\n' '{"tui.input.submit":"alt+s"}' >"$config/keybindings.json"
-  printf '%s\n' '{"hideThinkingBlock":true}' >"$config/settings.json"
+  printf '%s\n' '{"hideThinkingBlock":true,"tuiMode":"regular"}' >"$config/settings.json"
   now=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
   cat >"$session_file" <<JSON
 {"type":"session","version":3,"id":"11111111-1111-4111-8111-111111111111","timestamp":"$now","cwd":"$project"}
