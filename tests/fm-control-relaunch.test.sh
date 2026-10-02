@@ -21,6 +21,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
@@ -818,27 +820,152 @@ test_signed_out_worker_account_pin_refuses_before_stop() {
   pass "fm-control relaunch: a signed-out worker account pin refuses before the old agent stops"
 }
 
-test_worker_account_pin_follows_the_relaunch() {
+test_relaunch_worker_account_follows_unnamed_pins() {
   local dir out rc id=rl-acct
   dir=$(new_case acct "$id")
   add_ship_task "$dir" "$id" claude
   make_claude_auth_stub "$dir"
-  mkdir -p "$dir/home/config" "$dir/work"
+  mkdir -p "$dir/home/config" "$dir/work" "$dir/other"
   : > "$dir/work/.credentials.json"
+  : > "$dir/other/.credentials.json"
   printf '%s\n' "$dir/work" > "$dir/home/config/claude-account"
   out=$(run_control "$dir" "$id" relaunch --note "pinned account"); rc=$?
   expect_code 0 "$rc" "a relaunch under a signed-in account pin should succeed"$'\n'"$out"
-  [ "$(meta_field "$dir" "$id" account)" = "$dir/work" ] || fail "the relaunched record should carry the pinned account"
+  [ "$(meta_field "$dir" "$id" account)" = "$dir/work" ] || fail "a record with no account should take the home's pin"
+  assert_contains "$out" "account=$dir/work" "the relaunch should report the account its replacement runs on"
   assert_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR='$dir/work'" \
     "the replacement should launch under the pinned root"
-  rm "$dir/home/config/claude-account"
+  printf '%s\n' "$dir/other" > "$dir/home/config/claude-account"
+  : > "$dir/fake/literal"
+  out=$(run_control "$dir" "$id" relaunch --note "pin changed"); rc=$?
+  expect_code 0 "$rc" "a relaunch after the pin changes should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" "$id" account)" = "$dir/other" ] || fail "a relaunch under a single-line pin must take the current pin, not the recorded root"
+  assert_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR='$dir/other'" \
+    "the replacement should launch under the current pin"
+  rm "$dir/work/.credentials.json" "$dir/other/.credentials.json" "$dir/home/config/claude-account"
   : > "$dir/fake/literal"
   out=$(run_control "$dir" "$id" relaunch --note "pin removed"); rc=$?
-  expect_code 0 "$rc" "a relaunch after the pin is removed should succeed"$'\n'"$out"
+  expect_code 0 "$rc" "a relaunch after the pin is removed should succeed even when the recorded root is signed out"$'\n'"$out"
   assert_no_grep "account=" "$dir/home/state/$id.meta" "a relaunch without a pin must drop the previous account from the record"
   assert_not_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR=" \
     "an unpinned replacement must launch exactly as before"
-  pass "fm-control relaunch: the replacement follows the home's current worker account pin"
+  pass "fm-control relaunch: an unnamed recorded root is never kept, so the replacement follows the current pin or none"
+}
+
+test_relaunch_keeps_a_recorded_named_account_only_while_usable() {
+  local dir out rc id=rl-acct-named
+  dir=$(new_case acct-named "$id")
+  add_ship_task "$dir" "$id" claude
+  make_claude_auth_stub "$dir"
+  fm_test_fake_quota_axi "$dir/fakebin" "$dir/quota-reads"
+  mkdir -p "$dir/home/config" "$dir/one" "$dir/two" "$dir/three"
+  : > "$dir/one/.credentials.json"
+  : > "$dir/two/.credentials.json"
+  : > "$dir/three/.credentials.json"
+  printf '%s\n' "one | $dir/one | 1" "two | $dir/two | 1" > "$dir/home/config/claude-account"
+  printf '50 50 50\n' > "$dir/one/quota-reading"
+  printf '90 90 90\n' > "$dir/two/quota-reading"
+  printf '90 90 90\n' > "$dir/three/quota-reading"
+  out=$(run_control "$dir" "$id" relaunch --account one --note "explicit account"); rc=$?
+  expect_code 0 "$rc" "a relaunch with an explicit account should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" "$id" account)" = one ] || fail "an explicit account should take the worker"
+  [ "$(meta_field "$dir" "$id" account_root)" = "$dir/one" ] || fail "the record should carry the explicit account's root"
+  assert_absent "$dir/quota-reads" "an explicit account must not read quota"
+
+  : > "$dir/fake/literal"
+  out=$(run_control "$dir" "$id" relaunch --note "kept with quota"); rc=$?
+  expect_code 0 "$rc" "a relaunch of a named account with quota should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" "$id" account)" = one ] || fail "a recorded account with quota must keep the worker even when another has more"
+  assert_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR='$dir/one'" "the replacement should stay on the recorded root"
+  assert_not_contains "$out" "notice: moving" "a kept account needs no move notice"
+  [ "$(cat "$dir/quota-reads")" = "$dir/one" ] ||
+    fail "keeping the recorded account should read only its quota, once: $(cat "$dir/quota-reads")"
+
+  printf 'unreadable keychain_prompt_required\n' > "$dir/one/quota-reading"
+  out=$(run_control "$dir" "$id" relaunch --note "kept unreadable"); rc=$?
+  expect_code 0 "$rc" "a relaunch whose recorded quota cannot be read should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" "$id" account)" = one ] || fail "an unreadable quota reading must not move the worker"
+
+  printf '0 0 60 exhausted_now\n' > "$dir/one/quota-reading"
+  out=$(run_control "$dir" "$id" relaunch --note "session exhausted"); rc=$?
+  expect_code 0 "$rc" "a relaunch off a 5-hour-exhausted account should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" "$id" account)" = two ] || fail "a recorded account exhausted on the 5-hour window must yield"
+  assert_contains "$out" "notice: moving this worker off its recorded Claude account one, which is exhausted_now on the 5-hour window" \
+    "the notice should name the recorded account and the exhausted window"
+
+  printf '0 40 0 exhausted_now\n' > "$dir/two/quota-reading"
+  printf '50 50 50\n' > "$dir/one/quota-reading"
+  out=$(run_control "$dir" "$id" relaunch --note "week exhausted"); rc=$?
+  expect_code 0 "$rc" "a relaunch off a weekly-exhausted account should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" "$id" account)" = one ] || fail "a recorded account exhausted on the weekly window must yield"
+  assert_contains "$out" "notice: moving this worker off its recorded Claude account two, which is exhausted_now on the weekly window" \
+    "the notice should name the recorded account and the exhausted window"
+
+  rm "$dir/one/.credentials.json"
+  printf '90 90 90\n' > "$dir/two/quota-reading"
+  out=$(run_control "$dir" "$id" relaunch --note "signed out"); rc=$?
+  expect_code 0 "$rc" "a relaunch off a signed-out account should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" "$id" account)" = two ] || fail "a signed-out recorded account must yield"
+  assert_contains "$out" "notice: moving this worker off its recorded Claude account one, which is not signed in" \
+    "the notice should say the recorded account is signed out"
+
+  printf '%s\n' "one | $dir/one | 1" "three | $dir/three | 1" > "$dir/home/config/claude-account"
+  out=$(run_control "$dir" "$id" relaunch --note "no longer declared"); rc=$?
+  expect_code 0 "$rc" "a relaunch off an undeclared account should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" "$id" account)" = three ] || fail "a recorded account no longer declared must yield"
+  assert_contains "$out" "notice: moving this worker off its recorded Claude account two, which is no longer declared by name in config/claude-account" \
+    "the notice should say the recorded account is no longer declared"
+
+  printf '%s\n' "$dir/two" > "$dir/home/config/claude-account"
+  : > "$dir/fake/literal"
+  out=$(run_control "$dir" "$id" relaunch --note "single-line pin"); rc=$?
+  expect_code 0 "$rc" "a relaunch from a named account onto a single-line pin should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" "$id" account)" = "$dir/two" ] || fail "a relaunch under a single-line pin must take the pin"
+  assert_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR='$dir/two'" "the replacement should launch under the pin"
+  [ "$(printf '%s\n' "$out" | grep -c "notice: moving this worker off its recorded Claude account three")" = 1 ] ||
+    fail "the move off the recorded account should be decided, and announced, once:"$'\n'"$out"
+  pass "fm-control relaunch: a recorded named account keeps the worker only while declared, signed in, and not exhausted_now"
+}
+
+test_relaunch_quota_choice_is_made_once_and_unusable_accounts_refuse_before_stop() {
+  local dir out rc id=rl-acct-quota personal
+  dir=$(new_case acct-quota "$id")
+  add_ship_task "$dir" "$id" claude
+  make_claude_auth_stub "$dir"
+  fm_test_fake_quota_axi "$dir/fakebin" "$dir/quota-reads"
+  personal="$dir/user-home/.claude"
+  mkdir -p "$dir/home/config" "$dir/work" "$personal"
+  : > "$dir/work/.credentials.json"
+  : > "$personal/.credentials.json"
+  printf '%s\n' "personal | ordinary | 20" "work | $dir/work | 6.25" > "$dir/home/config/claude-account"
+  printf '10 10 60\n' > "$personal/quota-reading"
+  printf '80 85 80\n' > "$dir/work/quota-reading"
+  out=$(run_control "$dir" "$id" relaunch --note "choose by quota"); rc=$?
+  expect_code 0 "$rc" "a relaunch over two named accounts should succeed"$'\n'"$out"
+  assert_contains "$out" "notice: chose Claude account work by weighted remaining quota" "the relaunch should say why it chose"
+  [ "$(meta_field "$dir" "$id" account)" = work ] || fail "the record should name the account chosen by quota"
+  [ "$(meta_field "$dir" "$id" account_root)" = "$dir/work" ] || fail "the record should carry the chosen account's root"
+  [ "$(wc -l < "$dir/quota-reads" | tr -d ' ')" = 2 ] ||
+    fail "the quota choice should be made once and handed to the launch: $(cat "$dir/quota-reads")"
+  rm "$dir/work/.credentials.json" "$personal/.credentials.json"
+  cp "$dir/home/state/$id.meta" "$dir/meta-before"
+  : > "$dir/fake/literal"
+  out=$(run_control "$dir" "$id" relaunch --note "every account signed out"); rc=$?
+  expect_code 1 "$rc" "a relaunch with no signed-in account must refuse"
+  assert_contains "$out" "notice: moving this worker off its recorded Claude account work, which is not signed in" \
+    "the refusal should say why the recorded account was left"
+  assert_contains "$out" "none can take this worker" "the refusal should name every account's reason"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "an unusable account set must refuse before the running agent stops"
+  [ ! -s "$dir/fake/literal" ] || fail "an unusable account set must refuse before any lifecycle input is sent"
+  cmp -s "$dir/meta-before" "$dir/home/state/$id.meta" || fail "a refused relaunch must leave the task record untouched"
+  out=$(run_control "$dir" "$id" relaunch --harness codex --account personal --note "wrong runner"); rc=$?
+  expect_code 1 "$rc" "--account on another runner must refuse"
+  assert_contains "$out" "applies only to a claude launch, not codex" "the refusal should name the runner"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a misdirected --account must refuse before the running agent stops"
+  out=$(run_control "$dir" "$id" exit --account personal); rc=$?
+  expect_code 1 "$rc" "--account outside relaunch must refuse"
+  assert_contains "$out" "apply to 'relaunch' only" "the refusal should name the verb"
+  pass "fm-control relaunch: a quota choice is made once, and an unusable account set refuses before the old agent stops"
 }
 
 test_explicit_model_wins_over_the_recorded_one() {
@@ -2539,7 +2666,9 @@ test_prefixed_recorded_harness_requires_explicit_replacement
 test_same_harness_relaunch_keeps_the_profile_axes
 test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop
 test_signed_out_worker_account_pin_refuses_before_stop
-test_worker_account_pin_follows_the_relaunch
+test_relaunch_worker_account_follows_unnamed_pins
+test_relaunch_keeps_a_recorded_named_account_only_while_usable
+test_relaunch_quota_choice_is_made_once_and_unusable_accounts_refuse_before_stop
 test_explicit_model_wins_over_the_recorded_one
 test_relaunch_onto_an_unverified_harness_is_refused
 test_prior_harness_turnend_registry_entry_is_cleared

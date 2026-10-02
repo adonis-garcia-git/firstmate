@@ -831,6 +831,7 @@ The [Claude adapter reference](../.agents/skills/harness-adapters/references/har
 ## Worker account pin (config/claude-account, config/pi-account)
 
 A home that mixes accounts for one runner, such as a work login and a personal one, can pin the account its own Claude and Pi workers launch on.
+A home can also declare several Claude accounts and let each new Claude worker take the one with the most remaining quota for its plan size.
 The pin is opt-in: with neither file, every launch is unchanged, and Claude workers keep receiving firstmate's own `CLAUDE_CONFIG_DIR` when it is set.
 
 Both files are local and gitignored.
@@ -843,6 +844,7 @@ Both files are local and gitignored.
 ### File format and provider selection
 
 `config/claude-account` holds one line: `ordinary`, or the absolute path of an existing Claude config directory.
+It may instead declare one or more named accounts, as described in [Several Claude accounts](#several-claude-accounts).
 `config/pi-account` holds that same root on line 1 and, on line 2, the providers this home may spend, separated by spaces, for example `openai-codex anthropic`.
 
 A final newline is optional; any other line, a relative path, or a control character such as a CR refuses.
@@ -853,14 +855,47 @@ A pinned Pi launch therefore needs `--model <provider>/<id>` naming a declared p
 
 An unqualified model, an undeclared provider, or a raw Pi launch command, which cannot receive that flag, refuses; Firstmate never guesses a provider.
 
+### Several Claude accounts
+
+The named form of `config/claude-account` declares one account per line as `<name> | <root> | <weight>`, where blank lines and `#` comments are ignored:
+
+```text
+# name | root | weight
+personal | ordinary | 20
+work | /Users/me/.claude-work | 6.25
+```
+
+The root is `ordinary` or an absolute path, as in the single-line form, and names and roots must be unique.
+The weight is a positive number giving the account's relative capacity, for example 20 for a Max 20x plan and 6.25 for a Team Premium seat, each a multiple of Pro.
+Either account may run any work.
+
+A Claude launch takes its account in this order:
+
+1. An explicit `--account <name>` on `bin/fm-spawn.sh` or `bin/fm-control.sh relaunch`, which must name a declared account.
+2. On a relaunch, the named account the task's own record names, while it is still declared by name here, is signed in, and, when another account is declared, quota-axi does not read it as `exhausted_now` on the 5-hour or weekly window. A reading that cannot be taken or refreshed keeps it. Otherwise the spawn prints a `notice:` line naming that account and why the worker moved off it, and the choice continues below. A record from a single-line pin is never kept: with no file a relaunch takes the ambient account like any launch, and with a single-line pin it takes the current pin.
+3. The only declared account, when there is one.
+4. Otherwise, the account whose weight times its remaining quota is highest.
+
+Remaining quota is quota-axi's all-models `effectivePercentRemaining`, the lower of the 5-hour session and weekly windows.
+When quota-axi cannot refresh a reading (for example, Claude's quota endpoint is rate-limited) but still holds both windows, the choice ranks that account by the lower of those stale windows, and the notice marks the reading stale.
+Each root is read with its own `CLAUDE_CONFIG_DIR`, unset for `ordinary`, in the same cleared environment as the sign-in check, so one account's reading never answers for another.
+An account whose root is missing, whose quota cannot be read, whose quota is exhausted, or that is not signed in is skipped and named.
+A tie goes to the account declared first.
+The spawn prints a `notice:` line with every account's weighted reading.
+When no account qualifies, the launch refuses and names each account's reason rather than guessing, and `--account` still selects one explicitly.
+
+The quota read never prompts for macOS Keychain access.
+quota-axi reads a non-default root's login from that root's own Keychain entry, so it needs a one-time approval per root: run `CLAUDE_CONFIG_DIR=<root> quota-axi --provider claude --allow-keychain-prompt` and choose "Always Allow".
+Until then that account is skipped, and the notice names that remedy.
+
 ### Launch scope and sign-in checks
 
-When a file is present, every launch of that runner from this home uses it: ships, scouts, local secondmate agents, raw Claude launch commands, and relaunches.
+When a file is present, every launch of that runner from this home uses one of its accounts: ships, scouts, local secondmate agents, raw Claude launch commands, and relaunches.
 A raw Claude launch command refuses if its leading assignments set `CLAUDE_CONFIG_DIR` or a credential that a pinned launch unsets, such as `ANTHROPIC_API_KEY`.
 The assignment would override the pin.
 The refusal names the variable; remove that assignment from the raw command, or change or remove `config/claude-account`.
 
-Before any worker endpoint, local copy, or task record exists, and before a relaunch stops the running worker, Firstmate asks the runner itself whether the pinned account is signed in: `claude auth status` for Claude, and `pi auth check --provider <provider> --json --no-refresh` for Pi, falling back to `pi --list-models <provider>` for a provider an extension registers.
+Before any worker endpoint, local copy, or task record exists, and before a relaunch stops the running worker, Firstmate asks the runner itself whether the selected account is signed in: `claude auth status` for Claude, and `pi auth check --provider <provider> --json --no-refresh` for Pi, falling back to `pi --list-models <provider>` for a provider an extension registers.
 The check runs with only `HOME`, `PATH`, `TMPDIR`, `USER`, `LOGNAME`, and the pinned root in its environment, so a credential variable in firstmate's own environment cannot answer for an empty root.
 
 A pinned Claude launch also unsets the environment credentials Claude ranks above a stored login, such as `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, and the Bedrock and Vertex switches ([authentication precedence](https://code.claude.com/docs/en/authentication#authentication-precedence)).
@@ -871,17 +906,19 @@ A home that authenticates Claude through environment credentials on purpose shou
 ### Failures, reporting, and inheritance
 
 A malformed file, a root that is not a readable directory, or a signed-out account refuses the launch and names the file to fix; Firstmate never falls back to the ambient account and never changes a global login or copies a credential.
-The spawn prints the pin as `account=` (plus `account_provider=` for Pi) and records the same fields in the task record, so the session-start digest shows which account each worker launched on.
+The spawn prints the account and records the same fields in the task record, so the session-start digest shows which account each worker launched on.
+A single-line pin is `account=<root>`, a named Claude account is `account=<name> account_root=<root>`, and a Pi pin adds `account_provider=`.
 
 Pins are not inherited into secondmate homes: a local secondmate agent launches on the launching home's pin, while the secondmate's own workers read the secondmate home's files.
 A remote secondmate is launched on its host from its own home's configuration, so create the file in that remote home.
 
-[`bin/fm-worker-account-lib.sh`](../bin/fm-worker-account-lib.sh) owns parsing, the sign-in check, and the full list of credentials a Claude launch unsets; [runtime backend verification](verification/runtime-backends.md#worker-account-pin-sign-in-check) records the check against the real runners.
+[`bin/fm-worker-account-lib.sh`](../bin/fm-worker-account-lib.sh) owns parsing, the selection order, the sign-in check, and the full list of credentials a Claude launch unsets; [runtime backend verification](verification/runtime-backends.md#worker-account-pin-sign-in-check) records the check against the real runners.
 
 ## Session-start login check (config/logins)
 
 Each locked session start checks, in its deferred network stage, the logins the day's work needs and asks for every missing one in a single `NEEDS_LOGIN:` line, so a worker does not stop mid-task on an expired login.
-The Claude worker account is always part of that check when Claude workers are in use, as is each provider `config/pi-account` declares: a pinned account uses the same sign-in check a spawn performs, and an unpinned Claude worker is checked under the session environment it inherits.
+Every Claude account `config/claude-account` declares is part of that check, as is each provider `config/pi-account` declares, and so is the inherited Claude account when that file is absent and Claude workers are in use.
+A declared account uses the same sign-in check a spawn performs, and an unpinned Claude worker is checked under the session environment it inherits.
 Other logins are declared per project in the optional, local, gitignored `config/logins`, one per line:
 
 ```text

@@ -8,8 +8,10 @@
 # answer the sign-in checks the way the real runners do - an environment
 # credential counts as signed in, otherwise the selected root's stored login
 # decides - and record the account environment and arguments a launched worker
-# receives. tests/fm-worker-account-live-e2e.test.sh proves those answers
-# against the real runners.
+# receives. The shared fake quota-axi answers each Claude root's quota read in
+# the real tool's shape and logs which root it was asked about.
+# tests/fm-worker-account-live-e2e.test.sh proves those answers against the
+# real runners and quota-axi.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -80,6 +82,7 @@ new_case() {
   WT="$CASE/wt"
   FAKEBIN=$(fm_test_make_spawn_fakebin "$CASE/fake")
   make_account_fakes "$FAKEBIN" "$CASE"
+  fm_test_fake_quota_axi "$FAKEBIN" "$CASE/quota-reads"
   fm_test_spawn_home "$HOME_DIR" "$2"
   fm_git_worktree "$PROJ" "$WT" "wt-$1"
   mkdir -p "$HOME_DIR/user-home"
@@ -116,6 +119,18 @@ run_pane() {
     CLAUDE_CODE_OAUTH_TOKEN=ambient-pane-token CLAUDE_CODE_USE_BEDROCK=1 \
     PI_CODING_AGENT_DIR="$CASE/ambient-pi" OPENAI_API_KEY=ambient-pane-openai \
     bash -c "$(cat "$CASE/launch.log")" || fail "the recorded launch failed in the synthetic pane"
+}
+
+# named_accounts <line...>: config/claude-account in the named form.
+named_accounts() {
+  printf '%s\n' '# name | root | weight' "$@" > "$HOME_DIR/config/claude-account"
+}
+
+# quota_reading <root> <reading>: what the fake quota-axi reports for a root
+# (tests/fixtures.sh fm_test_fake_quota_axi owns the reading format).
+quota_reading() {
+  mkdir -p "$1"
+  printf '%s\n' "$2" > "$1/quota-reading"
 }
 
 # assert_refused_before_launch <id> <out> <needle>
@@ -387,6 +402,235 @@ test_local_secondmate_reads_the_launching_home_pin() {
   pass "a local secondmate reads the launching home's pin and its own home's file is never inherited over"
 }
 
+test_named_accounts_choose_the_most_weighted_remaining_quota() {
+  local out rc id=acct-named personal
+  new_case named claude
+  personal="$HOME_DIR/user-home/.claude"
+  signed_in_claude_root "$personal"
+  signed_in_claude_root "$CASE/work"
+  named_accounts "personal | ordinary | 20" "" "	work |	$CASE/work	| 6.25  "
+  quota_reading "$personal" "30 30 80"
+  quota_reading "$CASE/work" "90 95 90"
+  out=$(spawn_ship "$id-max"); rc=$?
+  expect_code 0 "$rc" "a spawn over two named Claude accounts should succeed: $out"
+  assert_contains "$out" "account=personal account_root=ordinary" "the spawn line should name the chosen account and its root"
+  assert_contains "$out" "notice: chose Claude account personal by weighted remaining quota" "the spawn should say why it chose"
+  assert_contains "$out" "personal 20 x 30% = 600 (session 30%, week 80%)" "the notice should show the larger plan's weighted reading"
+  assert_contains "$out" "work 6.25 x 90% = 562.5 (session 95%, week 90%)" "the notice should show the smaller plan's weighted reading"
+  [ "$(grep '^account' "$HOME_DIR/state/$id-max.meta")" = "account=personal"$'\n'"account_root=ordinary" ] ||
+    fail "the task record should name the chosen account and its root: $(grep '^account' "$HOME_DIR/state/$id-max.meta")"
+  [ "$(cat "$CASE/quota-reads")" = "unset"$'\n'"$CASE/work" ] ||
+    fail "each declared root should be read once, under its own root only: $(cat "$CASE/quota-reads")"
+  run_pane
+  assert_grep "CLAUDE_CONFIG_DIR=unset" "$CASE/claude-worker" "the worker should run on the ordinary account it was given"
+  assert_grep "ANTHROPIC_API_KEY=unset" "$CASE/claude-worker" "a chosen account must shed ambient credentials like a pin"
+
+  quota_reading "$personal" "10 10 80"
+  out=$(spawn_ship "$id-team"); rc=$?
+  expect_code 0 "$rc" "a spawn should follow the weighted readings: $out"
+  assert_contains "$out" "account=work account_root=$CASE/work" "a drained larger plan should yield to the smaller one"
+  run_pane
+  assert_grep "CLAUDE_CONFIG_DIR=$CASE/work" "$CASE/claude-worker" "the worker should run under the chosen root"
+
+  quota_reading "$personal" "20 20 20"
+  quota_reading "$CASE/work" "64 64 64"
+  out=$(spawn_ship "$id-tie"); rc=$?
+  expect_code 0 "$rc" "a tied spawn should succeed: $out"
+  assert_contains "$out" "account=personal account_root=ordinary" "a tie should go to the account declared first"
+  pass "several named Claude accounts are chosen by weight times remaining quota, ties to the first declared"
+}
+
+test_named_accounts_skip_an_account_that_cannot_take_the_worker() {
+  local out rc id=acct-skip personal reads
+  new_case named-skip claude
+  personal="$HOME_DIR/user-home/.claude"
+  signed_in_claude_root "$personal"
+  signed_in_claude_root "$CASE/work"
+  named_accounts "personal | ordinary | 20" "work | $CASE/work | 6.25"
+  quota_reading "$personal" "50 50 50"
+  quota_reading "$CASE/work" "unreadable keychain_prompt_required quota-axi --allow-keychain-prompt"
+  out=$(spawn_ship "$id-unread"); rc=$?
+  expect_code 0 "$rc" "an unreadable account should not stop a readable one: $out"
+  assert_contains "$out" "account=personal" "the readable account should take the worker"
+  assert_contains "$out" "skipped: work: quota unreadable (keychain_prompt_required; remedy: CLAUDE_CONFIG_DIR=$CASE/work quota-axi --allow-keychain-prompt)" \
+    "the notice should name the unreadable account and quota-axi's remedy under its root"
+
+  quota_reading "$personal" "0 0 50 exhausted_now"
+  quota_reading "$CASE/work" "40 40 40"
+  out=$(spawn_ship "$id-out"); rc=$?
+  expect_code 0 "$rc" "an exhausted account should yield to one with quota: $out"
+  assert_contains "$out" "account=work" "the account with quota should take the worker"
+  assert_contains "$out" "skipped: personal: out of quota (session 0%, week 50%)" "the notice should name the exhausted account"
+
+  quota_reading "$personal" "90 90 90"
+  quota_reading "$CASE/work" "10 10 10"
+  rm "$personal/.credentials.json"
+  out=$(spawn_ship "$id-signed-out"); rc=$?
+  expect_code 0 "$rc" "a signed-out best account should yield to the next: $out"
+  assert_contains "$out" "account=work" "the next signed-in account should take the worker"
+  assert_contains "$out" "personal: not signed in (sign in with env -u CLAUDE_CONFIG_DIR claude, then /login)" \
+    "the notice should name the signed-out account and how to sign in"
+
+  signed_in_claude_root "$personal"
+  quota_reading "$personal" "stale 56 63"
+  quota_reading "$CASE/work" "unreadable keychain_prompt_required quota-axi --allow-keychain-prompt"
+  out=$(spawn_ship "$id-stale"); rc=$?
+  expect_code 0 "$rc" "a rate-limited account's stale windows should still let it take the worker: $out"
+  assert_contains "$out" "account=personal" "the account with stale windows should take the worker"
+  assert_contains "$out" "personal 20 x 56% = 1120 (stale: Claude quota endpoint rate limited; session 56%, week 63%)" \
+    "the notice should rank by the lower stale window and mark the reading stale"
+
+  quota_reading "$personal" "stale 10 10"
+  quota_reading "$CASE/work" "stale 80 80"
+  out=$(spawn_ship "$id-stale-rank"); rc=$?
+  expect_code 0 "$rc" "stale readings should still rank by weight: $out"
+  assert_contains "$out" "account=work" "the higher weighted stale reading should take the worker"
+
+  quota_reading "$personal" "unreadable credentials_missing"
+  quota_reading "$CASE/work" "unreadable keychain_prompt_required quota-axi --allow-keychain-prompt"
+  out=$(spawn_ship "$id-none"); rc=$?
+  expect_code 1 "$rc" "a spawn must refuse when no declared account can be read"
+  assert_refused_before_launch "$id-none" "$out" "none can take this worker"
+  assert_contains "$out" "personal: quota unreadable (credentials_missing)" "the refusal should name each account's reason"
+  assert_contains "$out" "work: quota unreadable (keychain_prompt_required" "the refusal should name each account's reason"
+  assert_contains "$out" "pass --account <name> to choose one explicitly" "the refusal should say how to proceed"
+
+  reads=$(wc -l < "$CASE/quota-reads")
+  out=$(spawn_ship "$id-explicit" --account work); rc=$?
+  expect_code 0 "$rc" "an explicit account should launch without a quota reading: $out"
+  assert_contains "$out" "account=work account_root=$CASE/work" "the explicit account should take the worker"
+  assert_not_contains "$out" "notice: chose" "an explicit account is not a quota choice"
+  [ "$(wc -l < "$CASE/quota-reads")" = "$reads" ] || fail "an explicit account must not read quota"
+
+  rm -r "$CASE/work"
+  quota_reading "$personal" "5 5 5"
+  signed_in_claude_root "$personal"
+  out=$(spawn_ship "$id-missing-root"); rc=$?
+  expect_code 0 "$rc" "a declared root that vanished should not stop the other account: $out"
+  assert_contains "$out" "skipped: work: $CASE/work is not a readable, searchable existing directory" \
+    "the notice should name the unusable root"
+  pass "an unreadable, exhausted, signed-out, or missing account is skipped and named, none refuses, and --account bypasses quota"
+}
+
+test_explicit_account_and_named_file_refusals() {
+  local out rc id=acct-named-bad n=0 body
+  new_case named-refusals claude
+  signed_in_claude_root "$CASE/work"
+  signed_in_claude_root "$CASE/other"
+  named_accounts "personal | ordinary | 20" "work | $CASE/work | 6.25"
+  out=$(spawn_ship "$id-unknown" --account nope); rc=$?
+  expect_code 1 "$rc" "an undeclared --account must refuse"
+  assert_refused_before_launch "$id-unknown" "$out" "--account 'nope' is not one of the Claude accounts config/claude-account declares (personal, work)"
+  out=$(spawn_ship "$id-codex" --harness codex --account work); rc=$?
+  expect_code 1 "$rc" "--account on another runner must refuse"
+  assert_refused_before_launch "$id-codex" "$out" "applies only to a claude launch, not codex"
+  out=$(spawn_ship "$id-raw" --harness "CLAUDE_CONFIG_DIR=$CASE/other claude --print raw"); rc=$?
+  expect_code 1 "$rc" "a raw override must refuse under named accounts"
+  assert_refused_before_launch "$id-raw" "$out" "the raw launch command sets CLAUDE_CONFIG_DIR"
+  assert_absent "$CASE/quota-reads" "a raw override must refuse before any quota reading"
+  printf '%s\n' "$CASE/work" > "$HOME_DIR/config/claude-account"
+  out=$(spawn_ship "$id-legacy" --account work); rc=$?
+  expect_code 1 "$rc" "--account under a single-line pin must refuse"
+  assert_refused_before_launch "$id-legacy" "$out" "config/claude-account declares none by name"
+  rm "$HOME_DIR/config/claude-account"
+  out=$(spawn_ship "$id-nofile" --account work); rc=$?
+  expect_code 1 "$rc" "--account with no account file must refuse"
+  assert_refused_before_launch "$id-nofile" "$out" "config/claude-account declares none by name"
+  for body in "personal | ordinary" "work | relative/root | 1" "work | $CASE/work | 0" \
+    "work | $CASE/work | 1"$'\n'"work | $CASE/other | 1" "work | $CASE/work | 1"$'\n'"team | $CASE/work | 1" \
+    "work | $CASE/work | 1"$'\r' "work | $CASE/work | heavy"; do
+    n=$((n + 1))
+    printf '%s\n' "$body" > "$HOME_DIR/config/claude-account"
+    out=$(spawn_ship "$id-$n"); rc=$?
+    expect_code 1 "$rc" "malformed named file #$n must refuse"
+    assert_refused_before_launch "$id-$n" "$out" "config/claude-account line"
+  done
+  assert_contains "$out" "line 1 must read <name> | <root> | <weight>" "the refusal should say what a line must hold"
+  named_accounts "solo | $CASE/work | 3"
+  out=$(spawn_ship "$id-solo"); rc=$?
+  expect_code 0 "$rc" "a single named account should launch: $out"
+  assert_contains "$out" "account=solo account_root=$CASE/work" "a single named account should be reported by name"
+  assert_absent "$CASE/quota-reads" "a single declared account needs no quota reading"
+  pass "undeclared, misdirected, and unnamed --account values, raw overrides, and malformed named lines refuse; one named account needs no quota"
+}
+
+# select_recorded <account> <root>: the launch-time selection a relaunch makes
+# for a task whose record names that Claude account, run through the library
+# with the case's fakes and its own user home.
+select_recorded() {
+  (
+    PATH="$FAKEBIN:$PATH" HOME="$HOME_DIR/user-home"
+    # shellcheck source=bin/fm-worker-account-lib.sh
+    . "$ROOT/bin/fm-worker-account-lib.sh"
+    fm_worker_account_select claude "$HOME_DIR/config" "" claude "" "" "$1" "$2" ""
+  ) 2>&1
+}
+
+test_recorded_named_account_is_kept_only_while_usable() {
+  local out rc
+  new_case recorded claude
+  signed_in_claude_root "$CASE/one"
+  signed_in_claude_root "$CASE/two"
+  named_accounts "one | $CASE/one | 1" "two | $CASE/two | 1"
+  quota_reading "$CASE/one" "40 40 40"
+  quota_reading "$CASE/two" "90 90 90"
+  out=$(select_recorded one "$CASE/one"); rc=$?
+  expect_code 0 "$rc" "a usable recorded account should be selected: $out"
+  [ "$out" = "$CASE/one"$'\t'"$CASE/one"$'\t\t'"one"$'\t'"recorded" ] ||
+    fail "a recorded account with quota must keep the worker even when another has more: $out"
+
+  quota_reading "$CASE/one" "unreadable keychain_prompt_required"
+  out=$(select_recorded one "$CASE/one"); rc=$?
+  expect_code 0 "$rc" "an unreadable recorded reading should still select: $out"
+  assert_contains "$out" "one"$'\t'"recorded" "an unreadable quota reading is not evidence of exhaustion"
+
+  quota_reading "$CASE/one" "stale 0 70"
+  out=$(select_recorded one "$CASE/one"); rc=$?
+  expect_code 0 "$rc" "a stale recorded reading should still select: $out"
+  assert_contains "$out" "one"$'\t'"recorded" "a stale quota reading is not evidence of exhaustion"
+
+  quota_reading "$CASE/one" "0 0 70 exhausted_now"
+  out=$(select_recorded one "$CASE/one"); rc=$?
+  expect_code 0 "$rc" "a 5-hour-exhausted recorded account should yield: $out"
+  assert_contains "$out" "notice: moving this worker off its recorded Claude account one, which is exhausted_now on the 5-hour window (session 0%, week 70%)" \
+    "the notice should name the recorded account and the exhausted window"
+  assert_contains "$out" "two"$'\t'"quota" "the weighted choice should take the worker"
+
+  quota_reading "$CASE/one" "0 30 0 exhausted_now"
+  out=$(select_recorded one "$CASE/one"); rc=$?
+  expect_code 0 "$rc" "a weekly-exhausted recorded account should yield: $out"
+  assert_contains "$out" "which is exhausted_now on the weekly window (session 30%, week 0%)" "the notice should name the weekly window"
+  assert_contains "$out" "two"$'\t'"quota" "the weighted choice should take the worker"
+
+  quota_reading "$CASE/one" "40 40 40"
+  rm "$CASE/one/.credentials.json"
+  out=$(select_recorded one "$CASE/one"); rc=$?
+  expect_code 0 "$rc" "a signed-out recorded account should yield: $out"
+  assert_contains "$out" "account one, which is not signed in" "the notice should say the recorded account is signed out"
+  assert_contains "$out" "two"$'\t'"quota" "the weighted choice should take the worker"
+
+  signed_in_claude_root "$CASE/one"
+  out=$(select_recorded gone "$CASE/gone"); rc=$?
+  expect_code 0 "$rc" "an undeclared recorded account should yield: $out"
+  assert_contains "$out" "account gone, which is no longer declared by name in config/claude-account" \
+    "the notice should say the recorded account is no longer declared"
+  assert_contains "$out" "two"$'\t'"quota" "the weighted choice should take the worker"
+
+  printf '%s\n' "$CASE/two" > "$HOME_DIR/config/claude-account"
+  out=$(select_recorded "$CASE/one" ""); rc=$?
+  expect_code 0 "$rc" "an unnamed recorded root under a single-line pin should select the pin: $out"
+  [ "$out" = "$CASE/two"$'\t'"$CASE/two"$'\t\t\t'"pin" ] || fail "a single-line pin must replace an older recorded root: $out"
+  out=$(select_recorded one "$CASE/one"); rc=$?
+  assert_contains "$out" "account one, which is no longer declared by name" "a single-line pin declares no named account"
+  [ "$(printf '%s\n' "$out" | tail -1)" = "$CASE/two"$'\t'"$CASE/two"$'\t\t\t'"pin" ] || fail "a single-line pin must replace a recorded named account: $out"
+
+  rm "$HOME_DIR/config/claude-account" "$CASE/one/.credentials.json"
+  out=$(select_recorded "$CASE/one" ""); rc=$?
+  expect_code 0 "$rc" "a recorded root with no file should select the ambient account: $out"
+  [ -z "$out" ] || fail "with no file a relaunch must launch like any unpinned launch, not on its recorded root: $out"
+  pass "a recorded named account is kept only while declared, signed in, and not exhausted_now; an unnamed root never is"
+}
+
 test_absent_pin_keeps_the_launch_unchanged
 test_claude_pin_selects_the_root_and_sheds_ambient_credentials
 test_claude_pin_refuses_a_signed_out_root_despite_an_ambient_login
@@ -400,5 +644,9 @@ test_raw_claude_command_receives_the_pin
 test_raw_claude_account_override_refuses_under_a_pin
 test_raw_claude_account_override_is_kept_without_a_pin
 test_local_secondmate_reads_the_launching_home_pin
+test_named_accounts_choose_the_most_weighted_remaining_quota
+test_named_accounts_skip_an_account_that_cannot_take_the_worker
+test_explicit_account_and_named_file_refusals
+test_recorded_named_account_is_kept_only_while_usable
 
 echo "# all fm-worker-account tests passed"

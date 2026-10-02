@@ -28,8 +28,9 @@
 #       GitHub fork account | firstmate | GH_TOKEN="$(security find-generic-password -s gh-fork -w)" gh api user | refresh the gh-fork keychain token
 #     A malformed line is itself reported, so a typo cannot silently skip a
 #     login.
-#   - Worker accounts, built in: the Claude worker account is checked when
-#     config/claude-account pins one or the crew harness is claude, and each
+#   - Worker accounts, built in: every Claude account config/claude-account
+#     declares is checked (the crew harness's inherited account when it
+#     declares none and the crew harness is claude), and each
 #     provider config/pi-account declares is checked for Pi workers. A pinned
 #     account reuses bin/fm-worker-account-lib.sh's launch-time sign-in check,
 #     so it reports exactly what a spawn would refuse. An unpinned Claude
@@ -160,29 +161,40 @@ check_configured_logins() {  # <today's projects>
 }
 
 check_claude_worker_account() {
-  local resolved declared root pinned=0 crew
-  [ -e "$CONFIG/claude-account" ] && pinned=1
-  if [ "$pinned" = 0 ]; then
+  local declared_lines line name declared root label crew
+  if [ ! -e "$CONFIG/claude-account" ]; then
     crew=$("$SCRIPT_DIR/fm-harness.sh" crew 2>/dev/null) || crew=
     [ "$crew" = claude ] || return 0
-  fi
-  command -v claude >/dev/null 2>&1 || return 0
-  if [ "$pinned" = 1 ]; then
-    if ! resolved=$(fm_worker_account_resolve claude "$CONFIG" 2>/dev/null); then
-      MISSING+=("Claude worker account (config/claude-account is invalid; fix the pin)")
-      return 0
-    fi
-    declared=${resolved%%$'\t'*}
-    root=${resolved#*$'\t'}; root=${root%%$'\t'*}
-    fm_worker_account_check claude "$declared" "$root" claude >/dev/null 2>&1 && return 0
-  else
+    command -v claude >/dev/null 2>&1 || return 0
     root=${CLAUDE_CONFIG_DIR:-}
     fm_run_timed "$FM_WORKER_ACCOUNT_CHECK_SECONDS" claude auth status </dev/null >/dev/null 2>&1 && return 0
+    MISSING+=("Claude worker account $(claude_account_signin "$root")")
+    return 0
   fi
-  if [ -n "$root" ]; then
-    MISSING+=("Claude worker account $root (sign in: CLAUDE_CONFIG_DIR=$root claude, then /login)")
+  command -v claude >/dev/null 2>&1 || return 0
+  if ! declared_lines=$(fm_worker_account_declared claude "$CONFIG" 2>/dev/null); then
+    MISSING+=("Claude worker account (config/claude-account is invalid; fix the pin)")
+    return 0
+  fi
+  # Every declared account is checked, because a spawn may choose any of them.
+  while IFS= read -r line; do
+    name=${line%%$'\t'*}
+    declared=${line#*$'\t'}; declared=${declared%%$'\t'*}
+    label=${name:+$name }
+    if ! root=$(fm_worker_account_root claude "$declared"); then
+      MISSING+=("Claude worker account $label(config/claude-account names $root, which is not a readable directory; fix the pin)")
+      continue
+    fi
+    fm_worker_account_check claude "$declared" "$root" claude >/dev/null 2>&1 && continue
+    MISSING+=("Claude worker account $label$(claude_account_signin "$root")")
+  done <<<"$declared_lines"
+}
+
+claude_account_signin() {  # <root>
+  if [ -n "$1" ]; then
+    printf '%s (sign in: CLAUDE_CONFIG_DIR=%s claude, then /login)\n' "$1" "$1"
   else
-    MISSING+=("Claude worker account (sign in: env -u CLAUDE_CONFIG_DIR claude, then /login)")
+    printf '(sign in: env -u CLAUDE_CONFIG_DIR claude, then /login)\n'
   fi
 }
 

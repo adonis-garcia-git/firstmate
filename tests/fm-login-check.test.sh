@@ -10,6 +10,9 @@ set -u
 
 CHECK="$ROOT/bin/fm-login-check.sh"
 TMP_ROOT=$(fm_test_tmproot fm-login-check)
+# An unpinned Claude worker is checked under the inherited environment, so a
+# CLAUDE_CONFIG_DIR from the session running the suite must not leak in.
+unset CLAUDE_CONFIG_DIR
 fm_test_need_tool tasks-axi || exit 0
 
 make_home() {  # <name>

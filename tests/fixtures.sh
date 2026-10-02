@@ -7,7 +7,7 @@
 #
 # Generic reporters, temp roots, git fixtures, and fail/pass/fm_test_cleanup
 # come from tests/lib.sh, pulled in below. This file owns the shared fake
-# no-mistakes, gh, gh-axi, tmux, ssh, and spawn-world helpers. Wake-queue mocks
+# no-mistakes, gh, gh-axi, quota-axi, tmux, ssh, and spawn-world helpers. Wake-queue mocks
 # stay in wake-helpers.sh; secondmate-lifecycle mocks stay in
 # secondmate-helpers.sh.
 #
@@ -29,6 +29,43 @@ export FM_TEST_NO_MISTAKES_VERSION=1.46.0
 export FM_TEST_NO_MISTAKES_FAKE_VERSION="no-mistakes version v${FM_TEST_NO_MISTAKES_VERSION} (fake)"
 export FM_TEST_NO_MISTAKES_FAKE_VERSION_TS="${FM_TEST_NO_MISTAKES_FAKE_VERSION} 2026-06-27T00:02:18Z"
 export FM_TEST_GH_AXI_VERSION=0.1.29
+
+# --- fake quota-axi ---------------------------------------------------------
+
+# fm_test_fake_quota_axi <fakebin> <log>
+# Drops a quota-axi stub for per-account Claude quota reads. Each call appends
+# the CLAUDE_CONFIG_DIR it ran under (`unset` when absent) to <log>, which is
+# baked in because account probes run in a cleared environment. It then
+# answers from the selected root's quota-reading file (CLAUDE_CONFIG_DIR, else
+# $HOME/.claude), in the schema 5 shape the real quota-axi prints:
+#   <percent> <session> <weekly> [<runway>]   a known all-models reading
+#   unreadable <error> [<remedy command...>]  the auth-required shape
+#   stale <session> <weekly>                  the rate-limited shape: last
+#                                             known windows, no all-models reading
+# A root with no file answers as unreadable credentials_missing.
+fm_test_fake_quota_axi() {
+  local fakebin=$1 log=$2
+  cat > "$fakebin/quota-axi" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\${CLAUDE_CONFIG_DIR-unset}" >> '$log'
+reading=\$(cat "\${CLAUDE_CONFIG_DIR:-\$HOME/.claude}/quota-reading" 2>/dev/null) || reading='unreadable credentials_missing'
+set -- \$reading
+if [ "\$1" = unreadable ]; then
+  error=\$2
+  shift 2
+  remedy=
+  [ \$# -eq 0 ] || remedy=",\"remedyCommand\":\"\$*\""
+  printf '{"schemaVersion":5,"providers":[{"provider":"claude","windows":[],"state":{"status":"auth_required","stale":false,"error":"%s"%s},"quotaSemantics":{"status":"unknown","effectiveAvailability":[]},"accountKeys":["default"]}]}\n' "\$error" "\$remedy"
+  exit 0
+fi
+if [ "\$1" = stale ]; then
+  printf '{"schemaVersion":5,"providers":[{"provider":"claude","plan":"max","windows":[{"id":"five_hour","label":"session","kind":"session","percentRemaining":%s,"pace":{"status":"unknown","reason":"stale"}},{"id":"seven_day","label":"week","kind":"weekly","percentRemaining":%s,"pace":{"status":"unknown","reason":"stale"}}],"state":{"status":"stale","stale":true,"error":"Claude quota endpoint rate limited"},"quotaSemantics":{"status":"unknown","effectiveAvailability":[{"scope":"all_models","status":"unknown","boundedBy":["five_hour","seven_day"],"runway":{"status":"unknown"}}]},"accountKeys":["default"]}]}\n' "\$2" "\$3"
+  exit 0
+fi
+printf '{"schemaVersion":5,"providers":[{"provider":"claude","plan":"max","windows":[{"id":"five_hour","label":"session","kind":"session","percentRemaining":%s},{"id":"seven_day","label":"week","kind":"weekly","percentRemaining":%s}],"state":{"status":"fresh","stale":false},"quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":%s,"boundedBy":["five_hour","seven_day"],"runway":{"status":"%s","projectionConfidence":"established"},"selection":{"status":"known","spendPriority":1}}]},"accountKeys":["default"]}]}\n' "\$2" "\$3" "\$1" "\${4:-through_reset}"
+SH
+  chmod +x "$fakebin/quota-axi"
+}
 
 # --- fake no-mistakes -------------------------------------------------------
 
