@@ -826,6 +826,27 @@ test_bind_refuses_an_issue_that_was_never_claimed() {
   pass "bind refuses an issue that was never claimed"
 }
 
+# The merge poll authenticates a task's PR against the record's PR tail
+# (bin/fm-pr-lib.sh's fm_pr_metadata_identity_parse accepts only pr_head and
+# x_* keys after pr=), so a bind that lands after the PR was recorded must put
+# issue= ahead of that tail rather than after it.
+test_bind_after_a_recorded_pr_keeps_the_pr_tail_authenticated() {
+  local home out url meta
+  home=$(make_home bind-after-pr)
+  seed_issue "$home" 35 'Claimed, bound after its PR' fm:building
+  url=$(issue_url_for 35)
+  write_task "$home" fm-late
+  meta="$home/state/fm-late.meta"
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/77' "pr_head=$(printf '%040d' 77)" 'x_request=request-77' >> "$meta"
+  out="$home/out.txt"
+  run_pickup "$home" "$out" bind fm-late "$url"
+  expect_code 0 "$RUN_STATUS" "bind exit"$'\n'"$(cat "$out")"
+  assert_grep "issue=$url" "$meta" "bind did not record the issue on the task record"
+  bash -c '. "$1/bin/fm-pr-lib.sh" && fm_pr_metadata_identity_parse "$2"' _ "$ROOT" "$meta" \
+    || fail "bind left a task record whose PR identity the merge poll cannot read"$'\n'"$(cat "$meta")"
+  pass "a bind after the PR was recorded keeps the merge poll's PR tail authenticated"
+}
+
 test_bind_writes_nothing_to_the_forge() {
   local home out url writes
   # bind records and nothing else. It once posted a claim comment to keep an
@@ -1349,6 +1370,7 @@ test_blocked_outcome_leaves_the_issue_open
 test_report_refuses_a_task_that_carries_no_issue
 test_bind_refuses_an_issue_that_was_never_claimed
 test_bind_writes_nothing_to_the_forge
+test_bind_after_a_recorded_pr_keeps_the_pr_tail_authenticated
 test_claim_refuses_an_issue_that_is_not_dispatched
 test_claim_refuses_a_task_id_that_already_exists
 test_a_write_that_does_not_land_is_refused

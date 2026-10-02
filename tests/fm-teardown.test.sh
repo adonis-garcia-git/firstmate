@@ -1429,7 +1429,7 @@ test_windowless_leftover_retries_its_retained_legacy_stamp_without_the_flag() {
   write_windowless_legacy_meta "$case_dir" no-mistakes ship "$case_dir/missing-wt"
   printf '%s\n' 'pr=not-a-valid-url' >> "$case_dir/state/task-x1.meta"
   seed_backlog_in_flight "$case_dir"
-  add_failing_truncate_perl "$case_dir"
+  add_failing_rollback_perl "$case_dir"
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -1473,6 +1473,41 @@ test_legacy_record_teardown_completes_when_landed_and_endpoint_dead() {
   assert_absent "$case_dir/state/task-x1.meta" \
     "legacy-allow: teardown left the task record behind"
   pass "a landed legacy record with a dead endpoint tears down and logs its accepted incarnation"
+}
+
+# The legacy stamp lands while the task's PR merge poll is still on disk, and
+# teardown later re-authenticates that poll against the record's PR tail
+# (bin/fm-pr-lib.sh's fm_pr_metadata_identity_parse accepts only pr_head and
+# x_* keys after pr=). A merged poll whose retirement was interrupted leaves a
+# receipt that is checked exactly there, so the stamp must not land after the
+# PR tail or the teardown refuses its own receipt and wedges on every retry.
+test_legacy_record_teardown_keeps_the_pr_poll_tail_authenticated() {
+  local case_dir url out
+  url=https://github.com/example/repo/pull/7
+  case_dir=$(make_case legacy-pr-poll)
+  write_legacy_meta "$case_dir" no-mistakes ship
+  seed_backlog_in_flight "$case_dir"
+  wt_commit "$case_dir" "landed legacy work"
+  add_fork_with_pushed_branch "$case_dir"
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    PATH="$case_dir/fakebin:$PATH" "$PR_CHECK" task-x1 "$url" >/dev/null 2> "$case_dir/pr-check.err" \
+    || fail "legacy-pr-poll: could not arm the fixture PR merge poll: $(cat "$case_dir/pr-check.err")"
+  # The watcher's merged-poll retirement, interrupted after its receipt.
+  bash -c '. "$1/bin/fm-pr-lib.sh" \
+    && fm_pr_poll_snapshot_capture "$2" task-x1 "$1/bin/fm-pr-poll.sh" \
+    && fm_pr_poll_retirement_publish "$2" task-x1 "$1/bin/fm-pr-poll.sh" merged' \
+    _ "$ROOT" "$case_dir/state" || fail "legacy-pr-poll: could not publish the retirement receipt fixture"
+
+  out=$(run_teardown "$case_dir" --legacy-record 2> "$case_dir/stderr") \
+    || fail "legacy-pr-poll: teardown refused the task's own PR poll retirement: $(cat "$case_dir/stderr")"$'\n'"$(cat "$case_dir/state/task-x1.meta" 2>/dev/null)"
+  printf '%s\n' "$out" | grep -Fq 'legacy record accepted without spawn_gen' \
+    || fail "legacy-pr-poll: the teardown line did not log the accepted legacy incarnation: $out"
+  assert_absent "$case_dir/state/task-x1.meta" "legacy-pr-poll: teardown left the task record behind"
+  assert_absent "$case_dir/state/task-x1.pr-poll-retirement" \
+    "legacy-pr-poll: teardown left the PR poll retirement receipt behind"
+  assert_absent "$case_dir/state/task-x1.check.sh" "legacy-pr-poll: teardown left the PR merge poll behind"
+  pass "a legacy stamp stays ahead of the PR tail, so teardown retires the task's interrupted PR poll"
 }
 
 test_legacy_record_teardown_refuses_unlanded_work() {
@@ -1563,16 +1598,16 @@ test_legacy_record_rolls_the_stamp_back_when_the_marker_write_fails() {
   pass "--legacy-record teardown rolls its stamp back when the close marker write fails"
 }
 
-# Override fakebin/perl so ONLY the stamp rollback's truncate fails; every other
-# perl call in the lifecycle still runs the real interpreter, so the abandoned
-# attempt leaves its stamp behind for exactly the reason under test.
-add_failing_truncate_perl() {
+# Override fakebin/perl so ONLY the stamp rollback fails; every other perl call
+# in the lifecycle still runs the real interpreter, so the abandoned attempt
+# leaves its stamp behind for exactly the reason under test.
+add_failing_rollback_perl() {
   local case_dir=$1 real
   real=$(command -v perl)
   cat > "$case_dir/fakebin/perl" <<SH
 #!/usr/bin/env bash
 case "\$*" in
-  *truncate*) exit 1 ;;
+  *' -- unstamp '*) exit 1 ;;
 esac
 exec "$real" "\$@"
 SH
@@ -1587,7 +1622,7 @@ test_retained_legacy_stamp_still_faces_the_endpoint_gate() {
   seed_backlog_in_flight "$case_dir"
   wt_commit "$case_dir" "landed legacy work"
   add_fork_with_pushed_branch "$case_dir"
-  add_failing_truncate_perl "$case_dir"
+  add_failing_rollback_perl "$case_dir"
 
   set +e
   run_teardown "$case_dir" --legacy-record > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -4147,6 +4182,7 @@ test_windowless_legacy_record_still_refuses_unlanded_work
 test_windowless_record_outside_the_leftover_class_still_refuses
 test_windowless_leftover_retries_its_retained_legacy_stamp_without_the_flag
 test_legacy_record_teardown_completes_when_landed_and_endpoint_dead
+test_legacy_record_teardown_keeps_the_pr_poll_tail_authenticated
 test_legacy_record_teardown_refuses_unlanded_work
 test_legacy_record_teardown_refuses_an_ambiguous_endpoint
 test_legacy_record_rolls_the_stamp_back_when_the_marker_write_fails

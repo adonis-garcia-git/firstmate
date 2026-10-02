@@ -424,6 +424,30 @@ test_promotion_persists_the_selected_ship_branch() {
   pass "fm-promote: a selected branch prefix reaches both worker instructions and durable task state"
 }
 
+# The merge poll authenticates a task's PR against the record's PR tail
+# (bin/fm-pr-lib.sh's fm_pr_metadata_identity_parse accepts only pr_head and
+# x_* keys after pr=), so promoting a scout whose record already carries one
+# must place the ship fields ahead of that tail rather than after it.
+test_promotion_keeps_a_recorded_pr_tail_authenticated() {
+  local home id meta
+  home="$TMP_ROOT/promote-pr-tail/home"
+  id=promote-pr-tail-e1
+  meta="$home/state/$id.meta"
+  mkdir -p "$home/state"
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\npr=https://github.com/example/repo/pull/77\npr_head=%040d\n' "$id" 77 > "$meta"
+  FM_HOME="$home" "$BRIEF" "$id" fixture-project --scout >/dev/null 2>&1 \
+    || fail "PR-tail promotion scout brief should scaffold"
+  fill_brief_subsections "$home/data/$id/brief.md" \
+    "Promote the PR-tail fixture." "Keep the recorded PR readable."
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
+    --mode direct-PR --yolo off >/dev/null 2>&1 || fail "PR-tail promotion should succeed"
+  assert_grep 'kind=ship' "$meta" "promotion did not record the ship kind"
+  [ "$(grep -c '^kind=' "$meta")" = 1 ] || fail "promotion left more than one kind= line in the task record"
+  bash -c '. "$1/bin/fm-pr-lib.sh" && fm_pr_metadata_identity_parse "$2"' _ "$ROOT" "$meta" \
+    || fail "promotion left a task record whose PR identity the merge poll cannot read"$'\n'"$(cat "$meta")"
+  pass "fm-promote: promoting a scout keeps its recorded PR tail authenticated"
+}
+
 # The promotion instructions embed the branch in the `git checkout -b` command
 # the worker executes, so a ref-format-valid metacharacter prefix must stay
 # literal there, exactly as it does in a generated ship brief.
@@ -1621,6 +1645,7 @@ test_promote_requires_and_records_the_delivery_contract
 test_promote_refuses_a_symlinked_task_record
 test_promotion_delivers_the_real_definition_of_done
 test_promotion_persists_the_selected_ship_branch
+test_promotion_keeps_a_recorded_pr_tail_authenticated
 test_promotion_branch_command_is_shell_safe
 test_local_merge_uses_the_recorded_ship_branch
 test_project_mode_matches_whole_multiword_names
