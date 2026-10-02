@@ -872,7 +872,7 @@ Either account may run any work.
 A Claude launch takes its account in this order:
 
 1. An explicit `--account <name>` on `bin/fm-spawn.sh` or `bin/fm-control.sh relaunch`, which must name a declared account.
-2. On a relaunch, the named account the task's own record names, while it is still declared by name here, is signed in, and, when another account is declared, quota-axi does not read it as `exhausted_now` on the 5-hour or weekly window. A reading that cannot be taken keeps it. Otherwise the spawn prints a `notice:` line naming that account and why the worker moved off it, and the choice continues below. A record from a single-line pin is never kept: with no file a relaunch takes the ambient account like any launch, and with a single-line pin it takes the current pin.
+2. On a relaunch, the named account the task's own record names, while it is still declared by name here, is signed in, and, when another account is declared, quota-axi does not read it as `exhausted_now` on the 5-hour or weekly window. A reading that cannot be taken or refreshed keeps it. Otherwise the spawn prints a `notice:` line naming that account and why the worker moved off it, and the choice continues below. A record from a single-line pin is never kept: with no file a relaunch takes the ambient account like any launch, and with a single-line pin it takes the current pin.
 3. The only declared account, when there is one.
 4. Otherwise, the account whose weight times its remaining quota is highest.
 

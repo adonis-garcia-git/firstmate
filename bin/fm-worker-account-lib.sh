@@ -35,9 +35,9 @@
 #      (account= plus account_root=), while it is still declared by name, its
 #      root is usable, it is signed in, and, when another account is
 #      declared, quota-axi does not read it as exhausted_now on the 5-hour or
-#      weekly window; an unreadable reading keeps it. Otherwise one notice
-#      names the account and why the worker moves off it, and selection
-#      continues below. A recorded unnamed root and a Pi record
+#      weekly window; an unreadable or stale reading keeps it. Otherwise one
+#      notice names the account and why the worker moves off it, and
+#      selection continues below. A recorded unnamed root and a Pi record
 #      (account_provider=) are never kept, so with no file a relaunch takes
 #      the ambient account and with a single-line pin the current pin;
 #   3. the only declared account (either form);
@@ -46,11 +46,13 @@
 #      which is the lower of the 5-hour session and weekly windows. Each root
 #      is read with its own CLAUDE_CONFIG_DIR (unset for ordinary) in the same
 #      cleared environment as the sign-in check, so an ambient account cannot
-#      answer for another. An unusable root, an unreadable reading, and an
-#      exhausted account are skipped and named; a tie goes to the account
-#      declared first; the best candidate that also passes the sign-in check
-#      wins. When none qualifies the launch refuses and names every account's
-#      reason rather than guessing; --account still selects one explicitly.
+#      answer for another. A stale reading (quota-axi could not refresh)
+#      ranks by its last known windows. An unusable root, an unreadable
+#      reading, and an exhausted account are skipped and named; a tie goes to
+#      the account declared first; the best candidate that also passes the
+#      sign-in check wins. When none qualifies the launch refuses and names
+#      every account's reason rather than guessing; --account still selects
+#      one explicitly.
 # The quota read never prompts for Keychain access; an account quota-axi
 # cannot read names quota-axi's own remedy under that account's root.
 #
@@ -476,7 +478,7 @@ fm_worker_account_claude_choose() {
 # named account may keep the worker: it is still declared by name, its root is
 # usable, it is signed in, and, when another account is declared, its quota
 # reading is not exhausted_now. Otherwise prints why the worker moves off it.
-# An unreadable quota reading is not evidence of exhaustion.
+# An unreadable or stale quota reading is not evidence of exhaustion.
 fm_worker_account_claude_recorded_reason() {
   local executable=$1 lines=$2 rec=$3 line declared root reading kind pct runway session weekly
   line=$(printf '%s\n' "$lines" | awk -F '\t' -v n="$rec" '$1 != "" && $1 == n { print; exit }')
