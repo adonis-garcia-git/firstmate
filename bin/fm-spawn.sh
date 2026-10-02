@@ -5230,12 +5230,7 @@ spawn_record_traceparent() {
   # The carrier goes ahead of a relaunch's preserved PR tail, which must stay
   # last (preserve_relaunch_meta).
   if [ ! -f "$meta" ] || [ ! -w "$meta" ] ||
-    ! awk -F= -v carrier="traceparent=$SPAWN_TRACEPARENT" '
-      $1 == "traceparent" { next }
-      $1 == "pr" && !placed { print carrier; placed = 1 }
-      { print }
-      END { if (!placed) print carrier }
-    ' "$meta" >"$SPAWN_META_TMP" ||
+    ! fm_pr_meta_set_ahead_of_tail "$meta" "traceparent=$SPAWN_TRACEPARENT" >"$SPAWN_META_TMP" ||
     ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$meta" "task record" "$STATE"; then
     status=1
     rm -f "$SPAWN_META_TMP" 2>/dev/null || true

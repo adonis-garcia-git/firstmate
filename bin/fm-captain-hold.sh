@@ -237,6 +237,9 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -463,6 +466,18 @@ sorted_key_union() {  # <comma-list> <newline-or-space-separated-new-keys>
 
 meta_value() {  # <meta> <key>
   grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
+# Replace the inventory attestation, keeping a recorded PR tail last
+# (fm_pr_meta_set_ahead_of_tail). The caller holds the meta lock.
+record_inventory() {  # <meta> <comma-list>
+  local meta=$1 tmp
+  tmp="$STATE/.${meta##*/}.inventory.${BASHPID:-$$}"
+  if ! fm_pr_meta_set_ahead_of_tail "$meta" decisions_reviewed=1 "decision_keys=$2" > "$tmp" ||
+    ! fm_backlog_atomic_transition publish "$tmp" "$meta" "task record" "$STATE"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
 }
 
 # A resolution record written by this script or by the retired
@@ -1793,7 +1808,7 @@ EOF
 
   if [ "$has_meta" = 1 ]; then
     if [ "$(meta_value "$meta" decisions_reviewed)" != 1 ] || [ "$previous" != "$keys" ]; then
-      printf 'decisions_reviewed=1\ndecision_keys=%s\n' "$keys" >> "$meta"
+      record_inventory "$meta" "$keys" || fail "cannot record the captain-call inventory for $origin"
     fi
     fm_lock_release "$CAPTAIN_META_LOCK"
     CAPTAIN_META_LOCK_HELD=0

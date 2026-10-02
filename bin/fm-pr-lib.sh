@@ -400,6 +400,27 @@ fm_pr_metadata_identity_parse() {
   [ -n "$FM_PR_META_URL" ]
 }
 
+# The writer-side companion of fm_pr_metadata_identity_parse, for every writer
+# that sets fields on a task record which may already carry a PR tail: prints
+# <meta> with each named key's existing lines dropped and the given key=value
+# lines placed just ahead of the first pr= line, or appended when no PR is
+# recorded, so the tail still authenticates the task's merge poll. The caller
+# holds the record's meta lock and publishes the output atomically.
+fm_pr_meta_set_ahead_of_tail() {  # <meta> <key=value>...
+  local meta=$1 line entry placed=0
+  shift
+  while IFS= read -r line || [ -n "$line" ]; do
+    for entry in "$@"; do
+      case "$line" in "${entry%%=*}="*) continue 2 ;; esac
+    done
+    case "$placed:$line" in
+      0:pr=*) printf '%s\n' "$@" || return 1; placed=1 ;;
+    esac
+    printf '%s\n' "$line" || return 1
+  done < "$meta" || return 1
+  [ "$placed" -eq 1 ] || printf '%s\n' "$@"
+}
+
 # Sidecar layout: provider, url, host, path, number, one per line. A sidecar
 # written before the provider tag existed has a URL on its first line and one
 # line fewer, so it fails both the field count and the provider comparison and

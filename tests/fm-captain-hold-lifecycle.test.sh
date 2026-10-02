@@ -798,6 +798,80 @@ EOF
   pass "the completion gate attests captain-held inventory and transfers open status decisions"
 }
 
+# The watcher's own gate for running a task's PR merge poll (bin/fm-watch.sh).
+pr_poll_authenticated() {  # <home> <id>
+  bash -c '. "$1/bin/fm-pr-lib.sh" && fm_pr_poll_snapshot_capture "$2" "$3" "$1/bin/fm-pr-poll.sh"' \
+    _ "$ROOT" "$1/state" "$2"
+}
+
+# The watcher runs a task's PR merge poll only while the task record's PR tail
+# authenticates it (bin/fm-pr-lib.sh's fm_pr_metadata_identity_parse accepts
+# only pr_head and x_* keys after pr=). Recording the captain-call inventory on
+# a ship whose PR is already armed must keep that poll running, across repeated
+# passes, while a genuinely foreign line after the tail is still refused.
+test_completion_keeps_an_armed_pr_merge_poll_authenticated() {
+  local home id url
+  home=$(make_home completion-pr-poll)
+  id=sample-ship
+  url=https://github.com/example/repo/pull/77
+  tasks_in "$home" add "$id" "Ship the sample change" --kind ship --repo sample --start >/dev/null \
+    || fail "could not create ship backlog fixture"
+  if ! { git -C "$home" init -q "wt-$id" \
+    && git -C "$home/wt-$id" -c user.name=t -c user.email=t@t.invalid commit -q --allow-empty -m init \
+    && git -C "$home/wt-$id" update-ref refs/remotes/origin/main HEAD; }; then
+    fail "could not create the worker copy fixture"
+  fi
+  # A root whose supervision guard is a no-op keeps this suite's checkout state
+  # out of the recording's output.
+  if ! { mkdir -p "$home/root/bin" && printf '#!/usr/bin/env bash\n' > "$home/root/bin/fm-guard.sh" \
+    && chmod +x "$home/root/bin/fm-guard.sh"; }; then
+    fail "could not create the guard fixture"
+  fi
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" \
+    "worktree=$home/wt-$id" \
+    "project=$home/projects/sample" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "spawn_gen=fixture-$id"
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$home/root" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$ROOT/bin/fm-pr-check.sh" "$id" "$url" >/dev/null 2> "$home/pr-check.err" \
+    || fail "could not arm the fixture PR merge poll: $(cat "$home/pr-check.err")"
+  pr_poll_authenticated "$home" "$id" || fail "the freshly armed PR merge poll should authenticate"
+
+  printf '%s\n' 'needs-decision [key=rollout]: choose a staged or immediate rollout' > "$home/state/$id.status"
+  run_captain "$home" hold sample-rollout-call --title "Choose rollout: staged, immediate" \
+    --reason "captain rollout choice pending" --repo sample --origin "$id" >/dev/null \
+    || fail "could not register the captain-held task"
+  run_captain "$home" complete "$id" sample-rollout-call >/dev/null 2> "$home/complete.err" \
+    || fail "completion gate failed: $(cat "$home/complete.err")"
+  pr_poll_authenticated "$home" "$id" \
+    || fail "recording the captain-call inventory left a PR tail the merge poll refuses"$'\n'"$(cat "$home/state/$id.meta")"
+
+  run_captain "$home" hold sample-scope-call --title "Choose scope: narrow, wide" \
+    --reason "captain scope choice pending" --repo sample --origin "$id" >/dev/null \
+    || fail "could not register the second captain-held task"
+  run_captain "$home" complete "$id" sample-scope-call >/dev/null 2> "$home/complete2.err" \
+    || fail "second completion pass failed: $(cat "$home/complete2.err")"
+  pr_poll_authenticated "$home" "$id" \
+    || fail "a later inventory pass left a PR tail the merge poll refuses"$'\n'"$(cat "$home/state/$id.meta")"
+  [ "$(grep -c '^decision_keys=' "$home/state/$id.meta")" = 1 ] \
+    || fail "inventory passes accumulated duplicate decision_keys lines"$'\n'"$(cat "$home/state/$id.meta")"
+  assert_grep "decision_keys=sample-rollout-call,sample-scope-call" "$home/state/$id.meta" \
+    "the second pass did not union the inventory"
+  [ "$(tail -1 "$home/state/$id.meta")" = "pr=$url" ] \
+    || fail "the PR line is no longer the record's tail"$'\n'"$(cat "$home/state/$id.meta")"
+  run_captain "$home" verify "$id" >/dev/null 2> "$home/verify.err" \
+    || fail "the recorded inventory does not verify: $(cat "$home/verify.err")"
+
+  printf '%s\n' 'foreign=1' >> "$home/state/$id.meta"
+  if pr_poll_authenticated "$home" "$id"; then
+    fail "the merge poll authenticated a task record with a foreign line after its PR tail"
+  fi
+  pass "recording the captain-call inventory keeps an armed PR merge poll authenticated"
+}
+
 # The recorded-answer rule: answering closes with the captain's exact words, an
 # exact retry is idempotent, a drifted retry is rejected, dependent work routed
 # behind the answered task is released by the close, and the completion gate is
@@ -4164,6 +4238,7 @@ test_uninventoried_report_decision_refuses_completion
 test_hold_decodes_a_bare_scalar_body_without_the_nonref_default
 test_retained_body_keeps_its_utf8_bytes
 test_completion_gate_attests_and_transfers
+test_completion_keeps_an_armed_pr_merge_poll_authenticated
 test_answer_records_and_closes
 test_release_frees_held_work
 test_hold_stamp_precedes_hold_visibility

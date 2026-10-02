@@ -3464,15 +3464,51 @@ if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
     echo "error: the pending backlog $BACKLOG_TRANSITION for $ID is not replayable; refusing destructive teardown" >&2
     exit 1
   }
-# Roll the accepted legacy incarnation's stamp back to the record's exact
-# pre-stamp bytes. Uses perl - already in the teardown lifecycle's curated PATH
-# (truncate is not, and is absent on stock macOS) - and verifies the restored
-# size before reporting success, so a rollback that cannot be proven complete
-# is reported as not rolled back.
+# Stamp the accepted legacy incarnation into the record, or roll that stamp
+# back to the record's exact pre-stamp bytes, publishing either result
+# atomically. The stamp is placed as bin/fm-pr-lib.sh's
+# fm_pr_meta_set_ahead_of_tail places a field, so the task's merge poll and any
+# pending retirement of it still authenticate, but byte for byte, so the
+# rollback can restore the record exactly. Uses perl - already in the teardown
+# lifecycle's curated PATH - and the rollback verifies the restored size before
+# reporting success, so a rollback that cannot be proven complete is reported as
+# not rolled back.
+teardown_legacy_stamp_publish() {  # <stamp|unstamp>
+  local tmp="$STATE/.$ID.meta.legacy-stamp.${BASHPID:-$$}"
+  # shellcheck disable=SC2016  # Perl source, expanded by perl rather than the shell.
+  if ! perl -e '
+      my ($mode, $meta, $line, $size) = @ARGV;
+      open(my $in, "<", $meta) or exit 1;
+      binmode $in;
+      my $c = do { local $/; <$in> };
+      close $in;
+      $c = "" unless defined $c;
+      if ($mode eq "stamp") {
+        if ($c =~ /^pr=/m) {
+          substr($c, $-[0], 0) = "$line\n";
+        } else {
+          $c .= "\n" if length($c) && substr($c, -1) ne "\n";
+          $c .= "$line\n";
+        }
+      } else {
+        if ($c =~ /^\Q$line\E\n/m) {
+          my $at = $-[0];
+          substr($c, $at, length($line) + 1) = "";
+          chop $c if $at == length($c) && length($c) == $size + 1 && substr($c, -1) eq "\n";
+        }
+        length($c) == $size or exit 1;
+      }
+      print $c or exit 1;
+    ' -- "$1" "$META" "spawn_gen=$TEARDOWN_META_SPAWN_GEN" "$TEARDOWN_LEGACY_PRESTAMP_SIZE" > "$tmp" \
+    || ! fm_backlog_atomic_transition publish "$tmp" "$META" "task record" "$STATE"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
 teardown_legacy_stamp_rollback() {
   [ "$TEARDOWN_LEGACY_PRESTAMP_SIZE" -gt 0 ] 2>/dev/null || return 1
-  perl -e 'truncate($ARGV[0], $ARGV[1]) or exit 1' -- \
-    "$META" "$TEARDOWN_LEGACY_PRESTAMP_SIZE" || return 1
+  teardown_legacy_stamp_publish unstamp || return 1
   [ "$(wc -c < "$META" | tr -d ' ')" = "$TEARDOWN_LEGACY_PRESTAMP_SIZE" ]
 }
 
@@ -3486,13 +3522,7 @@ teardown_legacy_stamp_rollback() {
   if [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ] && [ -z "$TEARDOWN_LEGACY_RETAINED_STAMP" ]; then
     TEARDOWN_LEGACY_PRESTAMP_SIZE=$(wc -c < "$META" | tr -d ' ')
     TEARDOWN_LEGACY_STAMP_FAILED=
-    if [ -s "$META" ] && [ -n "$(tail -c 1 -- "$META" 2>/dev/null)" ]; then
-      printf '\n' >> "$META" || TEARDOWN_LEGACY_STAMP_FAILED=newline
-    fi
-    if [ -z "$TEARDOWN_LEGACY_STAMP_FAILED" ]; then
-      printf 'spawn_gen=%s\n' "$TEARDOWN_META_SPAWN_GEN" >> "$META" \
-        || TEARDOWN_LEGACY_STAMP_FAILED=append
-    fi
+    teardown_legacy_stamp_publish stamp || TEARDOWN_LEGACY_STAMP_FAILED="write"
     if [ -z "$TEARDOWN_LEGACY_STAMP_FAILED" ] \
        && ! fm_backlog_meta_spawn_gen "$META" "$STATE"; then
       TEARDOWN_LEGACY_STAMP_FAILED=validate

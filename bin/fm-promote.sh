@@ -313,14 +313,8 @@ fi
 BRIEF_REPLACEMENT=
 
 TMP="$STATE/.$ID.meta.promote.${BASHPID:-$$}"
-grep -v -e '^kind=' -e '^mode=' -e '^yolo=' -e '^branch=' "$META" > "$TMP"
-{
-  echo "kind=ship"
-  echo "mode=$MODE"
-  echo "yolo=$YOLO"
-  echo "branch=$BRANCH"
-} >> "$TMP"
-if ! fm_backlog_atomic_transition publish "$TMP" "$META" "task record" "$STATE"; then
+if ! fm_pr_meta_set_ahead_of_tail "$META" kind=ship "mode=$MODE" "yolo=$YOLO" "branch=$BRANCH" > "$TMP" ||
+  ! fm_backlog_atomic_transition publish "$TMP" "$META" "task record" "$STATE"; then
   rm -f -- "$TMP"
   TMP=
   echo "error: task record for $ID could not be published ($FM_BACKLOG_TRANSITION_ERROR)" >&2
