@@ -22,6 +22,23 @@ ARM_FAIL_EXIT_POLLS=400
 
 TMP_ROOT=$(fm_test_tmproot fm-watcher-lock-tests)
 
+# Execute the actual disposable-checkout guard before any watcher can start.
+lab="$TMP_ROOT/marked-lab"
+foreign_state="$TMP_ROOT/foreign-state"
+checkout="$TMP_ROOT/.no-mistakes/worktrees/guard/bin"
+mkdir -p "$lab" "$foreign_state" "$checkout"
+. "$ROOT/bin/fm-gate-refuse-lib.sh"
+fm_gate_lab_mark "$lab" || fail "could not mark the watcher lab"
+cp "$WATCH_ARM" "$ROOT/bin/fm-gate-refuse-lib.sh" "$checkout/"
+if env -u FM_GATE_REFUSE_BYPASS -u FM_STATE_OVERRIDE FM_HOME="$lab" STATE="$foreign_state" \
+  bash "$checkout/fm-watch-arm.sh" > "$TMP_ROOT/lab-guard.out" 2>&1; then
+  fail "disposable watcher accepted an inherited state outside its lab"
+fi
+grep -q 'refusing to arm from a disposable validation checkout' "$TMP_ROOT/lab-guard.out" \
+  || fail "disposable watcher did not reject the relocated state"
+[ ! -e "$foreign_state/.watch.lock" ] || fail "disposable watcher touched outside state"
+pass "disposable watcher refuses inherited state outside its marked lab"
+
 drain_and_ack() {  # <state>
   local state=$1 err sequence generation
   err="$state/.test-drain.err"
@@ -499,6 +516,9 @@ test_lock_steal_reap_cannot_remove_successor() {
   fakebin="$dir/fakebin"
   out="$dir/competitor"
   leave_dead_link_locks "$state" "$steal"
+  # The killed fixture owner may have its PID reused during a loaded serial
+  # shard. Pin a verified-dead PID so the race exercises reaping, not liveness.
+  printf '%s\n' "$(dead_pid)" > "$steal/pid"
   cat > "$fakebin/rm" <<'SH'
 #!/usr/bin/env bash
 last=
@@ -545,32 +565,51 @@ SH
 }
 
 test_lock_stale_steal_single_winner_under_concurrency() {
-  local dir state lockdir dead marker i pids pid wins
+  local dir state lockdir dead marker gate hold i pids pid waiter winner wins
   dir=$(make_case lock-stale-concurrency)
   state="$dir/state"
   lockdir="$state/.contend.lock"
   marker="$dir/wins"
+  gate="$dir/first-winner"
+  hold="$dir/winner-release"
   dead=$(dead_pid)
   mkdir "$lockdir"
   printf '%s\n' "$dead" > "$lockdir/pid"
   : > "$marker"
+  mkfifo "$gate" "$hold"
+  # try_acquire is nonblocking: all one-shot candidates may lose to a transient
+  # steal mutex. A waiting contender guarantees eventual acquisition, and the
+  # FIFO keeps the winner alive until every other contender has finished.
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2" || exit 1
+    printf "%s\n" "${BASHPID:-$$}" >> "$3"
+    printf "%s\n" "${BASHPID:-$$}" > "$4"
+    IFS= read -r _ < "$5"
+  ' _ "$LIB" "$lockdir" "$marker" "$gate" "$hold" &
+  waiter=$!
   pids=
   i=1
-  while [ "$i" -le 40 ]; do
+  while [ "$i" -le 39 ]; do
     FM_STATE_OVERRIDE="$state" bash -c '
       . "$1"
       if fm_lock_try_acquire "$2"; then
         printf "%s\n" "${BASHPID:-$$}" >> "$3"
-        sleep 1
+        printf "%s\n" "${BASHPID:-$$}" > "$4"
+        IFS= read -r _ < "$5"
       fi
-    ' _ "$LIB" "$lockdir" "$marker" &
+    ' _ "$LIB" "$lockdir" "$marker" "$gate" "$hold" &
     pids="$pids $!"
     i=$((i + 1))
   done
+  IFS= read -r winner < "$gate"
+  [ "$winner" = "$waiter" ] || { kill "$waiter" 2>/dev/null || true; wait "$waiter" 2>/dev/null || true; }
   for pid in $pids; do
-    wait "$pid" 2>/dev/null || true
+    [ "$pid" = "$winner" ] || wait "$pid" 2>/dev/null || true
   done
   wins=$(awk 'NF { c++ } END { print c + 0 }' "$marker")
+  printf 'release\n' > "$hold"
+  wait "$winner" 2>/dev/null || true
   [ "$wins" -eq 1 ] || fail "expected exactly one stale-lock stealer, got $wins"
   pass "concurrent stale-lock steal yields exactly one winner"
 }
@@ -1626,7 +1665,7 @@ test_attached_arm_survives_system_sleep_window() {
 }
 
 test_attached_arm_reports_live_holder_hang() {
-  local dir state fakebin armout peer identity armpid status i
+  local dir state fakebin armout peer identity armpid status i age
   dir=$(make_case attach-live-holder-hang)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -1640,7 +1679,11 @@ test_attached_arm_reports_live_holder_hang() {
   printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
   printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
   touch "$state/.last-watcher-beat"
-  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 "$WATCH_ARM" > "$armout" &
+  # The system "woke" as the arm started, so a beacon frozen at a 2000 mtime is
+  # decades old in wall-clock time but only as old as the arm in awake time.
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ARM_ATTACH_POLL=0.1 FM_ARM_CONFIRM_TIMEOUT=1 \
+    FM_GUARD_GRACE=2 FM_WATCHER_STALL_BOUND=10 FM_SYSTEM_WAKE_EPOCH_OVERRIDE="$(date +%s)" \
+    "$WATCH_ARM" > "$armout" &
   armpid=$!
   i=0
   while [ "$i" -lt 80 ]; do
@@ -1649,21 +1692,24 @@ test_attached_arm_reports_live_holder_hang() {
     i=$((i + 1))
   done
   grep -qF "watcher: attached pid=$peer" "$armout" || fail "arm did not attach to the healthy peer: $(cat "$armout")"
-  # No system sleep involved (the suite pins the wake override to 0): a live
-  # identity-matched holder whose beacon stops moving is a hang, and the FAILED
-  # reason must say so instead of claiming the cycle ended.
   touch -t 200001010000 "$state/.last-watcher-beat"
-  wait_for_exit "$armpid" 80
+  sleep 1
+  is_live_non_zombie "$armpid" || fail "attached arm judged a pre-wake beacon by wall-clock age: $(cat "$armout")"
+  ! grep -qF 'watcher: FAILED' "$armout" || fail "attached arm failed before the awake-time stall bound: $(cat "$armout")"
+  # A live identity-matched holder whose beacon stops moving while awake is a
+  # hang: past the stall bound the arm reports it with the typed stalled line.
+  wait_for_exit "$armpid" 300
   status=$?
   [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "arm did not fail for a live holder with a frozen beacon (status $status)"
-  grep -qE "watcher: FAILED - watcher pid $peer is alive but its beacon has not moved for [0-9]+s of awake time" "$armout" \
-    || fail "live-holder hang did not print the actionable hang reason: $(cat "$armout")"
+  age=$(sed -n "s/^watcher: FAILED - attached watcher pid=$peer stalled (beacon \([0-9]*\)s at or past hard bound 10s)\$/\1/p" "$armout")
+  [ -n "$age" ] || fail "live-holder hang did not print the typed stalled line: $(cat "$armout")"
+  [ "$age" -lt 100 ] || fail "stalled line reported a wall-clock beacon age (${age}s), not awake time"
   ! grep -qF 'watcher: FAILED - cycle ended without an actionable reason' "$armout" \
     || fail "live-holder hang was misreported as a cycle end"
   is_live_non_zombie "$peer" || fail "arm killed the hung holder instead of reporting it"
   kill "$peer" 2>/dev/null || true
   wait "$peer" 2>/dev/null || true
-  pass "attached arm reports a live hung holder with an actionable reason"
+  pass "attached arm reports a live hung holder at the awake-time stall bound"
 }
 
 test_guard_alarms_on_false_beacon_dead_watcher() {

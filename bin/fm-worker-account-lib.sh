@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # fm-worker-account-lib.sh - the single owner of the opt-in per-home worker
-# account pin: which runners can be pinned, how a pin file is parsed and
-# resolved, how one of several declared Claude accounts is chosen for a
-# launch, the launch-time sign-in check under it, and the environment
-# credentials a pinned Claude launch sheds.
+# and per-secondmate account pins: which runners can be pinned, how a pin file
+# is parsed and resolved, how one of several declared Claude accounts is
+# chosen for a launch, the launch-time sign-in check under it, and the
+# environment credentials a pinned Claude launch sheds.
 #
 # docs/configuration.md "Worker account pin" owns the operator-facing contract.
 # Sourced by bin/fm-spawn.sh, bin/fm-control.sh, and bin/fm-login-check.sh.
@@ -111,8 +111,9 @@ fm_worker_account_file() {
   esac
 }
 
-# fm_worker_account_read <harness> <file>
-# For Pi prints "declared<TAB>providers", where declared is `ordinary` or the
+# fm_worker_account_read <harness> <file> [<setting>]
+# <setting> is the name refusals print for the file (default
+# config/<pin-file>). For Pi prints "declared<TAB>providers", where declared is `ordinary` or the
 # absolute path. For Claude prints one "name<TAB>declared<TAB>weight" line per
 # declared account, in file order; the single-line form prints one line with
 # an empty name and weight. The final newline is optional; any other control
@@ -124,7 +125,7 @@ fm_worker_account_file() {
 # (one error naming the line already printed).
 fm_worker_account_read() {
   perl -MErrno=ENOENT -e '
-    my ($harness, $f) = @ARGV;
+    my ($harness, $f, $setting) = @ARGV;
     unless (lstat $f) {
       exit 3 if $! == ENOENT;
       print STDERR "error: cannot inspect configuration source at $f: $!\n";
@@ -149,20 +150,20 @@ fm_worker_account_read() {
         $n++;
         next if $line =~ /\A[ \t]*(?:#[^\x00-\x08\x0a-\x1f\x7f]*)?\z/;
         unless ($line =~ /\A[ \t]*([A-Za-z0-9][A-Za-z0-9._-]*)[ \t]*\|[ \t]*(ordinary|\/[^\x00-\x1f\x7f|]*?)[ \t]*\|[ \t]*([0-9]+(?:\.[0-9]+)?)[ \t]*\z/) {
-          print STDERR "error: config/claude-account line $n must read <name> | <root> | <weight>, where root is ordinary or an absolute path and weight is a positive number, with no control characters: $f\n";
+          print STDERR "error: $setting line $n must read <name> | <root> | <weight>, where root is ordinary or an absolute path and weight is a positive number, with no control characters: $f\n";
           exit 7;
         }
         my ($name, $root, $weight) = ($1, $2, $3);
         if ($weight !~ /[1-9]/) {
-          print STDERR "error: config/claude-account line $n gives account $name weight $weight; a weight must be greater than zero: $f\n";
+          print STDERR "error: $setting line $n gives account $name weight $weight; a weight must be greater than zero: $f\n";
           exit 7;
         }
         if ($names{$name}++) {
-          print STDERR "error: config/claude-account line $n declares account $name a second time; account names must be unique: $f\n";
+          print STDERR "error: $setting line $n declares account $name a second time; account names must be unique: $f\n";
           exit 7;
         }
         if ($roots{$root}++) {
-          print STDERR "error: config/claude-account line $n declares root $root a second time; each account needs its own root: $f\n";
+          print STDERR "error: $setting line $n declares root $root a second time; each account needs its own root: $f\n";
           exit 7;
         }
         push @out, "$name\t$root\t$weight\n";
@@ -172,33 +173,71 @@ fm_worker_account_read() {
       $body =~ /\A(ordinary|\/[^\x00-\x1f\x7f]*)\n([A-Za-z0-9][A-Za-z0-9._-]*(?: +[A-Za-z0-9][A-Za-z0-9._-]*)*)\n?\z/ or exit 6;
       print $1, "\t", $2;
     }
-  ' -- "$1" "$2"
+  ' -- "$1" "$2" "${3:-config/$(fm_worker_account_file "$1")}"
 }
 
-# fm_worker_account_declared <harness> <config-dir>
-# Prints the home's parsed pin file (fm_worker_account_read's output) for a
-# pinnable runner. Prints nothing and returns 0 when the runner is not
-# pinnable or the home has no pin. On refusal prints one error naming the file
-# and returns 1.
+# fm_worker_account_config <harness> <config-dir> [<secondmate-id>]
+# Prints the directory containing the applicable pin. Only a missing per-mate
+# file falls back to the home pin; unreadable or malformed files still select
+# the override so the ordinary parser refuses them. Non-pinnable runners and
+# ordinary workers keep the supplied directory unchanged.
+fm_worker_account_config() {
+  local harness=$1 config=$2 mate=${3:-} file candidate err rc
+  if [ -z "$mate" ] || ! file=$(fm_worker_account_file "$harness"); then
+    printf '%s\n' "$config"
+    return 0
+  fi
+  candidate="$config/secondmate-accounts/$mate"
+  err=$(fm_worker_account_read "$harness" "$candidate/$file" 2>&1 >/dev/null)
+  rc=$?
+  case "$rc" in
+  3) printf '%s\n' "$config" ;;
+  4)
+    printf '%s\n' "$err" >&2
+    return 1
+    ;;
+  *) printf '%s\n' "$candidate" ;;
+  esac
+}
+
+# fm_worker_account_setting <harness> <home-config-dir> <selected-config-dir>
+# Prints the name refusals use for the selected pin file: config/<pin-file>
+# for the home pin, or the per-secondmate file's path.
+fm_worker_account_setting() {
+  local file
+  file=$(fm_worker_account_file "$1") || return 1
+  if [ "$3" = "$2" ]; then
+    printf 'config/%s\n' "$file"
+  else
+    printf '%s/%s\n' "$3" "$file"
+  fi
+}
+
+# fm_worker_account_declared <harness> <config-dir> [<setting>]
+# Prints the parsed pin file (fm_worker_account_read's output) for a pinnable
+# runner. Prints nothing and returns 0 when the runner is not pinnable or the
+# directory has no pin. On refusal prints one error naming the file as
+# <setting> (default config/<pin-file>) and returns 1.
 fm_worker_account_declared() {
-  local harness=$1 config=$2 file cfg token rc
+  local harness=$1 config=$2 setting=${3:-} file cfg token rc
   file=$(fm_worker_account_file "$harness") || return 0
+  [ -n "$setting" ] || setting="config/$file"
   cfg="$config/$file"
-  token=$(fm_worker_account_read "$harness" "$cfg")
+  token=$(fm_worker_account_read "$harness" "$cfg" "$setting")
   rc=$?
   case "$rc" in
   0) ;;
   3) return 0 ;;
   4 | 7) return 1 ;;
   5)
-    echo "error: config/$file must be a readable regular file: $cfg" >&2
+    echo "error: $setting must be a readable regular file: $cfg" >&2
     return 1
     ;;
   *)
     if [ "$file" = pi-account ]; then
-      echo "error: config/$file must hold 'ordinary' or one absolute path on line 1 and the providers this home may spend on line 2, separated by spaces, with no other lines or control characters: $cfg" >&2
+      echo "error: $setting must hold 'ordinary' or one absolute path on line 1 and the providers this home may spend on line 2, separated by spaces, with no other lines or control characters: $cfg" >&2
     else
-      echo "error: config/$file must hold 'ordinary' or one absolute path on a single line, or one '<name> | <root> | <weight>' line per account, with no control characters: $cfg" >&2
+      echo "error: $setting must hold 'ordinary' or one absolute path on a single line, or one '<name> | <root> | <weight>' line per account, with no control characters: $cfg" >&2
     fi
     return 1
     ;;
@@ -224,19 +263,20 @@ fm_worker_account_root() {
   [ -z "$root" ] || { [ -d "$root" ] && [ -r "$root" ] && [ -x "$root" ]; }
 }
 
-# fm_worker_account_resolve <pi|pi-signed> <config-dir>
+# fm_worker_account_resolve <pi|pi-signed> <config-dir> [<setting>]
 # Prints "declared<TAB>root<TAB>providers" for a valid Pi pin. Prints nothing
-# and returns 0 when the home has no pin. On refusal prints one error naming
-# the file and returns 1. Claude accounts resolve through
-# fm_worker_account_select, because a Claude file may declare several.
+# and returns 0 when the directory has no pin. On refusal prints one error
+# naming the file as <setting> (default config/pi-account) and returns 1.
+# Claude accounts resolve through fm_worker_account_select, because a Claude
+# file may declare several.
 fm_worker_account_resolve() {
-  local harness=$1 config=$2 token declared root
-  token=$(fm_worker_account_declared "$harness" "$config") || return 1
+  local harness=$1 config=$2 setting=${3:-config/pi-account} token declared root
+  token=$(fm_worker_account_declared "$harness" "$config" "$setting") || return 1
   [ -n "$token" ] || return 0
   declared=${token%%$'\t'*}
   if ! root=$(fm_worker_account_root "$harness" "$declared"); then
     # shellcheck disable=SC2088  # The fallback is literal text for the refusal.
-    echo "error: config/pi-account must name a readable, searchable existing directory (ordinary means ~/.pi/agent): $config/pi-account -> $root" >&2
+    echo "error: $setting must name a readable, searchable existing directory (ordinary means ~/.pi/agent): $config/pi-account -> $root" >&2
     return 1
   fi
   printf '%s\t%s\t%s\n' "$declared" "$root" "${token#*$'\t'}"
@@ -268,12 +308,13 @@ fm_worker_account_clean_env() {
   done
 }
 
-# fm_worker_account_check <harness> <declared> <root> <executable> [<provider>]
+# fm_worker_account_check <harness> <declared> <root> <executable> [<provider>] [<setting>]
 # Returns 0 only when the runner's own check says the selected root is signed
 # in for this launch; otherwise prints one error and returns 1.
 fm_worker_account_check() {
-  local harness=$1 declared=$2 root=$3 executable=$4 provider=${5:-} out verdict
+  local harness=$1 declared=$2 root=$3 executable=$4 provider=${5:-} setting=${6:-} out verdict
   local -a clean
+  [ -n "$setting" ] || setting="config/$(fm_worker_account_file "$harness")"
   fm_worker_account_clean_env
   clean=("${FM_WORKER_ACCOUNT_ENV[@]}")
   case "$harness" in
@@ -284,9 +325,9 @@ fm_worker_account_check() {
       return 0
     fi
     if [ -n "$root" ]; then
-      echo "error: config/claude-account pins Claude workers to $root, which is not signed in (claude auth status); sign in with CLAUDE_CONFIG_DIR=$root claude, then /login, or change the pin" >&2
+      echo "error: $setting pins Claude workers to $root, which is not signed in (claude auth status); sign in with CLAUDE_CONFIG_DIR=$root claude, then /login, or change the pin" >&2
     else
-      echo "error: config/claude-account pins Claude workers to the ordinary account, which is not signed in (claude auth status); sign in with env -u CLAUDE_CONFIG_DIR claude, then /login, or change the pin" >&2
+      echo "error: $setting pins Claude workers to the ordinary account, which is not signed in (claude auth status); sign in with env -u CLAUDE_CONFIG_DIR claude, then /login, or change the pin" >&2
     fi
     return 1
     ;;
@@ -311,7 +352,7 @@ fm_worker_account_check() {
       verdict="no model listed for provider $provider"
       ;;
     esac
-    echo "error: config/pi-account pins Pi workers to $declared, which is not signed in for provider '$provider' ($verdict); sign in with PI_CODING_AGENT_DIR=$root $harness, then /login, or change the pin" >&2
+    echo "error: $setting pins Pi workers to $declared, which is not signed in for provider '$provider' ($verdict); sign in with PI_CODING_AGENT_DIR=$root $harness, then /login, or change the pin" >&2
     return 1
     ;;
   esac
@@ -329,18 +370,18 @@ fm_worker_account_claude_hint() {
   fi
 }
 
-# fm_worker_account_claude_raw_guard <raw-command>
+# fm_worker_account_claude_raw_guard <raw-command> [<setting>]
 # Refuses a raw Claude launch command whose leading assignments set
 # CLAUDE_CONFIG_DIR or a shed credential, because it runs after the selected
 # root and shed credentials are applied and would override the account.
 fm_worker_account_claude_raw_guard() {
-  local word
+  local word setting=${2:-config/claude-account}
   for word in $1; do
     case "$word" in
     [A-Za-z_]*=*)
       case " CLAUDE_CONFIG_DIR $FM_WORKER_ACCOUNT_CLAUDE_SHED " in
       *" ${word%%=*} "*)
-        echo "error: this Claude launch runs on a selected worker account, but the raw launch command sets ${word%%=*}, which would override that account; remove ${word%%=*} from the raw command, or change or remove config/claude-account" >&2
+        echo "error: this Claude launch runs on a selected worker account, but the raw launch command sets ${word%%=*}, which would override that account; remove ${word%%=*} from the raw command, or change or remove $setting" >&2
         return 1
         ;;
       esac
@@ -395,7 +436,7 @@ fm_worker_account_claude_quota() {
       end'
 }
 
-# fm_worker_account_claude_choose <executable> <declared-lines>
+# fm_worker_account_claude_choose <executable> <declared-lines> [<setting>]
 # Step 4 of the header's selection order, among two or more named accounts
 # given as fm_worker_account_read lines. Prints "name<TAB>declared<TAB>root"
 # for the chosen account, which has passed the sign-in check, and one notice
@@ -404,11 +445,11 @@ fm_worker_account_claude_quota() {
 # and the notice marks it stale. When no account qualifies prints
 # one error naming each account's reason and returns 1.
 fm_worker_account_claude_choose() {
-  local executable=$1 lines=$2 line name declared weight root reading kind pct runway session weekly
+  local executable=$1 lines=$2 setting=${3:-config/claude-account} line name declared weight root reading kind pct runway session weekly
   local reason remedy score index=0 chosen='' notice
   local -a ranked=() readings=() skipped=()
   if ! command -v quota-axi >/dev/null 2>&1; then
-    echo "error: config/claude-account declares several Claude accounts, and choosing among them needs quota-axi, which is not installed; install it, or pass --account <name> to choose one" >&2
+    echo "error: $setting declares several Claude accounts, and choosing among them needs quota-axi, which is not installed; install it, or pass --account <name> to choose one" >&2
     return 1
   fi
   while IFS= read -r line; do
@@ -463,7 +504,7 @@ fm_worker_account_claude_choose() {
   done < <(printf '%s\n' "${ranked[@]+"${ranked[@]}"}" | LC_ALL=C sort -t $'\t' -k1,1nr -k2,2n)
   if [ -z "$chosen" ]; then
     reason=$(printf '%s; ' "${skipped[@]}")
-    echo "error: config/claude-account declares several Claude accounts, but none can take this worker: ${reason%; }; fix the account named, or pass --account <name> to choose one explicitly" >&2
+    echo "error: $setting declares several Claude accounts, but none can take this worker: ${reason%; }; fix the account named, or pass --account <name> to choose one explicitly" >&2
     return 1
   fi
   notice="notice: chose Claude account ${chosen%%$'\t'*} by weighted remaining quota (weight x the lower of its session and weekly remaining): $(printf '%s; ' "${readings[@]}")"
@@ -473,17 +514,17 @@ fm_worker_account_claude_choose() {
   printf '%s\n' "$chosen"
 }
 
-# fm_worker_account_claude_recorded_reason <executable> <declared-lines> <recorded-name>
+# fm_worker_account_claude_recorded_reason <executable> <declared-lines> <recorded-name> [<setting>]
 # Step 2 of the header's selection order. Prints nothing when the recorded
 # named account may keep the worker: it is still declared by name, its root is
 # usable, it is signed in, and, when another account is declared, its quota
 # reading is not exhausted_now. Otherwise prints why the worker moves off it.
 # An unreadable or stale quota reading is not evidence of exhaustion.
 fm_worker_account_claude_recorded_reason() {
-  local executable=$1 lines=$2 rec=$3 line declared root reading kind pct runway session weekly
+  local executable=$1 lines=$2 rec=$3 setting=${4:-config/claude-account} line declared root reading kind pct runway session weekly
   line=$(printf '%s\n' "$lines" | awk -F '\t' -v n="$rec" '$1 != "" && $1 == n { print; exit }')
   if [ -z "$line" ]; then
-    echo "is no longer declared by name in config/claude-account"
+    echo "is no longer declared by name in $setting"
     return 0
   fi
   declared=${line#*$'\t'}
@@ -508,33 +549,33 @@ fm_worker_account_claude_recorded_reason() {
   }'
 }
 
-# fm_worker_account_select_claude <config-dir> <executable> <raw-command> <account> <recorded-account> <recorded-account-root> <recorded-account-provider>
+# fm_worker_account_select_claude <config-dir> <setting> <executable> <raw-command> <account> <recorded-account> <recorded-account-root> <recorded-account-provider>
 # fm_worker_account_select's Claude branch; see that function and the header.
 fm_worker_account_select_claude() {
-  local config=$1 executable=$2 raw=$3 explicit=$4 rec_account=$5 rec_root=$6 rec_provider=$7
+  local config=$1 setting=$2 executable=$3 raw=$4 explicit=$5 rec_account=$6 rec_root=$7 rec_provider=$8
   local cfg="$config/claude-account" list line name declared root how label names reason
-  list=$(fm_worker_account_declared claude "$config") || return 1
+  list=$(fm_worker_account_declared claude "$config" "$setting") || return 1
   if [ -n "$explicit" ]; then
     line=$(printf '%s\n' "$list" | awk -F '\t' -v n="$explicit" '$1 != "" && $1 == n { print; exit }')
     if [ -z "$line" ]; then
       names=$(printf '%s\n' "$list" | awk -F '\t' '$1 != "" { printf "%s%s", sep, $1; sep = ", " }')
       if [ -n "$names" ]; then
-        echo "error: --account '$explicit' is not one of the Claude accounts config/claude-account declares ($names)" >&2
+        echo "error: --account '$explicit' is not one of the Claude accounts $setting declares ($names)" >&2
       else
-        echo "error: --account '$explicit' names a Claude account, but config/claude-account declares none by name; drop --account, or declare each account as a '<name> | <root> | <weight>' line" >&2
+        echo "error: --account '$explicit' names a Claude account, but $setting declares none by name; drop --account, or declare each account as a '<name> | <root> | <weight>' line" >&2
       fi
       return 1
     fi
     how=explicit
   else
     if [ -n "$rec_account" ] && [ -n "$rec_root" ] && [ -z "$rec_provider" ]; then
-      reason=$(fm_worker_account_claude_recorded_reason "$executable" "$list" "$rec_account")
+      reason=$(fm_worker_account_claude_recorded_reason "$executable" "$list" "$rec_account" "$setting")
       if [ -z "$reason" ]; then
         line=$(printf '%s\n' "$list" | awk -F '\t' -v n="$rec_account" '$1 == n { print; exit }')
         declared=${line#*$'\t'}
         declared=${declared%%$'\t'*}
         root=$(fm_worker_account_root claude "$declared")
-        fm_worker_account_claude_raw_guard "$raw" || return 1
+        fm_worker_account_claude_raw_guard "$raw" "$setting" || return 1
         printf '%s\t%s\t\t%s\trecorded\n' "$declared" "$root" "$rec_account"
         return 0
       fi
@@ -543,8 +584,8 @@ fm_worker_account_select_claude() {
     if [ -z "$list" ]; then
       return 0
     elif [ "$(printf '%s\n' "$list" | awk 'END { print NR }')" -gt 1 ]; then
-      fm_worker_account_claude_raw_guard "$raw" || return 1
-      line=$(fm_worker_account_claude_choose "$executable" "$list") || return 1
+      fm_worker_account_claude_raw_guard "$raw" "$setting" || return 1
+      line=$(fm_worker_account_claude_choose "$executable" "$list" "$setting") || return 1
       name=${line%%$'\t'*}
       declared=${line#*$'\t'}
       root=${declared#*$'\t'}
@@ -560,18 +601,18 @@ fm_worker_account_select_claude() {
   declared=${declared%%$'\t'*}
   label=$declared
   [ -z "$name" ] || label="$name ($declared)"
-  fm_worker_account_claude_raw_guard "$raw" || return 1
+  fm_worker_account_claude_raw_guard "$raw" "$setting" || return 1
   if ! root=$(fm_worker_account_root claude "$declared"); then
     if [ -n "$name" ]; then
-      echo "error: config/claude-account account $name names $root, which is not a readable, searchable existing directory: $cfg" >&2
+      echo "error: $setting account $name names $root, which is not a readable, searchable existing directory: $cfg" >&2
     else
       # shellcheck disable=SC2088  # The fallback is literal text for the refusal.
-      echo "error: config/claude-account must name a readable, searchable existing directory (ordinary means ~/.claude with CLAUDE_CONFIG_DIR unset): $cfg -> $root" >&2
+      echo "error: $setting must name a readable, searchable existing directory (ordinary means ~/.claude with CLAUDE_CONFIG_DIR unset): $cfg -> $root" >&2
     fi
     return 1
   fi
   if [ "$how" = pin ]; then
-    fm_worker_account_check claude "$declared" "$root" "$executable" || return 1
+    fm_worker_account_check claude "$declared" "$root" "$executable" "" "$setting" || return 1
   elif ! fm_worker_account_check claude "$declared" "$root" "$executable" 2>/dev/null; then
     echo "error: --account '$name' selects Claude account $label, which is not signed in (claude auth status); sign in with $(fm_worker_account_claude_hint "$root") claude, then /login" >&2
     return 1
@@ -579,50 +620,64 @@ fm_worker_account_select_claude() {
   printf '%s\t%s\t\t%s\t%s\n' "$declared" "$root" "$name" "$how"
 }
 
-# fm_worker_account_select <harness> <config-dir> <model> <executable> [<raw-command> [<account> [<recorded-account> <recorded-account-root> <recorded-account-provider>]]]
+# fm_worker_account_select <harness> <config-dir> <model> <executable> [<raw-command> [<secondmate-id> [<account> [<recorded-account> <recorded-account-root> <recorded-account-provider>]]]]
 # The whole launch-time decision. Prints nothing for an unpinned launch, so
 # the caller keeps today's launch unchanged. Otherwise prints
 # "declared<TAB>root<TAB>provider<TAB>name<TAB>how" after the model guard and
 # the sign-in check pass: provider is the Pi launch model's own (empty for
 # Claude), name is the named Claude account (empty otherwise), and how is
-# pin, explicit, recorded, or quota (the header's selection order). <account>
-# is an explicit --account, which only a Claude launch accepts; the recorded
-# fields are a relaunching task record's account=, account_root=, and
+# pin, explicit, recorded, or quota (the header's selection order).
+# <secondmate-id> selects that local secondmate's own per-secondmate pin
+# (fm_worker_account_config) in place of the home pin. <account> is an
+# explicit --account, which only a Claude launch accepts; the recorded fields
+# are a relaunching task record's account=, account_root=, and
 # account_provider= values. On refusal prints one error and returns 1.
 # bin/fm-spawn.sh runs it before any endpoint exists, and bin/fm-control.sh
 # before a relaunch stops the live agent.
 fm_worker_account_select() {
-  local harness=$1 config=$2 model=$3 executable=$4 raw=${5:-} explicit=${6:-} selection declared root providers provider=
+  local harness=$1 config=$2 model=$3 executable=$4 raw=${5:-} mate=${6:-} explicit=${7:-}
+  local selection declared root providers provider='' selected_config setting
   if [ -n "$explicit" ] && [ "$harness" != claude ]; then
     echo "error: --account '$explicit' chooses among the Claude accounts config/claude-account declares, so it applies only to a claude launch, not $harness" >&2
     return 1
   fi
+  fm_worker_account_file "$harness" >/dev/null || return 0
+  selected_config=$(fm_worker_account_config "$harness" "$config" "$mate") || return 1
+  setting=$(fm_worker_account_setting "$harness" "$config" "$selected_config")
   if [ "$harness" = claude ]; then
-    fm_worker_account_select_claude "$config" "$executable" "$raw" "$explicit" "${7:-}" "${8:-}" "${9:-}"
-    return
+    selection=$(fm_worker_account_select_claude "$selected_config" "$setting" "$executable" "$raw" "$explicit" "${8:-}" "${9:-}" "${10:-}") || return 1
+  else
+    selection=$(fm_worker_account_resolve "$harness" "$selected_config" "$setting") || return 1
   fi
-  selection=$(fm_worker_account_resolve "$harness" "$config") || return 1
-  [ -n "$selection" ] || return 0
+  if [ -z "$selection" ]; then
+    [ "$selected_config" = "$config" ] && return 0
+    echo "error: secondmate account pin disappeared during selection: $setting" >&2
+    return 1
+  fi
+  if [ "$harness" = claude ]; then
+    printf '%s\n' "$selection"
+    return 0
+  fi
   declared=${selection%%$'\t'*}
   root=${selection#*$'\t'}
   providers=${root#*$'\t'}
   root=${root%%$'\t'*}
   if [ -n "$raw" ]; then
-    echo "error: config/pi-account pins Pi workers, and a raw Pi launch command runs verbatim, so it cannot carry the pinned --provider; launch with --harness $harness and --model <provider>/<id> instead" >&2
+    echo "error: $setting pins Pi workers, and a raw Pi launch command runs verbatim, so it cannot carry the pinned --provider; launch with --harness $harness and --model <provider>/<id> instead" >&2
     return 1
   fi
   provider=$(fm_worker_account_pi_provider "$model") || {
-    echo "error: config/pi-account pins Pi workers to providers ($providers), so a Pi launch needs --model <provider>/<id> naming one of them; '${model:-none}' names no provider, and Firstmate does not guess one" >&2
+    echo "error: $setting pins Pi workers to providers ($providers), so a Pi launch needs --model <provider>/<id> naming one of them; '${model:-none}' names no provider, and Firstmate does not guess one" >&2
     return 1
   }
   case " $providers " in
   *" $provider "*) ;;
   *)
-    echo "error: config/pi-account pins Pi workers to providers ($providers), but --model '$model' names provider '$provider'" >&2
+    echo "error: $setting pins Pi workers to providers ($providers), but --model '$model' names provider '$provider'" >&2
     return 1
     ;;
   esac
-  fm_worker_account_check "$harness" "$declared" "$root" "$executable" "$provider" || return 1
+  fm_worker_account_check "$harness" "$declared" "$root" "$executable" "$provider" "$setting" || return 1
   printf '%s\t%s\t%s\t\tpin\n' "$declared" "$root" "$provider"
 }
 

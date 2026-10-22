@@ -47,7 +47,13 @@
 # Directory of this library, used to locate the sibling fm-crew-state.sh reader.
 # Resolved at source time from BASH_SOURCE so it works whether sourced by a
 # bin/ script (which sets its own SCRIPT_DIR) or directly by a test.
-_FM_CLASSIFY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || _FM_CLASSIFY_LIB_DIR="."
+_FM_CLASSIFY_LIB_DIR="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd 2>/dev/null)" || _FM_CLASSIFY_LIB_DIR="."
+
+# The kernel name, read once at source time rather than forked by every status
+# stat helper below. These helpers mostly run inside $() subshells, where a lazy
+# cache would never persist. fm-wake-lib.sh's _FM_UNAME is reused when it is
+# already loaded; either value is compared only against Darwin.
+_FM_CLASSIFY_UNAME_S=${_FM_UNAME:-$(uname -s 2>/dev/null)}
 
 # The crew current-state reader used for the "provably working" decision.
 # Overridable so tests can stub the run-step/pane verdict without a real worktree
@@ -544,6 +550,12 @@ _fm_status_unstamped() {  # <status-line> <out-var> -> line with its stamp remov
 # all other bytes, including correlation metadata, still identify the event.
 # Both sides normalize through _fm_status_untimed, so a stamped retry of an
 # already-recorded event can never read as a new one.
+# A match stays recorded for the life of the file, whatever follows it: a
+# later resolved line for the same key does not make the line new again, so a
+# caller that re-reads an unchanged source after an operator resolve (the
+# continuity break in bin/fm-procevent-remote-reply.sh, which does not advance
+# its cursor) appends nothing. A caller that owns evidence of a new episode
+# decides that itself, as bin/fm-pending-reply-lib.sh's escalation does.
 status_event_recorded() {  # <status-file> <new-status-line>
   local wanted line untimed
   [ -f "$1" ] || return 1
@@ -916,6 +928,25 @@ EOF
   printf '%s\n' "$current"
 }
 
+# The subset of status_open_decisions the task raised about its own work: a
+# reserved-namespace key is raised by a supervisor library about the task (a
+# pending-reply escalation), a `remote-reply-continuity-` key is the parent's
+# own blocker about a broken remote reply mirror
+# (bin/fm-procevent-remote-reply.sh), and a `captain-hold-` key relays a child
+# decision a secondmate escalated to the captain (bin/fm-captain-hold.sh) while
+# it keeps working, so the task is not waiting on any of them. Pending-reply
+# recovery and a fire-and-forget retry ring consult this set and leave a task
+# alone while it is non-empty.
+status_own_open_decisions() {  # <status-file>
+  local line prefix
+  status_open_decisions "$1" | while IFS= read -r line || [ -n "$line" ]; do
+    for prefix in ${FM_CLASSIFY_RESERVED_KEY_PREFIXES:-$FM_CLASSIFY_RESERVED_KEY_PREFIXES_DEFAULT} remote-reply-continuity- captain-hold-; do
+      case "$line" in "$prefix"*) continue 2 ;; esac
+    done
+    printf '%s\n' "$line"
+  done
+}
+
 # 0 when the fold above still holds at least one decision OPENED by
 # `needs-decision` - the status side's own record that a human was asked
 # something and has not answered. A `blocked` record is deliberately not this: a
@@ -944,6 +975,32 @@ status_has_open_needs_decision() {  # <status-file> [<run-id>]
 $open
 EOF
   return 1
+}
+
+# 0, printing `blocked` or `needs-decision`, when the task's newest status event
+# is a line of that verb that the worker wrote and that is still open: its key
+# must hold that verb in status_own_open_decisions, so a supervisor-reserved key
+# never counts. Only the newest event is read, so any later line ends it - a
+# resolved line for any key included - and so does a steering-inbox record the
+# worker acknowledged that was written after it (bin/fm-task-inbox-lib.sh owns
+# that handled/ layout), which is an answer that arrived without a closing
+# resolved line.
+status_worker_wait_verb() {  # <status-file>
+  local f=$1 last verb key own rec
+  last=$(last_status_line "$f")
+  [ -n "$last" ] || return 1
+  status_line_verb "$last" verb
+  case "$verb" in blocked|needs-decision) ;; *) return 1 ;; esac
+  key=$(_fm_decision_key "$last") || return 1
+  own=$(status_own_open_decisions "$f")
+  case "$own" in
+    "$key"$'\t'"$verb"$'\t'*|*$'\n'"$key"$'\t'"$verb"$'\t'*) ;;
+    *) return 1 ;;
+  esac
+  for rec in "${f%.status}.inbox/handled"/*.msg; do
+    [ "$rec" -nt "$f" ] && return 1
+  done
+  printf '%s' "$verb"
 }
 
 # 0 when <key> has a record in a folded "<key>\t<verb>\t<note>" open set.
@@ -1032,6 +1089,28 @@ EOF
   printf '%s' "$verb"
 }
 
+# The status file inside <state> that is this home's outbound parent channel
+# rather than a self-home task status log, printed; empty when there is none.
+# Only a remote mate home resolves one - its state/parent-replies.status is the
+# parent channel (bin/fm-parent-channel-lib.sh owns that resolution, sourced
+# lazily here because that library sources this one at its top level, so a
+# top-level source would be circular). A main home, a local mate - whose
+# channel lives in the parent home - or an unusable identity or binding keeps
+# every file, so ordinary task logs fold and wake exactly as before. The home
+# is the directory containing <state>, the <home>/state layout every caller of
+# these fleet-wide scans shares; a state dir outside such a home excludes
+# nothing. Callers compare the resolved path, never the file name, so a
+# parent-replies.status in any other home shape stays an ordinary task log.
+status_scan_parent_channel_exclude() {  # <state>
+  local state=$1 exclude
+  if ! command -v fm_parent_channel_outbound_status >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-parent-channel-lib.sh
+    . "$_FM_CLASSIFY_LIB_DIR/fm-parent-channel-lib.sh"
+  fi
+  exclude=$(fm_parent_channel_outbound_status "$(dirname "$state")" "$state") || return 0
+  printf '%s\n' "$exclude"
+}
+
 # Fleet-wide wrapper around status_open_decisions: scans every task's status
 # log under <state> and prefixes each still-open decision with its owning task
 # id, so a per-wake or per-session surface can print the consolidated open set
@@ -1040,9 +1119,11 @@ EOF
 # one "<task>\t<key>\t<verb>\t<note>" line per open decision, in glob (task id)
 # order; prints nothing when none are open.
 scan_open_decisions() {  # <state>
-  local state=$1 f task open line
+  local state=$1 f task open line exclude
+  exclude=$(status_scan_parent_channel_exclude "$state")
   for f in "$state"/*.status; do
     [ -e "$f" ] || continue
+    [ "$f" = "$exclude" ] && continue
     task=$(basename "$f"); task="${task%.status}"
     open=$(status_open_decisions "$f") || continue
     [ -n "$open" ] || continue
@@ -1149,7 +1230,7 @@ _fm_open_decisions_file_ident() {  # <file> -> strongest available identity
     "$FM_STATUS_IDENTITY_READER" "$f"
     return
   fi
-  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+  if [ "$_FM_CLASSIFY_UNAME_S" = Darwin ]; then
     ident=$(LC_ALL=C /usr/bin/stat -f '%d:%i' "$f" 2>/dev/null) || return 1
     epoch=$(LC_ALL=C /usr/bin/stat -f '%B' "$f" 2>/dev/null) || epoch=0
     if [ "$epoch" != 0 ]; then birth=$(LC_ALL=C /usr/bin/stat -f '%FB' "$f" 2>/dev/null) || birth=''; else birth=''; fi
@@ -1168,7 +1249,7 @@ _fm_status_file_size() {  # <status-file>
     "$FM_STATUS_SIZE_READER" "$f"
     return
   fi
-  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+  if [ "$_FM_CLASSIFY_UNAME_S" = Darwin ]; then
     LC_ALL=C /usr/bin/stat -f '%z' "$f" 2>/dev/null
   else
     LC_ALL=C stat -c '%s' "$f" 2>/dev/null
@@ -1177,7 +1258,7 @@ _fm_status_file_size() {  # <status-file>
 
 _fm_status_file_mtime() {  # <status-file>
   local f=$1
-  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+  if [ "$_FM_CLASSIFY_UNAME_S" = Darwin ]; then
     LC_ALL=C /usr/bin/stat -f '%m' "$f" 2>/dev/null
   else
     LC_ALL=C stat -c '%Y' "$f" 2>/dev/null
@@ -1333,9 +1414,11 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
 # the whole-file status_open_decisions, so a fleet-wide per-drain scan stays
 # bounded by new appends rather than total lifetime log size across every task.
 scan_open_decisions_incremental() {  # <state>
-  local state=$1 f task open line
+  local state=$1 f task open line exclude
+  exclude=$(status_scan_parent_channel_exclude "$state")
   for f in "$state"/*.status; do
     [ -e "$f" ] || continue
+    [ "$f" = "$exclude" ] && continue
     task=$(basename "$f"); task="${task%.status}"
     open=$(status_open_decisions_incremental "$f") || continue
     [ -n "$open" ] || continue
@@ -1350,9 +1433,11 @@ EOF
 }
 
 status_presentation_snapshot() {  # <state>
-  local state=$1 f task size ident
+  local state=$1 f task size ident exclude
+  exclude=$(status_scan_parent_channel_exclude "$state")
   for f in "$state"/*.status; do
     [ -e "$f" ] || continue
+    [ "$f" = "$exclude" ] && continue
     [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || continue
     task=$(basename "$f"); task="${task%.status}"
     size=$(_fm_status_file_size "$f") || return 1
@@ -1570,7 +1655,7 @@ status_presentation_marker_parse() {
 }
 
 _status_observed_path_state() {
-  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+  if [ "$_FM_CLASSIFY_UNAME_S" = Darwin ]; then
     LC_ALL=C /usr/bin/stat -f '%HT:%p' "$1" 2>/dev/null
   else
     LC_ALL=C stat -c '%F:%f' "$1" 2>/dev/null
@@ -1646,9 +1731,12 @@ status_presentation_marker_commit() {
   printf 'v2\t%s\t%s' "$reported" "$classified" > "$marker"
 }
 
-status_retire_presentation_task() {  # <state> <task-id>
-  local state=$1 task=$2 lock manifest tmp data row_task ident offset backstop extra rc=0 found=0
-  local signal_marker heartbeat_marker daemon_marker home_appends home_appends_lock
+# An optional archive filename is supplied only by teardown. The caller owns
+# path selection and retention; publication also checks for unsafe collisions.
+# No status consumer reads that archive.
+status_retire_presentation_task() {  # <state> <task-id> [<archive-file>]
+  local state=$1 task=$2 lock manifest tmp data row_task ident offset backstop extra rc=0 found=0 archive_published=0
+  local signal_marker heartbeat_marker daemon_marker home_appends home_appends_lock archive=${3:-} archive_tmp=
   lock="$state/.status-presentation-lock"
   manifest="$state/.status-presentation-cursor"
   tmp="$manifest.tmp.$$"
@@ -1691,7 +1779,25 @@ EOF
   fi
 
   fm_lock_acquire_wait "$lock" || return 1
-  if [ -e "$manifest" ] || [ -L "$manifest" ]; then
+  # Publish before changing live records so a failed archive leaves the cursor
+  # and watcher signatures intact. The existing removal below retires the log
+  # only after its presentation row, and before its watcher markers disappear.
+  if [ -n "$archive" ] && { [ -e "$state/$task.status" ] || [ -L "$state/$task.status" ]; }; then
+    if [ -L "$state/$task.status" ] || [ ! -f "$state/$task.status" ] \
+      || [ -e "$archive" ] || [ -L "$archive" ]; then
+      rc=1
+    # A fresh copy starts retention without touching the watched live inode.
+    # A same-directory hard link publishes atomically without overwriting.
+    elif ! archive_tmp=$(mktemp "${archive%/*}/.status-archive.XXXXXX") \
+      || ! cp -- "$state/$task.status" "$archive_tmp" \
+      || ! ln -n -- "$archive_tmp" "$archive" \
+      || [ -L "$archive" ] || [ ! "$archive_tmp" -ef "$archive" ]; then
+      rc=1
+    else
+      archive_published=1
+    fi
+  fi
+  if [ "$rc" -eq 0 ] && { [ -e "$manifest" ] || [ -L "$manifest" ]; }; then
     if [ ! -f "$manifest" ] || [ ! -r "$manifest" ] || [ -L "$manifest" ]; then
       rc=1
     elif ! data=$(LC_ALL=C command cat "$manifest" 2>/dev/null); then
@@ -1720,6 +1826,12 @@ EOF
       "$home_appends" "$signal_marker" "$heartbeat_marker" "$daemon_marker" || rc=1
     fm_lock_remove_path "$home_appends_lock" 2>/dev/null || true
   fi
+  if [ "$archive_published" -eq 1 ] && [ "$rc" -ne 0 ] \
+    && { [ -e "$state/$task.status" ] || [ -L "$state/$task.status" ]; } \
+    && [ -n "$archive_tmp" ] && [ "$archive_tmp" -ef "$archive" ]; then
+    rm -f -- "$archive"
+  fi
+  [ -z "$archive_tmp" ] || rm -f -- "$archive_tmp"
   fm_lock_release "$lock" || rc=1
   return "$rc"
 }
@@ -1964,9 +2076,11 @@ status_line_is_unread_surface() {  # <status-line>
 # Prints nothing when none are unread. Directory scan rejects status symlinks
 # the same way scan_open_decisions does.
 scan_unread_surface_lines() {  # <state>
-  local state=$1 f task lines line
+  local state=$1 f task lines line exclude
+  exclude=$(status_scan_parent_channel_exclude "$state")
   for f in "$state"/*.status; do
     [ -e "$f" ] || continue
+    [ "$f" = "$exclude" ] && continue
     task=$(basename "$f"); task="${task%.status}"
     lines=$(status_new_lines_since_cursor "$f") || return 1
     [ -n "$lines" ] || continue
@@ -2074,14 +2188,24 @@ status_open_activities() {  # <status-file-or-dash>
 # task id from a recorded window target, falling back to the tmux-shaped
 # "<session>:fm-<id>" form when no metadata state is available.
 window_to_task() {
-  local w=$1 state=${2:-${STATE:-${FM_STATE_OVERRIDE:-}}} meta mw mt t
+  local w=$1 state=${2:-${STATE:-${FM_STATE_OVERRIDE:-}}} meta mw mt t line
   if [ -n "$state" ]; then
     for meta in "$state"/*.meta; do
       [ -e "$meta" ] || continue
-      mw=$(grep '^window=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-      mt=$(grep '^terminal=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+      # The last window= and terminal= values, read in one pass without the
+      # grep | tail -1 | cut -d= -f2- pipelines this once forked per key.
+      mw=
+      mt=
+      {
+        while IFS= read -r line || [ -n "$line" ]; do
+          case "$line" in
+            window=*) mw=${line#window=} ;;
+            terminal=*) mt=${line#terminal=} ;;
+          esac
+        done < "$meta"
+      } 2>/dev/null
       [ "$mw" = "$w" ] || [ "$mt" = "$w" ] || continue
-      t=$(basename "$meta")
+      t=${meta##*/}
       t=${t%.meta}
       printf '%s' "$t"
       return 0
