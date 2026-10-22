@@ -67,6 +67,7 @@ Assignment is longest-processing-time bin packing over per-script duration hints
 A script with no hint gets the conservative `PORTABLE_SERIAL_DEFAULT_WEIGHT_MS` default.
 This fork's own serial suites carry the slowest successful Ubuntu `duration_ms` from the fork's five green CI runs on 2026-10-01 and 2026-10-02 ([36967720036](https://github.com/adonis-garcia-git/firstmate/actions/runs/36967720036), [36950822274](https://github.com/adonis-garcia-git/firstmate/actions/runs/36950822274), [36948688885](https://github.com/adonis-garcia-git/firstmate/actions/runs/36948688885), [36945390206](https://github.com/adonis-garcia-git/firstmate/actions/runs/36945390206), and [36943162191](https://github.com/adonis-garcia-git/firstmate/actions/runs/36943162191)), because upstream's runs never execute them.
 Packed at the default weight instead, those suites pushed the fork's largest modeled shard past the packing budget.
+Even measured, they leave nine shards too little aggregate headroom for the packing-boundary check to place one script exactly at the budget, so this fork runs ten serial shards.
 Hints only affect balance: the coverage guard keeps the partition complete and disjoint whatever they say, so a stale hint costs a slower shard rather than lost coverage.
 Balance is still worth keeping current, because enough unmeasured scripts let one shard carry more than twice another shard's real work and reach the job cap while another runner sits idle.
 `bin/fm-test-run.sh --check-coverage` reports the unmeasured share as `serial_unhinted=` and refuses past `PORTABLE_SERIAL_MAX_UNHINTED_PERCENT`.
@@ -122,7 +123,7 @@ No fast mode, path skips, or paid runner provisioning is part of this layout.
 
 The longer-term performance objective remains a complete green run under fifteen minutes including start delay, but the current watch-triage floor alone exceeds that objective.
 The immediate packing target is the runner's modeled script budget, not a claim that more shards alone can make an indivisible script faster.
-The layout uses fourteen long-lived Linux jobs (nine serial, two parallel, Herdr, two lint), plus short checks and macOS; insufficient shared account capacity can erase the packing gain.
+The layout uses fifteen long-lived Linux jobs (ten serial, two parallel, Herdr, two lint), plus short checks and macOS; insufficient shared account capacity can erase the packing gain.
 Compare complete before/after runs, preserve cancelled and partial-run evidence, and measure a representative normal-run sample before claiming a P95 improvement.
 The workflow retains per-PR supersession without cancelling main pushes or changing the compliance workflow's event semantics.
 
