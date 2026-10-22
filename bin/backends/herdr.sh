@@ -3782,9 +3782,12 @@ fm_backend_herdr_composer_retype() {  # <target> <text> <rows> <width>
 # fm_backend_herdr_composer_view's one-row composer, because Claude scrolls a
 # draft whose visible rows can all be blank, and the presses go out as many
 # at a time as the composer shows rows, because a Ctrl+U on Claude's empty
-# composer does nothing; otherwise empty is the shared classifier's verdict
-# and each press is read back. 0 only when the composer is verified empty
-# again.
+# composer does nothing. A Claude composer that cannot be read is most often
+# one Claude's inline view grew past the pane, whose top border no viewport
+# read shows until enough rows are gone, so those reads keep the presses going
+# in batches rather than counting as unchanged, still within the cap.
+# Otherwise empty is the shared classifier's verdict and each press is read
+# back. 0 only when the composer is verified empty again.
 fm_backend_herdr_composer_clear() {  # <target> <text> [claude]
   local target=$1 text=$2 claude=${3:-0} limit breaks presses=0 unchanged=0 content previous='' batch=1
   breaks=${text//[!$'\n']/}
@@ -3798,7 +3801,8 @@ fm_backend_herdr_composer_clear() {  # <target> <text> [claude]
         [ "$FM_BACKEND_HERDR_VIEW_EMPTY" = 1 ] && return 0
         content="$FM_BACKEND_HERDR_VIEW_ROWS:$FM_BACKEND_HERDR_VIEW_TEXT"
       else
-        content=$previous
+        content="unreadable:$presses"
+        batch=4
       fi
     elif fm_backend_herdr_composer_state_capture "$target"; then
       [ "$(fm_backend_herdr_composer_state_verdict "$target")" = empty ] && return 0

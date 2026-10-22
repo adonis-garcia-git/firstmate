@@ -5196,14 +5196,17 @@ herdr_wrapped_composer() {  # <text> <width> <drop>
 # "text":T} lands T first, {"kind":"dup","text":T} doubles T, and
 # {"kind":"wipe","before":T} empties the draft before text T is typed.
 # <draft> is text the composer already holds, with the cursor at its end.
+# <view> inline models Claude's inline view instead (Claude Code 2.1.308 on
+# Herdr 0.8.2): the composer is not capped and grows with the draft, so a tall
+# draft pushes its top border out of the pane.
 # sim.json records each submitted draft, whether the cursor stood at its end
 # when Enter landed, and the byte length of every typed text.
-make_herdr_claude_sim() {  # <dir> <columns> <rows> [mangles] [draft] -> echoes fakebin dir
+make_herdr_claude_sim() {  # <dir> <columns> <rows> [mangles] [draft] [view] -> echoes fakebin dir
   local dir=$1 fb="$1/fakebin"
   command -v python3 >/dev/null 2>&1 || fail "python3 is required for the Claude composer simulator"
   mkdir -p "$fb"
-  jq -n --argjson c "$2" --argjson r "$3" --argjson m "${4:-[]}" --arg b "${5:-}" \
-    '{columns:$c, rows:$r, mangles:$m, buf:$b, cur:($b | length), status:"idle", submitted:[], cursor_at_end:[], typed:[]}' > "$dir/sim.json"
+  jq -n --argjson c "$2" --argjson r "$3" --argjson m "${4:-[]}" --arg b "${5:-}" --arg v "${6:-}" \
+    '{columns:$c, rows:$r, mangles:$m, buf:$b, cur:($b | length), inline:($v == "inline"), status:"idle", submitted:[], cursor_at_end:[], typed:[]}' > "$dir/sim.json"
   cat > "$fb/herdr" <<'PY'
 #!/usr/bin/env python3
 import json, os, sys
@@ -5215,7 +5218,7 @@ if len(args) >= 2 and args[-2] == "--session":
     args = args[:-2]
 st = json.load(open(state_path))
 width = st["columns"] - 4
-cap = max(3, st["rows"] // 2 - 5)
+cap = len(st["buf"]) + 1 if st.get("inline") else max(3, st["rows"] // 2 - 5)
 
 def rows_of():
     rows, pos = [], 0
@@ -5901,6 +5904,27 @@ test_composer_clear_empties_a_claude_draft_hidden_above_blank_rows() {
   [ "$rc" -eq 0 ] || fail "the Claude-aware clear should verify the composer empty, returned $rc"
   [ "$(herdr_sim_buf "$dir")" = '' ] || fail "the clear left text hidden above blank rows: '$(herdr_sim_buf "$dir")'"
   pass "fm_backend_herdr_composer_clear: a Claude draft whose visible rows go blank is cleared until the composer shows one empty row"
+}
+
+# Claude's inline view grows the composer with the draft, so a refused long
+# draft in a narrow pane pushes the composer's top border out of the viewport
+# and no read can see it until enough rows are gone. The clear keeps pressing
+# Ctrl+U through those unreadable reads rather than judging them unchanged.
+test_composer_clear_empties_a_claude_draft_grown_past_the_pane() {
+  local dir fb draft rc=0
+  draft=$(herdr_helm_message)
+  draft="$draft $draft"
+  draft=${draft:0:700}
+  dir="$TMP_ROOT/clear-grown-draft"; mkdir -p "$dir"; : > "$dir/log"
+  fb=$(make_herdr_claude_sim "$dir" 33 14 '[]' "$draft" inline)
+  ! PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_SIM_STATE="$dir/sim.json" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_view default:w1:p2' "$ROOT" \
+    || fail "fixture: a 700-char draft in a 33x14 inline composer must leave the composer unreadable"
+  PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_SIM_STATE="$dir/sim.json" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_clear default:w1:p2 "$1" 1' "$ROOT" "$draft" || rc=$?
+  [ "$rc" -eq 0 ] || fail "the Claude-aware clear should verify a grown composer empty, returned $rc"
+  [ "$(herdr_sim_buf "$dir")" = '' ] || fail "the clear left part of a draft grown past the pane: '$(herdr_sim_buf "$dir")'"
+  pass "fm_backend_herdr_composer_clear: a Claude draft grown past the pane is cleared through the reads that cannot see the composer"
 }
 
 # Live Claude's Ctrl+U deletes one wrapped row per press, so a long draft in a
@@ -6969,6 +6993,7 @@ test_send_text_submit_never_submits_part_of_a_message_at_a_carriage_return
 test_send_text_submit_refuses_to_retype_a_message_holding_a_tab
 test_send_text_submit_refuses_a_piece_that_lost_its_head_after_blank_lines
 test_composer_clear_empties_a_claude_draft_hidden_above_blank_rows
+test_composer_clear_empties_a_claude_draft_grown_past_the_pane
 test_send_text_submit_reads_a_tall_claude_composer_whole
 test_send_text_submit_clears_a_long_refused_draft_in_a_narrow_pane
 test_composer_retype_needs_older_text_above_a_piece_that_fills_the_composer

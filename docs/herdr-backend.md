@@ -674,6 +674,7 @@ When the request was sent but Herdr never answered, the composer may already hol
 
 When native `agent get` identity is Claude, the adapter types only into an empty composer.
 Claude's fullscreen view caps its composer at `max(3, rows / 2 - 5)` visible rows and shows the rows around the cursor, so a draft whose visible rows are blank lines can still hold text above them.
+Claude's inline view instead grows the composer with the draft, so a tall enough draft pushes the composer's top border out of a short pane and the composer cannot be read.
 The composer is therefore empty only when it shows a single row with no typed text.
 A Claude composer that shows anything else, or cannot be read, before the send is refused with nothing typed, which also leaves someone else's draft untouched.
 Claude reads a carriage return in a short burst as Enter, which submits the draft typed so far, and in a long burst as a line break, so the adapter types every CRLF pair and every lone carriage return to a Claude pane as a line break; no carriage return can then submit part of a message.

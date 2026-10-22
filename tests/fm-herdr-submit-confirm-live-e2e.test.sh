@@ -13,9 +13,9 @@
 # payload. In a pane short enough that Claude's composer scrolls a long
 # message, it requires the proof to type the message again in proven pieces
 # and submit it whole, single-paragraph, multi-paragraph, or holding a
-# carriage return, to refuse a composer whose visible rows are blank lines
-# below a hidden draft, and to clear that draft and a long draft in a narrow
-# pane completely. It then requires the same submit path to prove and submit a
+# carriage return, to refuse a composer whose draft is hidden by blank lines
+# (only blank rows in view, or a composer grown past the pane), and to clear
+# that draft and a long draft in a narrow pane completely. It then requires the same submit path to prove and submit a
 # typed /exit slash command behind the command popup Claude renders below the
 # composer (the fm-control exit breakage on 2.1.283) and verifies the agent
 # actually exited. It fails naming the harness and version rather than
@@ -436,32 +436,43 @@ submitted=$(submitted_shape "$msg" "$PARA2_TOKEN")
   || fail "Claude Code ($VERSION) on $HERDR_VER: the ${#msg}-char multi-paragraph message scrolled in the composer was not submitted whole (${submitted:-absent})"
 pass "live Herdr scrolled composer: Claude Code ($VERSION) on $HERDR_VER submits a ${#msg}-char multi-paragraph message its $rows-row pane scrolls whole"
 
-# A draft hidden above blank lines: Claude's capped composer shows only the
-# blank rows, so the composer looks empty. The send must be refused before
-# anything is typed, and the Claude-aware clear must then empty the draft.
+# A draft hidden by blank lines: the composer must not look empty, and the
+# send must be refused before anything is typed. A Claude whose composer caps
+# its rows shows only the blank rows; Claude 2.1.308 grows the composer past
+# this pane instead, so its top border leaves the viewport and the composer
+# cannot be read at all. Either way nothing is typed, and the Claude-aware
+# clear must then empty the draft.
 wait_idle 60 || true
 HIDDEN_TOKEN="FMHIDDEN$$x$RANDOM"
-hidden="STALE-FRAGMENT ${HIDDEN_TOKEN} rm the release branch"$'\n\n\n\n'
+hidden="STALE-FRAGMENT ${HIDDEN_TOKEN} rm the release branch"
+i=0
+while [ "$i" -lt 16 ]; do hidden="$hidden"$'\n'; i=$((i + 1)); done
 lab pane send-text "$PANE" "$hidden" >/dev/null \
   || fail "could not type the hidden draft into the lab composer"
 sleep 0.5
-fm_backend_herdr_composer_view "$TARGET" \
-  || fail "Claude Code ($VERSION) on $HERDR_VER: could not read the composer holding the hidden draft"
-[ -z "${FM_BACKEND_HERDR_VIEW_TEXT//[$' \t']/}" ] \
-  || fail "Claude Code ($VERSION) on $HERDR_VER: the $rows-row pane still shows the hidden draft ('$FM_BACKEND_HERDR_VIEW_TEXT'), so this case proves nothing about blank rows"
+hidden_shape=overflow
+if fm_backend_herdr_composer_view "$TARGET"; then
+  [ -z "${FM_BACKEND_HERDR_VIEW_TEXT//[$' \t']/}" ] \
+    || fail "Claude Code ($VERSION) on $HERDR_VER: the $rows-row pane still shows the hidden draft ('$FM_BACKEND_HERDR_VIEW_TEXT'), so this case proves nothing about blank rows"
+  hidden_shape=blank-rows
+fi
 HIDDEN_MSG_TOKEN="FMHIDDENMSG$$x$RANDOM"
 verdict=$(fm_backend_herdr_send_text_submit "$TARGET" "${HIDDEN_MSG_TOKEN}END reply with only OK." 3 0.4 0.3 2>"$TMP_ROOT/hidden.err") \
   || fail "send_text_submit failed to run against the hidden draft in Claude Code ($VERSION) on $HERDR_VER"
-{ [ "$verdict" = send-failed ] && grep -q 'visible rows are blank before typing, so nothing was typed' "$TMP_ROOT/hidden.err"; } \
-  || fail "Claude Code ($VERSION) on $HERDR_VER: a send over a draft hidden above blank rows must be refused before typing, got '$verdict': $(cat "$TMP_ROOT/hidden.err")"
+case "$hidden_shape" in
+  blank-rows) hidden_refusal='visible rows are blank before typing, so nothing was typed' ;;
+  *) hidden_refusal='could not read the Claude composer in .* before typing, so nothing was typed' ;;
+esac
+{ [ "$verdict" = send-failed ] && grep -q "$hidden_refusal" "$TMP_ROOT/hidden.err"; } \
+  || fail "Claude Code ($VERSION) on $HERDR_VER: a send over a draft hidden by blank rows ($hidden_shape) must be refused before typing, got '$verdict': $(cat "$TMP_ROOT/hidden.err")"
 fm_backend_herdr_composer_clear "$TARGET" "$hidden" 1 \
-  || fail "Claude Code ($VERSION) on $HERDR_VER: could not clear the draft hidden above blank rows"
+  || fail "Claude Code ($VERSION) on $HERDR_VER: could not clear the draft hidden by blank rows"
 { fm_backend_herdr_composer_view "$TARGET" && [ "$FM_BACKEND_HERDR_VIEW_EMPTY" = 1 ]; } \
   || fail "Claude Code ($VERSION) on $HERDR_VER: the cleared composer does not show one empty row"
 if grep -q "$HIDDEN_TOKEN" "$TRANSCRIPT" 2>/dev/null; then
   fail "Claude Code ($VERSION) on $HERDR_VER: the hidden draft reached Claude's transcript"
 fi
-pass "live Herdr hidden draft: Claude Code ($VERSION) on $HERDR_VER refuses to type over a draft hidden above blank composer rows in its $rows-row pane and clears it"
+pass "live Herdr hidden draft: Claude Code ($VERSION) on $HERDR_VER refuses to type over a draft hidden by blank composer rows ($hidden_shape) in its $rows-row pane and clears it"
 
 # A refused long draft in a narrow pane: Claude's Ctrl+U deletes one wrapped
 # row per press, so the clear needs one press per row the draft really wraps
