@@ -117,11 +117,10 @@ test_home_that_opted_out_is_untouched() {
   pass "mirror: a home opted out by config/supervision-host-off is untouched by every tracked mirror registration"
 }
 
-# Default-on for Claude: with no config/supervision-host, the Claude
-# registrations write the mirror, while Cursor's stay file-gated and write
-# nothing.
-test_home_without_the_file_mirrors_only_claude() {
-  local home out
+# Opt-in on every primary: with no config/supervision-host, neither the Claude
+# nor the Cursor registrations write the mirror.
+test_home_without_the_file_mirrors_nothing() {
+  local home
   home=$(make_home without-file 0)
   CLAUDE_PROMPT=$(claude_cmd UserPromptSubmit) CLAUDE_STOP=$(claude_cmd Stop) \
   CURSOR_PROMPT=$(cursor_cmd beforeSubmitPrompt) CURSOR_RESPONSE=$(cursor_cmd afterAgentResponse) \
@@ -133,10 +132,8 @@ test_home_without_the_file_mirrors_only_claude() {
     run "$CURSOR_PROMPT" "{\"hook_event_name\":\"beforeSubmitPrompt\",\"generation_id\":\"u1\",\"prompt\":\"cursor captain\",\"cursor_version\":\"x\"}"
     run "$CURSOR_RESPONSE" "{\"hook_event_name\":\"afterAgentResponse\",\"generation_id\":\"u1\",\"text\":\"cursor main\",\"cursor_version\":\"x\"}"
   ' || fail "a tracked mirror hook failed"
-  out=$(entries "$home")
-  assert_equals "captain|claude captain
-main|claude main" "$out" "only the Claude registrations may write the mirror on a home without the file"
-  pass "mirror: without config/supervision-host the Claude registrations write the mirror and Cursor's stay inert"
+  assert_absent "$home/state/.host-mirror.jsonl" "a home without config/supervision-host must mirror nothing"
+  pass "mirror: without config/supervision-host the Claude and Cursor registrations stay inert"
 }
 
 test_writers_are_inert_on_a_home_that_opted_out() {
@@ -461,7 +458,7 @@ test_every_harness_registration_writes_the_mirror
 test_writers_are_inert_on_a_home_that_opted_out
 test_only_proven_writers_are_verified
 test_home_that_opted_out_is_untouched
-test_home_without_the_file_mirrors_only_claude
+test_home_without_the_file_mirrors_nothing
 test_operational_foreign_and_unowned_input_is_dropped
 test_internal_whitespace_is_recorded_verbatim
 test_entries_are_deduplicated_and_capped
