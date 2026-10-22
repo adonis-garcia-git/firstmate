@@ -4673,8 +4673,9 @@ SH
 }
 
 # tasks-axi refuses parentheses and line breaks in a hold reason and stores the
-# rest on one markdown line. The reason is encoded where it is written and
-# decoded wherever it is shown, so prose with every awkward character survives.
+# rest on one markdown line. This fork refuses those reasons; a reason that
+# starts with the reserved marker is encoded where it is written and decoded
+# wherever it is shown, so its awkward characters survive verbatim.
 test_hold_reason_round_trips_awkward_characters() {
   local home id reason stored json shown start verb fields out raw rc raw_rc mode
   local title legacy body quoted_reason quoted_title quoted_legacy expected_reason until_args=()
@@ -4711,9 +4712,18 @@ test_hold_reason_round_trips_awkward_characters() {
     done
   done
 
+  # This fork refuses a reason tasks-axi cannot store as written instead of
+  # encoding it, so a raw-backlog reader never shows an encoded reason.
+  for reason in 'Pick route (north)' $'Pick route\nSecond line'; do
+    if run_captain "$home" hold sample-refused-call --title "$title" --reason "$reason" --repo sample >/dev/null 2>&1; then
+      fail "hold accepted a reason with a parenthesis or line break: $reason"
+    fi
+  done
+  ! grep -q 'sample-refused-call' "$home/data/backlog.md" || fail "a refused hold reason left a backlog row"
+
   for id in sample-reason-call sample-dated-call; do
     until_args=()
-    reason=$'  Pick route (north); say "yes" or \'no\' - 100% sure %28x%29, café\t\\slash\r\nSecond line\n\n'
+    reason=$'fm-hold-v1:  Pick route north; say "yes" or \'no\' - 100% sure %28x%29, café\t\\slash  '
     if [ "$id" = sample-dated-call ]; then
       until_args=(--until 2099-01-01)
       reason='fm-hold-v1:bm9ydGg='
@@ -4783,7 +4793,7 @@ test_hold_reason_round_trips_awkward_characters() {
   expect_code "$raw_rc" "$rc" "public show missing task"
   assert_equals "$raw" "$out" "public show changed a read error"
 
-  expected_reason=$'  Pick route (north); say "yes" or \'no\' - 100% sure %28x%29, café\t\\slash\r\nSecond line\n\n'
+  expected_reason=$'fm-hold-v1:  Pick route north; say "yes" or \'no\' - 100% sure %28x%29, café\t\\slash  '
   quoted_reason=$(jq -cn --arg value "$expected_reason" '$value')
   for mode in tool manual fallback; do
     case "$mode" in

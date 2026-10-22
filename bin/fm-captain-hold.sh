@@ -52,9 +52,12 @@
 # hold preserves the existing timestamp, while re-holding released work starts
 # a new lifecycle. A task already closed is refused rather than reopened.
 # `--origin` also records the origin on a `Captain hold origin:` body line, which
-# `complete` and `verify` check. The reason may hold parentheses and line breaks:
-# tasks-axi refuses them, so `hold` escapes them where it writes the reason and
-# readers decode them (bin/fm-hold-reason-lib.sh owns the encoding).
+# `complete` and `verify` check. The reason must be one line without
+# parentheses, which tasks-axi cannot store as written; this fork refuses them
+# rather than encoding them, because a reader of the raw backlog (the Helm
+# cockpit) cannot decode an encoded reason. A reason that itself starts with the
+# reserved marker is still stored encoded so readers keep it verbatim
+# (bin/fm-hold-reason-lib.sh owns the encoding).
 # `--until` records the captain's own deferral date through `tasks-axi hold
 # --until`, so a "revisit later" answer is stored as a date instead of a live
 # card.
@@ -956,6 +959,11 @@ command_hold() {
   done
   validate_slug task-id "$id"
   [ -n "$reason" ] || fail "reason must not be empty"
+  # Kept from the fork: a reader of the raw backlog (the Helm cockpit) shows an
+  # encoded reason as unreadable text, so a reason tasks-axi cannot store as
+  # written is refused here rather than encoded.
+  validate_one_line reason "$reason"
+  case "$reason" in *'('*|*')'*) fail "reason must not contain parentheses (tasks-axi hold contract)" ;; esac
   # bin/fm-hold-reason-lib.sh owns the storage constraint and reversible encoding.
   stored_reason=$(fm_hold_reason_encode "$reason") || fail "could not encode the hold reason"
   if [ -n "$origin" ]; then
