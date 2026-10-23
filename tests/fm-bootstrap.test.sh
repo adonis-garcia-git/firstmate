@@ -1202,6 +1202,9 @@ test_pr_health_monitor_arms_only_with_its_flag() {
       [ -f "$case_dir/home/state/pr-health.check.sh" ] && [ -f "$case_dir/home/state/pr-health.check-trust" ] \
         || fail "bootstrap did not register the PR health monitor: $(ls -A "$case_dir/home/state")"
     else
+      # The PR reconcile sweep bootstrap always runs stamps its own throttle
+      # (bin/fm-pr-reconcile.sh); that is not PR health monitor state.
+      rm -f "$case_dir/home/state/.pr-reconcile-last"
       [ -z "$(ls -A "$case_dir/home/state")" ] \
         || fail "bootstrap without the PR health flag left state: $(ls -A "$case_dir/home/state")"
     fi

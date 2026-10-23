@@ -150,9 +150,19 @@ proj="$case_dir/project"
 wt="$case_dir/wt"
 fm_test_spawn_home "$home" commandcode
 fm_git_worktree "$proj" "$wt" commandcode-test
+# Each spawn takes its own worktree: spawn refuses a worktree that another
+# live task in this home still records as its own.
+case_wt() {  # <id>
+  if [ "$1" = cc-low ]; then
+    printf '%s' "$wt"
+    return
+  fi
+  [ -d "$case_dir/wt-$1" ] || git -C "$proj" worktree add --quiet -b "commandcode-test-$1" "$case_dir/wt-$1"
+  printf '%s' "$case_dir/wt-$1"
+}
 spawn_case() {  # <id> <model> <effort>
   fm_test_spawn_brief "$home" "$1"
-  FM_FAKE_LAUNCH_LOG="$case_dir/$1.launch" fm_test_run_spawn "$home" "$wt" "$fakebin" "$1" "$proj" \
+  FM_FAKE_LAUNCH_LOG="$case_dir/$1.launch" fm_test_run_spawn "$home" "$(case_wt "$1")" "$fakebin" "$1" "$proj" \
     --scout --harness commandcode --model "$2" --effort "$3" 2>&1
 }
 out=$(spawn_case cc-low deepseek/deepseek-v4.1-flash low) || fail "spawn failed: $out"
@@ -176,7 +186,7 @@ case "$(cat "$case_dir/cc-xhigh.launch")" in *--effort*) fail 'an unaccepted eff
 assert_grep 'effort=xhigh' "$home/state/cc-xhigh.meta" 'effort not recorded'
 out=$(spawn_case cc-other moonshotai/kimi-k3 low) || fail "spawn failed: $out"
 case "$(cat "$case_dir/cc-other.launch")" in *--effort*) fail 'an unverified model received an effort flag' ;; esac
-if out=$(fm_test_run_spawn "$home" "$wt" "$fakebin" cc-sm "$proj" --secondmate --harness commandcode 2>&1)
+if out=$(fm_test_run_spawn "$home" "$(case_wt cc-sm)" "$fakebin" cc-sm "$proj" --secondmate --harness commandcode 2>&1)
 then fail 'Command Code secondmate launch accepted'; fi
 assert_contains "$out" 'crewmate/scout adapter only' 'wrong secondmate refusal'
 pass "scout launch carries model, verified effort only, autonomy, typed brief, and the per-process mod"
@@ -191,7 +201,7 @@ EOF
 chmod +x "$fakebin/orca"
 for backend in zellij cmux orca; do
   fm_test_spawn_brief "$home" "cc-$backend"
-  if out=$(FM_FAKE_LAUNCH_LOG="$case_dir/cc-$backend.launch" fm_test_run_spawn "$home" "$wt" "$fakebin" "cc-$backend" "$proj" \
+  if out=$(FM_FAKE_LAUNCH_LOG="$case_dir/cc-$backend.launch" fm_test_run_spawn "$home" "$(case_wt "cc-$backend")" "$fakebin" "cc-$backend" "$proj" \
     --scout --harness commandcode --backend "$backend" 2>&1)
   then fail "Command Code launch accepted on backend=$backend"; fi
   assert_contains "$out" "commandcode is verified on the tmux and herdr backends only; backend=$backend" "wrong refusal on $backend: $out"
