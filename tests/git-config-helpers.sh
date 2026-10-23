@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # tests/git-config-helpers.sh - fixture Git isolation from the host's global and
-# system configuration.
+# system configuration and from an inherited repository location.
 #
 # Source this before a fixture's first Git operation:
 #   # shellcheck source=tests/git-config-helpers.sh
@@ -22,6 +22,11 @@
 # so the clone fails on a vanished object. The setting is appended the way
 # `git -c` passes its own, so a caller's inline config still reaches Git.
 #
+# The repository-location variables are cleared too: an absolute GIT_DIR (as a
+# linked-worktree hook exports) overrides the discovery `git -C <fixture>`
+# implies, so fixture refs, commits, and worktree registrations would land in
+# the caller's repository instead. A suite that wants one sets it after sourcing.
+#
 # tests/lib.sh and tests/herdr-test-safety.sh source this for every suite that
 # uses them, bin/fm-test-run.sh sources it per suite in run_script_bounded, and a
 # suite reaching none of those sources it directly so a hand-run invocation is
@@ -31,3 +36,4 @@
 
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 export GIT_CONFIG_PARAMETERS="${GIT_CONFIG_PARAMETERS:+$GIT_CONFIG_PARAMETERS }'maintenance.auto=false'"
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR
