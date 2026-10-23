@@ -3572,16 +3572,22 @@ FM_BACKEND_HERDR_PROOF_BACKOFF=${FM_BACKEND_HERDR_PROOF_BACKOFF-0.1 0.2 0.3 0.5 
 # scrolls a longer draft with the cursor, so a composer whose visible rows are
 # blank can still hold text above them; only a one-row composer is empty.
 # Like fm_backend_herdr_composer_content, it reads with the dark-truecolor
-# ghost strip off. 1 when the composer cannot be read.
+# ghost strip off. A viewport that shows only the end of a Claude composer
+# grown past the pane is read again with the scrollback above it
+# (fm_backend_herdr_composer_grown_read). 1 when the composer cannot be read.
 fm_backend_herdr_composer_view() {  # <target>
-  local view line n=0 text=''
+  local view line n=0 text='' grown=0
   FM_BACKEND_HERDR_VIEW_TEXT=
   FM_BACKEND_HERDR_VIEW_ROWS=0
   FM_BACKEND_HERDR_VIEW_WIDTH=0
   FM_BACKEND_HERDR_VIEW_TOP_BLANK=0
   FM_BACKEND_HERDR_VIEW_EMPTY=0
   fm_backend_herdr_composer_capture "$1" || return 1
-  view=$(FM_COMPOSER_GHOST_LUMA_MAX=0 fm_composer_selected_rows_view "$FM_BACKEND_HERDR_COMPOSER_CAPS" "$FM_BACKEND_HERDR_COMPOSER_SCREEN") || return 1
+  if ! view=$(FM_COMPOSER_GHOST_LUMA_MAX=0 fm_composer_selected_rows_view "$FM_BACKEND_HERDR_COMPOSER_CAPS" "$FM_BACKEND_HERDR_COMPOSER_SCREEN"); then
+    fm_backend_herdr_composer_grown_read "$1" "$FM_BACKEND_HERDR_COMPOSER_SCREEN" || return 1
+    view=$(FM_COMPOSER_GHOST_LUMA_MAX=0 fm_composer_selected_rows_view "$FM_BACKEND_HERDR_COMPOSER_CAPS" "$FM_BACKEND_HERDR_COMPOSER_SCREEN") || return 1
+    grown=1
+  fi
   FM_BACKEND_HERDR_VIEW_EMPTY=1
   while IFS= read -r line; do
     n=$((n + 1))
@@ -3602,6 +3608,112 @@ $view
 EOF
   FM_BACKEND_HERDR_VIEW_ROWS=$n
   FM_BACKEND_HERDR_VIEW_TEXT=$(printf '%s\n' "$text" | LC_ALL=C awk '{$1=$1; printf "%s", $0}')
+  if [ "$grown" = 1 ]; then
+    text=$FM_BACKEND_HERDR_VIEW_TEXT
+    fm_backend_herdr_proof_text_var text
+    if [ "$text" != "$FM_BACKEND_HERDR_GROWN_TEXT" ]; then
+      FM_BACKEND_HERDR_VIEW_TEXT=
+      FM_BACKEND_HERDR_VIEW_ROWS=0
+      FM_BACKEND_HERDR_VIEW_WIDTH=0
+      FM_BACKEND_HERDR_VIEW_TOP_BLANK=0
+      FM_BACKEND_HERDR_VIEW_EMPTY=0
+      return 1
+    fi
+  fi
+}
+
+# fm_backend_herdr_screen_rows: <screen> as plain rows, one per line, with
+# trailing blanks removed.
+fm_backend_herdr_screen_rows() {  # <screen>
+  printf '%s\n' "$1" | fm_composer_strip_ansi | LC_ALL=C sed 's/[[:space:]]*$//'
+}
+
+# fm_backend_herdr_row_is_rule: 0 when <row> is a rule of box-drawing dashes.
+fm_backend_herdr_row_is_rule() {  # <row>
+  local row=$1
+  fm_composer_normalize_trim_var row
+  [ -n "$row" ] && [ -z "${row//─/}" ]
+}
+
+# fm_backend_herdr_composer_grown_read: Claude's inline view (Claude Code
+# 2.1.308 on Herdr 0.8.2, verified live) grows its composer with the draft, so
+# a draft taller than the pane pushes the composer's top rule and first rows
+# into scrollback, and the <viewport> shows only the composer's last rows above
+# its closing rule. For a viewport whose first rule has text above it, this
+# replaces the composer capture with the viewport plus the scrollback above it
+# (the last 200 rows), and succeeds only when that capture ends with exactly
+# the viewport's rows and, walking up from the viewport's closing rule, shows
+# only blank rows and indented composer rows back to the prompt-glyph row,
+# with a rule above that. FM_BACKEND_HERDR_GROWN_TEXT is then that composer's
+# text in the fm_backend_herdr_proof_text_var form, which
+# fm_backend_herdr_composer_view requires the shared reader's text to equal,
+# so a composer or transcript left in scrollback never stands in for the
+# composer the viewport cuts. A viewport whose rows above the rule are blank
+# lines alone proves nothing about the composer they belong to, so it stays
+# unreadable.
+fm_backend_herdr_composer_grown_read() {  # <target> <viewport>
+  local target=$1 line i n=0 top close=-1 glyph=-1 text=''
+  local -a vis=() all=()
+  FM_BACKEND_HERDR_GROWN_TEXT=
+  while IFS= read -r line; do
+    vis[n]=$line
+    if [ "$close" -lt 0 ]; then
+      if fm_backend_herdr_row_is_rule "$line"; then
+        close=$n
+      else
+        text+=$line
+      fi
+    fi
+    n=$((n + 1))
+  done <<EOF
+$(fm_backend_herdr_screen_rows "$2")
+EOF
+  [ "$close" -gt 0 ] && [ -n "${text//[[:space:]]/}" ] || return 1
+  fm_backend_herdr_composer_grown_capture "$target" || return 1
+  n=0
+  while IFS= read -r line; do
+    all[n]=$line
+    n=$((n + 1))
+  done <<EOF
+$(fm_backend_herdr_screen_rows "$FM_BACKEND_HERDR_COMPOSER_SCREEN")
+EOF
+  top=$(( ${#all[@]} - ${#vis[@]} ))
+  [ "$top" -gt 0 ] || return 1
+  i=0
+  while [ "$i" -lt "${#vis[@]}" ]; do
+    [ "${all[top + i]}" = "${vis[i]}" ] || return 1
+    i=$((i + 1))
+  done
+  text=''
+  i=$(( top + close - 1 ))
+  while [ "$i" -ge 1 ]; do
+    case "${all[i]}" in
+      '❯'*) glyph=$i; text="${all[i]#❯} $text"; break ;;
+      ''|'  '*) text="${all[i]} $text" ;;
+      *) return 1 ;;
+    esac
+    i=$((i - 1))
+  done
+  [ "$glyph" -ge 1 ] && fm_backend_herdr_row_is_rule "${all[glyph - 1]}" || return 1
+  fm_backend_herdr_proof_text_var text
+  [ -n "$text" ] || return 1
+  FM_BACKEND_HERDR_GROWN_TEXT=$text
+}
+
+# fm_backend_herdr_composer_grown_capture: replace the composer capture with
+# the viewport plus the scrollback above it, the last 200 rows, for
+# fm_backend_herdr_composer_grown_read.
+fm_backend_herdr_composer_grown_capture() {  # <target>
+  local target=$1 cap
+  fm_backend_herdr_target_observable "$target" || return 1
+  if cap=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source recent --lines 200 --format ansi 2>/dev/null) && [ -n "$cap" ]; then
+    FM_BACKEND_HERDR_COMPOSER_CAPS=$(printf 'styled=1\ncursor=0\nidentity=0')
+  elif cap=$(fm_backend_herdr_capture "$target" 200) && [ -n "$cap" ]; then
+    FM_BACKEND_HERDR_COMPOSER_CAPS=$(printf 'styled=0\ncursor=0\nidentity=0')
+  else
+    return 1
+  fi
+  FM_BACKEND_HERDR_COMPOSER_SCREEN=$cap
 }
 
 # fm_backend_herdr_composer_payload_wait: 0 as soon as a composer read-back
@@ -3783,9 +3895,10 @@ fm_backend_herdr_composer_retype() {  # <target> <text> <rows> <width>
 # draft whose visible rows can all be blank, and the presses go out as many
 # at a time as the composer shows rows, because a Ctrl+U on Claude's empty
 # composer does nothing. A Claude composer that cannot be read is most often
-# one Claude's inline view grew past the pane, whose top border no viewport
-# read shows until enough rows are gone, so those reads keep the presses going
-# in batches rather than counting as unchanged, still within the cap.
+# one Claude's inline view grew past the pane with only blank rows in view
+# (fm_backend_herdr_composer_grown_read), which no read shows until enough rows
+# are gone, so those reads keep the presses going in batches rather than
+# counting as unchanged, still within the cap.
 # Otherwise empty is the shared classifier's verdict and each press is read
 # back. 0 only when the composer is verified empty again.
 fm_backend_herdr_composer_clear() {  # <target> <text> [claude]

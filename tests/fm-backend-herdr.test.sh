@@ -5198,7 +5198,8 @@ herdr_wrapped_composer() {  # <text> <width> <drop>
 # <draft> is text the composer already holds, with the cursor at its end.
 # <view> inline models Claude's inline view instead (Claude Code 2.1.308 on
 # Herdr 0.8.2): the composer is not capped and grows with the draft, so a tall
-# draft pushes its top border out of the pane.
+# draft pushes its top border out of the pane, into the scrollback that a
+# `--source recent` read returns with the pane.
 # sim.json records each submitted draft, whether the cursor stood at its end
 # when Enter landed, and the byte length of every typed text.
 make_herdr_claude_sim() {  # <dir> <columns> <rows> [mangles] [draft] [view] -> echoes fakebin dir
@@ -5284,7 +5285,7 @@ def submit():
         st["cursor_at_end"].append(st["cur"] == len(st["buf"]))
         st["buf"], st["cur"], st["status"] = "", 0, "working"
 
-def screen(ansi):
+def screen(ansi, recent):
     rows, at, _ = where()
     top = viewport(rows, at)
     rule = "─" * st["columns"]
@@ -5295,7 +5296,7 @@ def screen(ansi):
     body = [rule] + comp + [rule, "  Opus 5.5 | ctx: 4% used", "  ⏵⏵ bypass permissions on (shift+tab to cycle)"]
     head = [" Claude Code v2.1.286", "❯ an earlier prompt in the transcript", "  ⎿  Done."]
     lines = head + [""] * max(0, st["rows"] - len(head) - len(body)) + body
-    return "\n".join(lines[-st["rows"]:])
+    return "\n".join(lines[-200:] if recent else lines[-st["rows"]:])
 
 cmd = args[:2]
 if cmd == ["status", "--json"]:
@@ -5305,7 +5306,7 @@ elif args[:3] == ["terminal", "title", "clear"]:
 elif cmd == ["agent", "get"]:
     print(json.dumps({"result": {"agent": {"agent": "claude", "agent_status": st["status"]}}}))
 elif cmd == ["pane", "read"]:
-    print(screen("ansi" in args))
+    print(screen("ansi" in args, "recent" in args))
 elif cmd == ["pane", "send-text"]:
     st["typed"].append(len(args[3].encode()))
     text = mangle(args[3])
@@ -5906,25 +5907,90 @@ test_composer_clear_empties_a_claude_draft_hidden_above_blank_rows() {
   pass "fm_backend_herdr_composer_clear: a Claude draft whose visible rows go blank is cleared until the composer shows one empty row"
 }
 
-# Claude's inline view grows the composer with the draft, so a refused long
-# draft in a narrow pane pushes the composer's top border out of the viewport
-# and no read can see it until enough rows are gone. The clear keeps pressing
-# Ctrl+U through those unreadable reads rather than judging them unchanged.
+# Claude's inline view grows the composer with the draft, so a long draft in a
+# narrow pane pushes the composer's top rule and first rows out of the
+# viewport, into scrollback. The view reads it again with the scrollback above
+# the viewport, whole, and the clear then empties it.
 test_composer_clear_empties_a_claude_draft_grown_past_the_pane() {
-  local dir fb draft rc=0
+  local dir fb draft got rc=0
   draft=$(herdr_helm_message)
   draft="$draft $draft"
   draft=${draft:0:700}
   dir="$TMP_ROOT/clear-grown-draft"; mkdir -p "$dir"; : > "$dir/log"
   fb=$(make_herdr_claude_sim "$dir" 33 14 '[]' "$draft" inline)
-  ! PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_SIM_STATE="$dir/sim.json" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_view default:w1:p2' "$ROOT" \
-    || fail "fixture: a 700-char draft in a 33x14 inline composer must leave the composer unreadable"
+  case "$(PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_SIM_STATE="$dir/sim.json" herdr pane read w1:p2 --source visible)" in
+    *'❯ '*) fail "fixture: a 700-char draft in a 33x14 inline composer must push the composer's first row out of the viewport" ;;
+  esac
+  got=$(PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_SIM_STATE="$dir/sim.json" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_view default:w1:p2 && printf "%s" "$FM_BACKEND_HERDR_VIEW_TEXT"' "$ROOT") \
+    || fail "a Claude composer grown past the pane must be read with the scrollback above the viewport"
+  [ "${got//[[:space:]]/}" = "${draft//[[:space:]]/}" ] \
+    || fail "the grown composer must read as the whole draft, got '$got'"
   PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_SIM_STATE="$dir/sim.json" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_clear default:w1:p2 "$1" 1' "$ROOT" "$draft" || rc=$?
   [ "$rc" -eq 0 ] || fail "the Claude-aware clear should verify a grown composer empty, returned $rc"
   [ "$(herdr_sim_buf "$dir")" = '' ] || fail "the clear left part of a draft grown past the pane: '$(herdr_sim_buf "$dir")'"
-  pass "fm_backend_herdr_composer_clear: a Claude draft grown past the pane is cleared through the reads that cannot see the composer"
+  pass "fm_backend_herdr_composer_clear: a Claude draft grown past the pane is read whole from scrollback and cleared"
+}
+
+# A grown draft whose rows in view are blank lines shows nothing that ties the
+# viewport to a composer in scrollback, so it stays unreadable, and the clear
+# keeps pressing Ctrl+U through those reads rather than judging them unchanged.
+test_composer_clear_empties_a_claude_draft_grown_past_the_pane_with_blank_rows_in_view() {
+  local dir fb draft rc=0
+  draft=$(herdr_helm_message | cut -c1-120)
+  for _ in $(seq 20); do draft+=$'\n'; done
+  dir="$TMP_ROOT/clear-grown-blank-draft"; mkdir -p "$dir"; : > "$dir/log"
+  fb=$(make_herdr_claude_sim "$dir" 33 14 '[]' "$draft" inline)
+  ! PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_SIM_STATE="$dir/sim.json" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_view default:w1:p2' "$ROOT" \
+    || fail "a grown Claude composer with only blank rows in view must stay unreadable"
+  PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_SIM_STATE="$dir/sim.json" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_clear default:w1:p2 "$1" 1' "$ROOT" "$draft" || rc=$?
+  [ "$rc" -eq 0 ] || fail "the Claude-aware clear should verify a grown composer empty, returned $rc"
+  [ "$(herdr_sim_buf "$dir")" = '' ] || fail "the clear left part of a draft grown past the pane: '$(herdr_sim_buf "$dir")'"
+  pass "fm_backend_herdr_composer_clear: a Claude draft grown past the pane with blank rows in view is cleared through the reads that cannot see it"
+}
+
+# Live Claude Code 2.1.309 on Herdr 0.8.2: a 257-character message typed into
+# a 33-column, 14-row pane grows the inline composer past the pane, and the
+# proof must still read it whole and submit it. The simulator draws less
+# around its composer than live Claude does, so its pane is 12 rows.
+test_send_text_submit_submits_a_message_grown_past_a_claude_inline_pane() {
+  local dir fb out text
+  text="Make sure that he didn't actually do anything, and that we have a better understanding of this situation before I ask anything. For number two and three, elaborate on them with your recommendation and how. Reply with only the word OK."
+  dir="$TMP_ROOT/submit-grown-inline"; mkdir -p "$dir"; : > "$dir/log"
+  fb=$(make_herdr_claude_sim "$dir" 33 12 '[]' '' inline)
+  out=$(herdr_sim_submit "$dir" "$fb" "$text")
+  [ "$out" = empty ] || fail "a ${#text}-character message grown past a 33x12 inline composer should confirm delivery, got '$out': $(cat "$dir/stderr")"
+  herdr_sim_delivered "$dir" "$text" || fail "the grown composer did not submit the whole message: $(jq -c .submitted "$dir/sim.json")"
+  grep -q $'\x1fread\x1fw1:p2\x1f--source\x1frecent' "$dir/log" \
+    || fail "fixture: the message must grow the composer past the pane, so the proof reads the scrollback"
+  pass "fm_backend_herdr_send_text_submit: a message that grows Claude's inline composer past the pane is read whole from scrollback and submitted"
+}
+
+# The scrollback read never stands in for a composer the viewport does not
+# show: a viewport with no rule reads nothing more, and a composer in
+# scrollback whose text does not end with the rows in view is refused.
+test_composer_view_refuses_a_scrollback_composer_the_viewport_does_not_continue() {
+  local dir log resp fb rule
+  rule=$(printf '─%.0s' $(seq 30))
+  dir="$TMP_ROOT/view-stale-scrollback"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '  Do you want to proceed?\n  1. Yes\n  2. No\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  ! PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_view default:w1:p2' "$ROOT" \
+    || fail "a viewport with no composer must stay unreadable"
+  [ "$(grep -c $'\x1fread\x1f' "$log")" -eq 1 ] || fail "a viewport with no rule must not read the scrollback: $(cat "$log")"
+  dir="$TMP_ROOT/view-stale-scrollback-cut"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '  an unrelated wrapped row\n%s\n  ⏵⏵ bypass permissions on\n' "$rule" > "$resp/1.out"
+  printf '%s\n❯ an older draft\n%s\n  ⏵⏵ bypass permissions on\n\n⏺ A reply from an earlier turn\n\n  an unrelated wrapped row\n%s\n  ⏵⏵ bypass permissions on\n' "$rule" "$rule" "$rule" > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  ! PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_view default:w1:p2' "$ROOT" \
+    || fail "a composer left in scrollback above an earlier reply must not read as the composer the viewport cuts"
+  grep -q $'\x1f--source\x1frecent' "$log" || fail "fixture: the cut viewport must read the scrollback: $(cat "$log")"
+  pass "fm_backend_herdr_composer_view: a composer in scrollback is read only when the viewport's rows continue it"
 }
 
 # Live Claude's Ctrl+U deletes one wrapped row per press, so a long draft in a
@@ -6994,6 +7060,9 @@ test_send_text_submit_refuses_to_retype_a_message_holding_a_tab
 test_send_text_submit_refuses_a_piece_that_lost_its_head_after_blank_lines
 test_composer_clear_empties_a_claude_draft_hidden_above_blank_rows
 test_composer_clear_empties_a_claude_draft_grown_past_the_pane
+test_composer_clear_empties_a_claude_draft_grown_past_the_pane_with_blank_rows_in_view
+test_send_text_submit_submits_a_message_grown_past_a_claude_inline_pane
+test_composer_view_refuses_a_scrollback_composer_the_viewport_does_not_continue
 test_send_text_submit_reads_a_tall_claude_composer_whole
 test_send_text_submit_clears_a_long_refused_draft_in_a_narrow_pane
 test_composer_retype_needs_older_text_above_a_piece_that_fills_the_composer

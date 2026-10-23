@@ -674,13 +674,14 @@ When the request was sent but Herdr never answered, the composer may already hol
 
 When native `agent get` identity is Claude, the adapter types only into an empty composer.
 Claude's fullscreen view caps its composer at `max(3, rows / 2 - 5)` visible rows and shows the rows around the cursor, so a draft whose visible rows are blank lines can still hold text above them.
-Claude's inline view instead grows the composer with the draft, so a tall enough draft pushes the composer's top border out of a short pane and the composer cannot be read.
+Claude's inline view instead grows the composer with the draft, so a tall enough draft pushes the composer's top border out of a short pane, into scrollback.
+The adapter then reads the composer again with the scrollback above the viewport, and accepts that read only when the scrollback ends with exactly the viewport's rows and shows nothing but composer rows from the viewport's closing rule up to the prompt row and its rule; a grown composer whose rows in view are only blank lines stays unreadable.
 The composer is therefore empty only when it shows a single row with no typed text.
 A Claude composer that shows anything else, or cannot be read, before the send is refused with nothing typed, which also leaves someone else's draft untouched.
 Claude reads a carriage return in a short burst as Enter, which submits the draft typed so far, and in a long burst as a line break, so the adapter types every CRLF pair and every lone carriage return to a Claude pane as a line break; no carriage return can then submit part of a message.
 Before that Enter, the adapter continues only when the selected composer shows the typed payload, or only Claude paste placeholders with no literal remainder.
 A read-back that does not show it yet is read again after short pauses for about two seconds (`FM_BACKEND_HERDR_PROOF_BACKOFF`), because a large, busy Claude session can draw typed text after the send's settle.
-Every herdr adapter composer read (`fm_backend_herdr_composer_state`, `fm_backend_herdr_composer_content`) captures the full visible viewport, never a bounded tail, while the shared inbox pending-line confirmation read (bin/fm-task-inbox-lib.sh) stays a bounded tail on every backend: an overlay Claude renders between the composer and the pane bottom - the slash-command popup is the verified shape - pushes the composer outside a tail window, and the composer is by definition inside the viewport.
+Every herdr adapter composer read (`fm_backend_herdr_composer_state`, `fm_backend_herdr_composer_content`) captures the full visible viewport, never a bounded tail, while the shared inbox pending-line confirmation read (bin/fm-task-inbox-lib.sh) stays a bounded tail on every backend: an overlay Claude renders between the composer and the pane bottom - the slash-command popup is the verified shape - pushes the composer outside a tail window, and the composer's closing rule is always inside the viewport.
 Dated measurement: docs/verification/runtime-backends.md "Claude exit behind the slash-command popup".
 
 That comparison ignores whitespace and U+2063, the invisible mark that starts operational inputs and ends the from-firstmate label.
