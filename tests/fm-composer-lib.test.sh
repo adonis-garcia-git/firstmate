@@ -1443,6 +1443,25 @@ test_selected_rows_view_reports_every_composer_row() {
   pass "fm_composer_selected_rows_view: reports text, blank, and ghost rows of the composer, trailing blank rows included"
 }
 
+test_ruled_claude_composer_wins_over_its_popup_glyph_row() {
+  # Claude Code 2.1.309 on Herdr 0.8.2 (captured live in a 33-column pane):
+  # the slash-command popup under the composer's closing rule marks its
+  # selected row with the same `❯` Claude prompts with. That row is the
+  # composer's overlay, so the ruled composer above it stays selected, while a
+  # composer a rule of its own opens below a closed one still wins.
+  local rule screen out
+  rule='──────────────────────────────'
+  screen=$'✻ Sautéed for 2s · done 9:37\n  PM\n\n'"$rule"$'\n❯ /exit\n'"$rule"$'\n  ❯ /exit       Exit the CLI\n    /context    Visualize\n                current con…\n    …e-credits  Configure\n                usage credi…'
+  out=$(fm_composer_selected_rows_view "$CAPS_STYLED" "$screen") || fail "a ruled Claude composer above its popup should have a row view"
+  [ "$out" = $'t\t/exit' ] || fail "the popup's glyph row must not stand in for the composer above it, got '$out'"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$screen")
+  [ "$out" = /exit ] || fail "the selected content must be the typed /exit alone, got '$out'"
+  screen=$'transcript line\n'"$rule"$'\n❯ an older draft\n'"$rule"$'\n⏺ A reply\n'"$rule"$'\n❯ the live draft\n'"$rule"$'\n  ⏵⏵ bypass permissions on'
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$screen")
+  [ "$out" = 'the live draft' ] || fail "a ruled composer below a closed one must still be selected, got '$out'"
+  pass "fm_composer_selected_rows_view: a ruled Claude composer wins over the glyph-marked popup row under its closing rule"
+}
+
 test_ruled_bare_composer_keeps_text_past_a_blank_line() {
   # helm chat with an attachment types "<text>\n\nATTACHMENTS: <path>" into
   # the Claude composer on Herdr. Claude renders the typed blank line as a
@@ -1552,6 +1571,7 @@ test_queued_enter_verdict_does_not_convert_other_states
 test_ruled_bare_composer_keeps_text_past_a_blank_line
 test_ruled_bare_composer_keeps_typed_ascii_pipes
 test_selected_rows_view_reports_every_composer_row
+test_ruled_claude_composer_wins_over_its_popup_glyph_row
 
 # The selected row sits on cursor row 1 so a tmux read whose cursor is that
 # row, and a cursorless read, both still see unsubmitted text.

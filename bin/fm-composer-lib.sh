@@ -870,7 +870,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   FM_COMPOSER_SCAN_LEFTBAR_GLYPH_ROW=-1
   FM_COMPOSER_SCAN_LEFTBAR_GLYPH=
   local leftbar_start=-1 pi_open=-1 pi_lines=0 pi_max
-  local probe row_glyph row_glyph_row
+  local probe row_glyph row_glyph_row prev_rule=0 ruled_bare=0
   local box_glyph_row=-1 box_glyph='' pi_glyph_row=-1 pi_glyph=''
   pi_max=$FM_COMPOSER_PI_MAX_LINES
   case "$pi_max" in ''|*[!0-9]*|0) pi_max=8 ;; esac
@@ -969,7 +969,21 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
        && ! _fm_composer_row_is_pi_status "$trimmed"; then
       FM_COMPOSER_SCAN_SHELL_ROW=$row
     elif fm_composer_leading_agent_glyph_var glyph "$trimmed"; then
-      FM_COMPOSER_SCAN_BARE_ROW=$row
+      # In the rows directly below a ruled bare composer's closing rule, up to
+      # the first blank row, an indented glyph row is that composer's overlay,
+      # not a composer, unless a rule of its own opens it (the closing rule
+      # never does): Claude Code 2.1.309 marks the selected row of its
+      # slash-command popup, indented under the composer, with the same `❯` it
+      # prompts with at the margin (verified live on Herdr 0.8.2). A glyph at
+      # the margin may be a live draft and a blank row ends the overlay, so
+      # either still wins, and no verdict moves toward empty for anything but
+      # that indented row.
+      if [ "$prev_rule" = 1 ]; then
+        FM_COMPOSER_SCAN_BARE_ROW=$row
+        ruled_bare=1
+      elif [ "$ruled_bare" != closed ] || [ -z "$indent" ]; then
+        FM_COMPOSER_SCAN_BARE_ROW=$row
+      fi
     fi
     # Cursor safety: a cursor sitting on a structural edge row is never an
     # input row.
@@ -1091,6 +1105,17 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
         *) valid=0 ;;
       esac
     fi
+    prev_rule=0
+    case "$trimmed" in
+      '─'*|'━'*|'═'*)
+        if [ "$ruled_bare" = 1 ] && [ "$FM_COMPOSER_SCAN_BARE_ROW" -lt "$row" ]; then
+          ruled_bare=closed
+        else
+          prev_rule=1
+        fi
+        ;;
+      '') [ "$ruled_bare" != closed ] || ruled_bare=0 ;;
+    esac
     row=$((row + 1))
   done <<EOF
 $pane
