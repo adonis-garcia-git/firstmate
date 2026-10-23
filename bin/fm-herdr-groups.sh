@@ -349,7 +349,7 @@ changed_tokens() {
 
 agent_view() { # <session> set|clear
   local session=$1 action=$2 socket helper
-  socket=$(fm_backend_herdr_presentation_session_socket_path "$session") || {
+  socket=$(fm_backend_herdr_session_socket_path "$session") || {
     warn "could not resolve the socket for session $session; agents view not ${action}"
     return 1
   }
