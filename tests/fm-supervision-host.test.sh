@@ -441,11 +441,10 @@ test_dispatch_entry_scopes_rows_and_renders_the_away_tail() {
 # --- host loop ----------------------------------------------------------------
 
 
-# BRANCH OUTCOMES belongs to a home that runs the host off Pi: on a Claude
-# primary that is the default and an `off` file opts out, while another
-# primary still needs the file; wherever the home does not run the host the
-# drain and the store's markers are exactly as before, and on Pi the branch
-# extension owns the same outcomes.
+# BRANCH OUTCOMES belongs to a home that runs the host off Pi: every primary,
+# Claude included, needs the file, and an `off` file opts out; wherever the
+# home does not run the host the drain and the store's markers are exactly as
+# before, and on Pi the branch extension owns the same outcomes.
 test_branch_outcomes_only_on_a_host_home_off_pi() {
   local home drained fakes
   home="$TMP_ROOT/drain-scope"
@@ -471,12 +470,15 @@ test_branch_outcomes_only_on_a_host_home_off_pi() {
   assert_absent "$home/state/.branch-outcomes-cursor" "a Pi primary's drain must not advance the store's read cursor"
 
   drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
-  assert_contains "$drained" "[seq 1, recorded 0m ago] demo: PR ready for review" "a Claude home without config/supervision-host must present the captain outcome"
+  assert_not_contains "$drained" "BRANCH OUTCOMES" "a Claude home without config/supervision-host must not present branch outcomes"
+  assert_absent "$home/state/.branch-outcomes-cursor" "a Claude home without config/supervision-host must keep the store's read cursor untouched"
 
   : > "$home/config/supervision-host"
   drained=$(FM_HOME="$home" "$fakes/codex" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
   assert_contains "$drained" "[seq 1, recorded 0m ago] demo: PR ready for review" "a Codex home with config/supervision-host must present the captain outcome"
-  pass "drain: BRANCH OUTCOMES runs on a Claude home by default and on another primary with the file, never with off, and never on Pi"
+  drained=$(FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh")
+  assert_contains "$drained" "[seq 1, recorded 0m ago] demo: PR ready for review" "a Claude home with config/supervision-host must present the captain outcome"
+  pass "drain: BRANCH OUTCOMES runs on any primary but Pi only with the file, and never with off"
 }
 
 # A fresh captain outcome is never hidden behind older routine outcomes: the
