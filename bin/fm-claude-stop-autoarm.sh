@@ -74,7 +74,7 @@
 #     its wake lines keep the arm's eight-line cap. A "supervision-host stood
 #     down:" close exits 0 silently, and a host that died without a close is
 #     retried instead of being judged by the healthy-watcher predicate
-#     (docs/supervision-host.md). On a home that opted out nothing below
+#     (docs/supervision-host.md). On a home that does not run it nothing below
 #     changes.
 #   - Translation: while supervision is still needed and AFK remains inactive,
 #     an actionable arm close (signal:/stale:/check:/heartbeat) prints one
