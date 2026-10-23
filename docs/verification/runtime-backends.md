@@ -1551,6 +1551,29 @@ With the pre-fix proof, the same guard failed:
 not ok - Claude Code (2.1.285 (Claude Code)) on herdr 0.8.2: a 369-char message that Claude's 14-row pane scrolls in its composer must confirm empty, got 'send-failed'
 ```
 
+Measured 2026-10-22 against Herdr 0.8.2 and Claude Code 2.1.309, with the same viewer-attached split panes.
+Claude Code 2.1.308 and later draw an inline view whose composer is not capped: it grows with the draft, so a 257-character message in a 33-by-14 pane pushed the composer's top rule and prompt row into scrollback, and a viewport-only read found no composer.
+A `pane read --source recent --lines 200` of the same moment ended with exactly the viewport's rows and held the whole composer above them; after Ctrl+U shrank the draft, rows Claude could no longer redraw stayed behind in scrollback above the redrawn screen.
+A draft whose rows in view were only the blank lines it ended with showed nothing that tied the viewport to a composer.
+`fm_backend_herdr_composer_view` now reads such a cut composer again with the scrollback above the viewport (`fm_backend_herdr_composer_grown_read`), and `tests/fm-backend-herdr.test.sh` pins the read, the submit, the blank-rows refusal and clear, and the refusal of a composer left in scrollback through the composer simulator, whose inline view returns scrollback to a `--source recent` read.
+Observed 2026-10-22 with Claude Code 2.1.309:
+
+```text
+ok - live Herdr scrolled composer: Claude Code (2.1.309 (Claude Code)) on herdr 0.8.2 types a 369-char message its 14-row pane scrolls again in proven pieces and submits it whole
+ok - live Herdr scrolled composer: Claude Code (2.1.309 (Claude Code)) on herdr 0.8.2 submits a 290-char multi-paragraph message its 14-row pane scrolls whole
+ok - live Herdr hidden draft: Claude Code (2.1.309 (Claude Code)) on herdr 0.8.2 refuses to type over a draft hidden by blank composer rows (overflow) in its 14-row pane and clears it
+ok - live Herdr composer clear: Claude Code (2.1.309 (Claude Code)) on herdr 0.8.2 clears a 700-char draft in a 33-column pane row by row
+ok - live Herdr scrolled composer: Claude Code (2.1.309 (Claude Code)) on herdr 0.8.2 submits a 257-char message whole in a 33-column pane
+ok - live Herdr scrolled composer: Claude Code (2.1.309 (Claude Code)) on herdr 0.8.2 submits a 485-char message with a carriage return a 33-column pane scrolls once, whole
+```
+
+With the viewport-only read, the same guard failed:
+
+```text
+warning: herdr: after 6 read(s) the Claude composer in w1:p1 could not be read, so Enter was not pressed
+not ok - Claude Code (2.1.309 (Claude Code)) on herdr 0.8.2: a 257-char message in a 33-column pane must confirm empty, got 'send-failed'
+```
+
 ### Carriage returns and tabs in Claude text
 
 Measured 2026-09-30 against Herdr 0.8.2 and Claude Code 2.1.286 in isolated `fm-lab-` sessions, typing raw `pane send-text` bursts into an empty composer and reading Claude's session transcript.
@@ -1584,7 +1607,7 @@ Typing `/exit` makes Claude Code render its command popup between the composer a
 The composer row lands outside a bounded 20-row tail of the pane, so the adapter's bounded composer reads reported the composer as empty while it actually held `/exit`.
 The pre-Enter payload proof then judged the typed command unsent, pressed Ctrl+U, and reported `send-failed` without ever pressing Enter, so `bin/fm-control.sh exit` never exited the worker (and `bin/fm-secondmate-restart.sh` inherited the failure through its exit step).
 
-The fix captures the FULL VISIBLE VIEWPORT for every herdr adapter composer read (`pane read --source visible [--format ansi]`, `fm_backend_herdr_composer_state` and `fm_backend_herdr_composer_content`): the composer is by definition inside the viewport, and the viewport is the one bound that always contains it.
+The fix captures the FULL VISIBLE VIEWPORT for every herdr adapter composer read (`pane read --source visible [--format ansi]`, `fm_backend_herdr_composer_state` and `fm_backend_herdr_composer_content`): the composer's closing rule is always inside the viewport, and the payload proof reads the scrollback above it only for a composer grown past the pane (see "Scrolled composer").
 The shared inbox pending-line confirmation read (`bin/fm-task-inbox-lib.sh`) stays a bounded tail on every backend, herdr included; its payloads are task lines, not slash commands, so the popup shape does not arise there.
 The popup rows sit below the composer's closing rule, which is a structural edge row, so the shared classifier still selects only the composer and the menu rows never read as typed text.
 Verified live in the lab: with the popup up the state read answers `pending` (previously `empty`) and the payload proof returns `/exit` (previously empty), the submit presses Enter, and the Claude process exits, leaving the shell prompt.
@@ -1609,6 +1632,21 @@ FM_HERDR_SUBMIT_CONFIRM_LIVE=1 tests/fm-herdr-submit-confirm-live-e2e.test.sh
 
 ```text
 ok - live Herdr submit confirm: Claude Code (2.1.283 (Claude Code)) on herdr 0.9.0 proves and submits a typed /exit behind its command popup
+```
+
+Measured 2026-10-22 against Herdr 0.8.2 and Claude Code 2.1.309: the popup's selected row, drawn indented directly under the composer's closing rule, starts with the same `❯` Claude draws at the composer's margin, so the bottom-most glyph row selected the popup and the payload proof read `/exit Exit the CLI /context ...`.
+`bin/fm-composer-lib.sh` now treats an indented glyph row in the rows directly below a ruled bare composer's closing rule, up to the first blank row, as that composer's overlay, and `tests/fm-composer-lib.test.sh` pins it with the captured screen.
+Observed 2026-10-22:
+
+```text
+ok - live Herdr submit confirm: Claude Code (2.1.309 (Claude Code)) on herdr 0.8.2 proves and submits a typed /exit behind its command popup
+```
+
+Before that fix, the same guard failed:
+
+```text
+warning: herdr: after 6 read(s) the Claude composer in w1:p1 showed 101 of 5 characters of the message, so Enter was not pressed
+not ok - Claude Code (2.1.309 (Claude Code)) on herdr 0.8.2: a typed /exit behind its command popup was judged unsent and cleared instead of submitted
 ```
 
 ### Claude background-task exit picker
