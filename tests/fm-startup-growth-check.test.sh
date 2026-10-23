@@ -313,6 +313,10 @@ test_due_unsafe_inputs_are_reported_but_absent_optional_memory_is_not() {
 
 test_over_long_finding_set_is_capped_with_the_shared_marker() {
   local rec root home deep seg out reported
+  if [ "$(uname)" = Darwin ]; then
+    printf 'note - the over-long finding needs a data path past the 1024-byte macOS PATH_MAX; skipping on Darwin\n'
+    return 0
+  fi
   rec=$(make_world capped)
   root=${rec%%|*}
   home=${rec#*|}
