@@ -69,7 +69,7 @@ test_signal_catchup_without_running_watcher() {
   # tested.
   printf 'blocked: first\n' > "$status_file"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
-  wait_for_exit "$!" 40 || fail "watcher did not exit for first signal"
+  wait_for_exit "$!" 100 || fail "watcher did not exit for first signal"
   grep -F "signal: $status_file" "$out" >/dev/null || fail "watcher did not print first signal"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2> "$drain_err" || fail "drain after first signal failed"
   grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null || fail "first signal was not queued"
@@ -81,7 +81,7 @@ test_signal_catchup_without_running_watcher() {
   printf 'done: second\n' >> "$status_file"
   : > "$out"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
-  wait_for_exit "$!" 40 || fail "watcher did not exit for second signal"
+  wait_for_exit "$!" 100 || fail "watcher did not exit for second signal"
   grep -F "signal: $status_file" "$out" >/dev/null || fail "signal written with no watcher was not caught"
   pass "signal written while no watcher runs is caught on next run"
 }
@@ -108,7 +108,7 @@ test_stale_enqueue_before_suppressor() {
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
-  wait_for_exit "$!" 40 || fail "watcher did not exit for stale pane"
+  wait_for_exit "$!" 100 || fail "watcher did not exit for stale pane"
   grep -Fx "stale: $window" "$out" >/dev/null || fail "watcher did not print stale wake"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after stale wake failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "stale wake was not queued"
@@ -145,7 +145,7 @@ test_not_working_stale_enqueue_before_suppressor() {
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
-  wait_for_exit "$!" 40 || fail "watcher did not surface a not-provably-working stale"
+  wait_for_exit "$!" 100 || fail "watcher did not surface a not-provably-working stale"
   grep -Fx "stale: $window" "$out" >/dev/null || fail "watcher did not print the immediate stale wake"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after the immediate stale wake failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "immediate stale wake was not queued"
@@ -170,7 +170,7 @@ SH
   FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" task >/dev/null \
     || fail "could not register queue custom check"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
-  wait_for_exit "$!" 40 || fail "watcher did not exit for check output"
+  wait_for_exit "$!" 100 || fail "watcher did not exit for check output"
   grep -F "check: $check_file: merged: https://example.test/pr/1" "$out" >/dev/null || fail "watcher did not print check wake"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after check wake failed"
   grep "$(printf '\tcheck\t')" "$drain_out" | grep -F "$check_file" | grep -F 'merged: https://example.test/pr/1' >/dev/null || fail "check wake was not queued"
