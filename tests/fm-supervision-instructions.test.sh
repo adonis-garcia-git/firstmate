@@ -19,7 +19,10 @@ test_selected_harness_block_only() {
   pass "renderer prints exactly the selected harness block"
 }
 
-test_supervision_host_protocol_only_on_an_opted_in_claude_home() {
+# A Claude home runs the host only when config/supervision-host opts it in, so
+# its block carries the host protocol only then; no file, or an off file,
+# renders the plain block.
+test_supervision_host_protocol_on_a_claude_home_only_with_the_file() {
   local home config plain hosted other
   home="$TMP_ROOT/host-home"
   config="$TMP_ROOT/host-config"
@@ -27,6 +30,10 @@ test_supervision_host_protocol_only_on_an_opted_in_claude_home() {
   plain=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness claude)
   assert_not_contains "$plain" "Supervision host" "a claude home without config/supervision-host rendered the host protocol"
   : > "$config/supervision-host"
+  : > "$config/supervision-host-off"
+  assert_equals "$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness claude)" "$plain" \
+    "a claude home opted out by config/supervision-host-off must render the plain block"
+  rm -f "$config/supervision-host-off"
   hosted=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness claude)
   assert_contains "$hosted" "- Supervision host: on;" "an opted-in claude home did not render the host state line"
   assert_contains "$hosted" "Mode: Claude Stop-hook-owned supervision." "the host protocol replaced the claude protocol instead of adding to it"
@@ -36,22 +43,32 @@ test_supervision_host_protocol_only_on_an_opted_in_claude_home() {
     || fail "the host protocol changed the claude block it should only append to"
   other=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness pi)
   assert_not_contains "$other" "Supervision host" "a pi primary rendered the host protocol"
-  pass "renderer adds the supervision-host protocol only on an opted-in claude home, leaving the claude block intact"
+  rm -f "$config/supervision-host"
+  other=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness pi)
+  assert_not_contains "$other" "Supervision host" "a pi primary without config/supervision-host rendered the host protocol"
+  pass "renderer adds the supervision-host protocol on a claude home only when config/supervision-host opts it in, leaving the claude block intact"
 }
 
 # Each non-Pi arm owner gets the host protocol in its own terms, and only its
-# own terms; Grok's model-owned arm command becomes the host; a home without
-# the file renders exactly what it did before, with no tag or placeholder.
+# own terms; Grok's model-owned arm command becomes the host; a home with
+# config/supervision-host-off, or a non-Claude home without the file, renders exactly what
+# it did before, with no tag or placeholder.
 test_supervision_host_protocol_on_every_arm_owner() {
   local home config harness plain hosted body
   home="$TMP_ROOT/host-owners-home"
   config="$TMP_ROOT/host-owners-config"
   mkdir -p "$home/state" "$config"
   for harness in claude cursor opencode omp grok codex; do
-    rm -f "$config/supervision-host"
+    : > "$config/supervision-host-off"
     plain=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness "$harness")
-    assert_not_contains "$plain" "Supervision host" "$harness: a home without config/supervision-host rendered the host protocol"
+    assert_not_contains "$plain" "Supervision host" "$harness: a home opted out by config/supervision-host-off rendered the host protocol"
     assert_not_contains "$plain" "__FM_" "$harness: a placeholder leaked into the rendered block"
+    if [ "$harness" != claude ]; then
+      rm -f "$config/supervision-host" "$config/supervision-host-off"
+      assert_equals "$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness "$harness")" "$plain" \
+        "$harness: a home without config/supervision-host must render the plain block"
+    fi
+    rm -f "$config/supervision-host-off"
     : > "$config/supervision-host"
     hosted=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness "$harness")
     assert_contains "$hosted" "- Supervision host: on; it takes away-posture wakes and, where the dialog mirror is verified, eligible attended wakes itself, and hands the rest to you (protocol at the end of this block)." \
@@ -70,6 +87,10 @@ test_supervision_host_protocol_on_every_arm_owner() {
   rm -f "$config/supervision-host"
   plain=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness grok)
   assert_contains "$plain" 'exec bin/fm-watch-arm.sh`' "grok without the file must arm the plain watcher"
+  : > "$config/supervision-host-off"
+  plain=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness grok)
+  assert_contains "$plain" 'exec bin/fm-watch-arm.sh`' "grok with an off file must arm the plain watcher"
+  rm -f "$config/supervision-host-off"
   : > "$config/supervision-host"
   hosted=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness grok)
   assert_contains "$hosted" 'exec bin/fm-supervision-host.sh park`' "grok with the file must arm the supervision host"
@@ -163,10 +184,40 @@ test_repair_lines() {
   pass "renderer repair-line mode is harness-aware and honors conditional state"
 }
 
+test_omp_restart_guidance_depends_on_home_vs_checkout() {
+  local home out
+  home="$TMP_ROOT/omp-other-home"
+  mkdir -p "$home/state"
+
+  # Home is not the firstmate checkout: relaunch through the launcher.
+  out=$(FM_HOME="$home" "$RENDER" --harness omp --repair-line)
+  # shellcheck disable=SC2016  # backticks are literal text
+  assert_contains "$out" 'relaunch through `fm <project>`' "omp repair line must direct a non-checkout home to the fm launcher"
+  assert_contains "$out" "a bare omp or /resume from the firstmate checkout does not register the extensions for this home" "omp repair line omits the bare omp warning"
+  assert_not_contains "$out" "restart omp inside this home" "omp repair line still tells a non-checkout home to restart omp inside it"
+  out=$(FM_HOME="$home" "$RENDER" --harness omp)
+  # shellcheck disable=SC2016  # backticks are literal text
+  assert_contains "$out" 'exit omp and relaunch through `fm <project>`, which sets FM_HOME and --cwd' "omp protocol must direct a non-checkout home to the fm launcher"
+  assert_contains "$out" "a bare omp or /resume from the firstmate checkout does not register the extensions for this home" "omp protocol omits the bare omp warning"
+  assert_not_contains "$out" "restart omp inside this home" "omp protocol still tells a non-checkout home to restart omp inside it"
+
+  # Home is the checkout itself: today's text.
+  out=$(FM_HOME="$ROOT" "$RENDER" --harness omp --repair-line)
+  assert_contains "$out" "restart omp inside this home" "omp repair line lost today's wording for the checkout home"
+  assert_not_contains "$out" "fm <project>" "omp repair line named the launcher for the checkout home"
+  out=$(env -u FM_HOME "$RENDER" --harness omp)
+  assert_contains "$out" "restart omp inside this home; pass \`-e " "omp protocol lost today's wording for the checkout home"
+  assert_contains "$out" "restart omp inside this home if the extensions are not loaded" "omp protocol repair step lost today's wording for the checkout home"
+  assert_not_contains "$out" "fm <project>" "omp protocol named the launcher for the checkout home"
+  pass "omp restart guidance names the fm launcher only when the home is not the checkout"
+}
+
 test_cross_harness_ordinary_continuation_and_repair_matrix() {
   local ordinary out
 
   out=$("$RENDER" --harness pi)
+  assert_contains "$out" "task-level routine outcome that says the worker is still busy" "Pi instructions omitted task-level silent no-change behavior"
+  assert_contains "$out" "captain outcomes are never silent" "Pi instructions allowed silent captain outcomes"
   ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
   assert_contains "$ordinary" "Pi extension already owns watcher continuity" "pi ordinary-wake line does not leave continuity to the extension"
   assert_not_contains "$ordinary" "fm_watch_arm_pi" "pi ordinary-wake line incorrectly calls the recovery tool"
@@ -281,13 +332,14 @@ test_pi_snippet_uses_effective_extension_path() {
   pass "pi supervision snippet renders the effective extension path"
 }
 
-test_supervision_host_protocol_only_on_an_opted_in_claude_home
+test_supervision_host_protocol_on_a_claude_home_only_with_the_file
 test_supervision_host_protocol_on_every_arm_owner
 test_selected_harness_block_only
 test_unknown_fallback
 test_conditional_stanzas
 test_quiet_mode_stanzas
 test_repair_lines
+test_omp_restart_guidance_depends_on_home_vs_checkout
 test_cross_harness_ordinary_continuation_and_repair_matrix
 test_pi_signed_preserves_identity_with_pi_supervision_protocol
 test_grok_is_background_notify

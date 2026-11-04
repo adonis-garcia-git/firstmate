@@ -1,9 +1,7 @@
 ---
 name: dispatched-issue-pickup
 description: >-
-  Agent-only procedure for work another machine dispatched as a GitHub issue.
-  Use on a `check: ... dispatched work: ...` wake, before picking up an issue labeled fm:dispatched, and before reporting a picked-up task's outcome.
-  Owns the claim-then-spawn-then-bind order, the issue= idempotency rule, and the rule that every result goes into the issue rather than into captain chat.
+  Load on a `check: ... dispatched work: ...` wake, before picking up an issue labeled fm:dispatched, and before reporting a picked-up task's outcome.
 user-invocable: false
 metadata:
   internal: true

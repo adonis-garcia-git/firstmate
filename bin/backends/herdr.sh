@@ -68,7 +68,7 @@
 # default (the firstmate repo root - never a secondmate home, so
 # fm_backend_herdr_workspace_label falls through to "firstmate" exactly like
 # pre-P3 behavior when a test does not care about home-specific labeling).
-FM_BACKEND_HERDR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+FM_BACKEND_HERDR_ROOT="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}/../.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_HERDR_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
@@ -129,11 +129,8 @@ FM_BACKEND_HERDR_MIN_PRESENTATION_VERSION=0.8.0
 # below-floor warning would repeat on every crewmate; the key is the detected
 # release, so an upgrade or a downgrade is announced again.
 FM_BACKEND_HERDR_PRESENTATION_FLOOR_MARKER_PREFIX=".herdr-presentation-floor-"
-# Per-pane escalation dedupe marker prefix, under the state dir. One marker per
-# window (keyed like the watcher's own .stale-<key>): set when a ->blocked edge
-# is enqueued, cleared on any working edge, so exactly one wake fires per
-# ->blocked edge and a reconnect level-reconcile never re-delivers a still-
-# blocked pane. Mirrors bin/fm-watch.sh's .stale-<key> naming.
+# Per-pane escalation dedupe marker prefix, under the state dir
+# (bin/fm-transition-lib.sh owns the dedupe contract).
 FM_BACKEND_HERDR_ESCALATED_PREFIX=".herdr-escalated-"
 # .fm-secondmate-home is written by bin/fm-home-seed.sh (AGENTS.md section 6)
 # at a seeded secondmate home's root, containing exactly that secondmate's id.
@@ -773,14 +770,26 @@ fm_backend_herdr_projection_workspace_label() {  # <task-id> <projection-id>
   printf '└ %s · p:%s' "$(fm_backend_herdr_projection_concise_task_label "$1")" "$2"
 }
 
-# fm_backend_herdr_presentation_session_lock_path: one machine-private lock
+# fm_backend_herdr_presentation_session_lock_path: one account-private lock
 # path per live named Herdr session/socket, shared across every Firstmate home
-# that uses that session.
+# of this OS account that uses that session.
 # The path is never under any one home's state/ and secondmates never write the
 # primary home. Returns non-zero when the named session's socket cannot be
 # resolved unambiguously.
+# The namespace directory is suffixed with this account's uid, so another OS
+# account on the same host can never create it first by ordinary use and lock
+# this account out; a deliberately pre-created name still fails the ownership
+# and mode checks below and is refused, never adopted, chowned, or removed.
+# The uid rather than $XDG_RUNTIME_DIR names it because that variable can differ
+# or be absent between login contexts of one account, which would split one
+# session's lock across processes.
 fm_backend_herdr_presentation_lock_namespace() {
-  printf '%s' '/tmp/firstmate-herdr-presentation'
+  local uid
+  uid=$(id -u 2>/dev/null) || return 1
+  case "$uid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '/tmp/firstmate-herdr-presentation-%s' "$uid"
 }
 
 fm_backend_herdr_presentation_lock_namespace_mode() {
@@ -1470,6 +1479,13 @@ fm_backend_herdr_pane_idle_shell_sample() {  # <session> <pane-id>
 # adjacent old-format firstmate/... or 2ndmate-<id>/... projections may extend
 # the block read-only; they are never renamed or moved.
 #
+# Optional <group-order-key> is the opt-in project-group key that
+# bin/fm-herdr-groups.sh order-key prints for the new task. When given, the
+# new workspace lands inside the block right after the last child whose
+# fm_group_order workspace token is absent or sorts at or before that key,
+# else at the block start; existing children are still never moved. When
+# omitted the target stays the block end exactly as before.
+#
 # This is presentation-only and always returns success.
 # Every unavailable, ambiguous, failed, or unverifiable ordering step prints a
 # warning and leaves the safely-created worker running in Herdr's current
@@ -1480,8 +1496,8 @@ fm_backend_herdr_pane_idle_shell_sample() {  # <session> <pane-id>
 # current workspace-create response.
 # After a successful move, every pre-existing workspace id sequence excluding
 # the new id must be byte-identical to the pre-move sequence.
-fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspace-id> <parent-label> [<parent-workspace-id>]
-  local session=$1 created=$2 parent=$3 parent_ws=${4:-} list analysis current desired socket mover response move_status focus_before move_capable
+fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspace-id> <parent-label> [<parent-workspace-id>] [<group-order-key>]
+  local session=$1 created=$2 parent=$3 parent_ws=${4:-} group_key=${5:-} list analysis current desired socket mover response move_status focus_before move_capable
   local before_existing after_existing
   [ -n "$parent" ] || {
     echo "warning: herdr presentation ordering missing owning parent label; leaving worker in Herdr's current order" >&2
@@ -1491,7 +1507,7 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
     echo "warning: herdr presentation ordering could not list workspaces; leaving worker in Herdr's current order" >&2
     return 0
   }
-  analysis=$(printf '%s' "$list" | jq -c --arg created "$created" --arg parent "$parent" --arg parent_ws "$parent_ws" '
+  analysis=$(printf '%s' "$list" | jq -c --arg created "$created" --arg parent "$parent" --arg parent_ws "$parent_ws" --arg group_key "$group_key" '
     def is_parent:
       if ($parent_ws | length) > 0
       then .workspace_id == $parent_ws
@@ -1550,9 +1566,21 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
         end
       )) as $remainder
     | select($remainder.valid == true)
+    | (
+        if ($group_key | length) > 0 then
+          [range(0; $block)
+            | select(
+                ($spaces[$pidx + 1 + .].tokens.fm_group_order // null) as $key
+                | (($key | type) != "string") or ($key <= $group_key)
+              )]
+          | if length > 0 then (max + 1) else 0 end
+        else
+          $block
+        end
+      ) as $offset
     | {
         current: $current,
-        desired: ($pidx + 1 + $block),
+        desired: ($pidx + 1 + $offset),
         parent_index: $pidx,
         existing: [$spaces[] | select(.workspace_id != $created) | .workspace_id]
       }
@@ -1662,7 +1690,7 @@ fm_backend_herdr_server_ensure() {  # <session>
   (
     unset FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE \
       CURSOR_AGENT CURSOR_INVOKED_AS CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT FM_SUPERVISION_MODEL
-    fm_backend_herdr_cli "$session" server >/dev/null 2>&1 &
+    fm_backend_herdr_cli "$session" server </dev/null >/dev/null 2>&1 &
   ) || return 1
   for i in $(seq 1 20); do
     running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
@@ -3003,6 +3031,30 @@ fm_backend_herdr_projection_endpoint_matches_journal() {  # <session> <workspace
   [ "$matches" = "$workspace_id" ]
 }
 
+# fm_backend_herdr_projection_token_workspace_gone: true only when the named
+# session's workspace list was read and parsed successfully and no workspace
+# label still carries the journal's token. A version 1 attempt journal binds no
+# pane, so its projected workspace is confirmed gone only by this token absence;
+# any read or jq error - including a malformed entry that leaves the query
+# ambiguous - is unknown, not gone, so the session-start sweep keeps the journal.
+fm_backend_herdr_projection_token_workspace_gone() {  # <session> <journal> <task-id>
+  local session=$1 journal=$2 id=$3 token list verdict
+  token=$(fm_backend_herdr_projection_journal_token "$journal" "$id") || return 1
+  list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
+  # A single jq verdict: "unknown" when the list is not an array or any entry is
+  # not an object with an absent/string label (a malformed entry could itself be
+  # the token-bearing workspace in a shape we cannot read), "present" when a
+  # label carries the token, else "gone". jq errors and empty output both fall
+  # through the guard below to unknown, keeping the journal.
+  verdict=$(printf '%s' "$list" | jq -r --arg suffix " · p:$token" '
+    if (.result.workspaces | type) != "array" then "unknown"
+    elif any(.result.workspaces[]; (type != "object") or (has("label") and (.label | type != "string"))) then "unknown"
+    elif any(.result.workspaces[]; (.label // "") | endswith($suffix)) then "present"
+    else "gone"
+    end' 2>/dev/null) || return 1
+  [ "$verdict" = "gone" ]
+}
+
 # fm_backend_herdr_parse_target: split "<session>:<pane_id>" (pane_id itself
 # contains a colon, e.g. "w1:p2") on the FIRST colon only. Sets
 # FM_BACKEND_HERDR_SESSION and FM_BACKEND_HERDR_PANE for the caller.
@@ -3011,6 +3063,15 @@ fm_backend_herdr_parse_target() {  # <target>
   FM_BACKEND_HERDR_SESSION=${target%%:*}
   FM_BACKEND_HERDR_PANE=${target#*:}
   [ -n "$FM_BACKEND_HERDR_SESSION" ] && [ -n "$FM_BACKEND_HERDR_PANE" ] && [ "$FM_BACKEND_HERDR_PANE" != "$target" ]
+}
+
+# fm_backend_herdr_target_observable: verify <target> is well-formed and its
+# recorded session server is currently running, WITHOUT autostarting the server.
+# Passive read-only probes (e.g. composer inspection) must stay observable-only
+# and fail fast on inactive or bad targets without starting a new server.
+fm_backend_herdr_target_observable() {  # <target>
+  fm_backend_herdr_parse_target "$1" || return 1
+  [ "$(fm_backend_herdr_server_running_state "$FM_BACKEND_HERDR_SESSION")" = running ]
 }
 
 fm_backend_herdr_target_ready() {  # <target>
@@ -3157,8 +3218,10 @@ fm_backend_herdr_send_key_repeat() {  # <target> <key> <count>
 # is smaller than the pane's current viewport height (observed threshold ~23
 # rows for a default-sized pane), instead of clamping to the last N lines - it
 # does not merely ignore the bound, it drops the read entirely. This silently
-# broke exactly the small bounded reads this adapter relies on most (including
-# the composer-state guard/fallback reads around submit and injection). Workaround:
+# broke exactly the small bounded reads this adapter relies on most (the peek
+# and watch tails, the rendered busy-footer read, and the shared inbox
+# pending-line read; the adapter's own composer reads now take the viewport
+# instead, so they need no line count at all). Workaround:
 # always request a generous fetch far above any realistic viewport height, then
 # trim to the caller's requested bound ourselves with `tail`.
 fm_backend_herdr_capture() {  # <target> <lines>
@@ -3176,25 +3239,21 @@ fm_backend_herdr_capture() {  # <target> <lines>
 # workaround above - the bound is the pane itself, and asking for a line count
 # is what triggers the empty-read bug.
 fm_backend_herdr_visible_capture() {  # <target>
-  fm_backend_herdr_target_ready "$1" || return 1
+  fm_backend_herdr_target_observable "$1" || return 1
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source visible 2>/dev/null
 }
 
-fm_backend_herdr_capture_ansi() {  # <target> <lines>
-  fm_backend_herdr_target_ready "$1" || return 1
-  local lines=${2:-200} fetch out
-  case "$lines" in ''|*[!0-9]*) lines=200 ;; esac
-  fetch=$lines
-  case "$fetch" in ''|*[!0-9]*) fetch=200 ;; *) [ "$fetch" -ge 200 ] || fetch=200 ;; esac
-  out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source recent --lines "$fetch" --format ansi 2>/dev/null) || return 1
-  printf '%s' "$out" | tail -n "$lines"
+fm_backend_herdr_visible_capture_ansi() {  # <target>
+  fm_backend_herdr_target_observable "$1" || return 1
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source visible --format ansi 2>/dev/null
 }
 
 # --- herdr composer capture and capability primitives -----------------------
 #
 # These functions are the ONLY herdr-specific composer knowledge left: the
-# ANSI pane capture (with its small-N workaround), the native `agent get`
-# identity probe, and the capability descriptor. Every shape - the bordered
+# ANSI viewport capture (`--source visible`, which needs no line count and so
+# no small-N workaround), the native `agent get` identity probe, and the
+# capability descriptor. Every shape - the bordered
 # box, the bare agent-glyph row, opencode's left-bar, and pi's
 # identity-gated separated pair (which this adapter pioneered) - now lives in
 # the shared owner (bin/fm-composer-lib.sh, fm_composer_classify_screen), so
@@ -3224,6 +3283,15 @@ fm_backend_herdr_composer_identity() {  # <target> -> "<agent>\t<status>"
 # only when the classifier reports the verdict depends on it (a pi separator
 # pair below every other candidate), preserving this adapter's original
 # consult-only-when-needed behavior.
+# The capture is the FULL VISIBLE VIEWPORT, never a bounded tail: an overlay
+# a harness renders between the composer and the pane bottom - Claude Code's
+# slash-command popup is the verified shape (2.1.283, ~19 menu rows) - pushes
+# the composer above a tail window, and the bounded read then reports the
+# composer as empty while it actually holds typed text. That blindness broke
+# fm-control exit (the typed /exit was judged unsent and cleared) and would
+# equally defeat this state read's pre-submit concat guard. The composer is
+# by definition inside the viewport, and `--source visible` needs none of the
+# small-N --lines workaround.
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   local target=$1
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
@@ -3237,10 +3305,10 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unprove
 # text (fm_backend_herdr_composer_clear). 1 when neither capture works.
 fm_backend_herdr_composer_state_capture() {  # <target>
   local target=$1 cap
-  if cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_COMPOSER_CAPTURE_LINES" 2>/dev/null); then
-    FM_BACKEND_HERDR_STATE_CAPS=$(printf 'styled=1\ncursor=0\nidentity=1\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
-  elif cap=$(fm_backend_herdr_capture "$target" "$FM_COMPOSER_CAPTURE_LINES"); then
-    FM_BACKEND_HERDR_STATE_CAPS=$(printf 'styled=0\ncursor=0\nidentity=1\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
+  if cap=$(fm_backend_herdr_visible_capture_ansi "$target" 2>/dev/null); then
+    FM_BACKEND_HERDR_STATE_CAPS=$(printf 'styled=1\ncursor=0\nidentity=1')
+  elif cap=$(fm_backend_herdr_visible_capture "$target"); then
+    FM_BACKEND_HERDR_STATE_CAPS=$(printf 'styled=0\ncursor=0\nidentity=1')
   else
     return 1
   fi
@@ -3269,8 +3337,9 @@ fm_backend_herdr_composer_state_verdict() {  # <target>
 # agent-state (fm_backend_herdr_busy_state) stays the semantic owner, and this
 # read exists only so the submit core below can confirm a delivery for a
 # harness whose native state never transitions. Without a harness argument the
-# shared matcher uses its union of verified tokens, which is what the submit
-# core wants: it has no recorded harness for the pane.
+# shared matcher uses its union of verified tokens; the submit core passes
+# polytoken only when the pane's native identity names polytoken, whose
+# `Running for` row is outside that union.
 fm_backend_herdr_rendered_busy_state() {  # <target> [harness] -> busy|idle|unknown
   local target=$1 harness=${2:-} cap visible
   cap=$(fm_backend_herdr_capture "$target" 40) || { printf 'unknown'; return 0; }
@@ -3381,40 +3450,40 @@ fm_backend_herdr_rendered_busy_state() {  # <target> [harness] -> busy|idle|unkn
 # mid-turn). When <allow-rendered> is 1, an idle native baseline may also take
 # the pane's rendered busy footer, because live Claude keeps agent_status idle
 # through a whole turn.
-fm_backend_herdr_queued_enter_busy() {  # <target> <allow-rendered>
-  local target=$1 allow_rendered=${2:-0} raw
+fm_backend_herdr_queued_enter_busy() {  # <target> <allow-rendered> [busy-harness]
+  local target=$1 allow_rendered=${2:-0} busy_harness=${3:-} raw
   raw=$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
   case "$raw" in
     working) printf 'busy'; return 0 ;;
   esac
   if [ "$allow_rendered" = 1 ]; then
-    fm_backend_herdr_rendered_busy_state "$target"
+    fm_backend_herdr_rendered_busy_state "$target" "$busy_harness"
   else
     printf 'idle'
   fi
 }
 
-# FM_BACKEND_HERDR_PROOF_CAPTURE_LINES: the rows every Claude payload proof
-# read captures - the whole recent capture fm_backend_herdr_capture fetches,
-# which for Claude's fullscreen view is exactly the screen. A tail bound
-# estimated from the payload length cuts the top off a composer that wraps
-# narrower than the estimate or that a tall pane lets grow taller, and a cut
-# composer reads back as the head-truncated draft this proof exists to refuse.
-# The selected composer extraction still decides which rows are the composer.
-FM_BACKEND_HERDR_PROOF_CAPTURE_LINES=200
 
 # fm_backend_herdr_composer_capture: capture <target> for the selected
 # composer readers below, into FM_BACKEND_HERDR_COMPOSER_CAPS and
 # FM_BACKEND_HERDR_COMPOSER_SCREEN, so one capture can serve both the content
-# and the row count. Styled capture is preferred. An empty or failed styled
-# read falls through to the plain capture so a missing ANSI format does not
-# look like an empty draft.
-fm_backend_herdr_composer_capture() {  # <target> <lines>
-  local target=$1 lines=$2 cap
-  if cap=$(fm_backend_herdr_capture_ansi "$target" "$lines" 2>/dev/null) && [ -n "$cap" ]; then
-    FM_BACKEND_HERDR_COMPOSER_CAPS=$(printf 'styled=1\ncursor=0\nidentity=0\nrows=%s' "$lines")
-  elif cap=$(fm_backend_herdr_capture "$target" "$lines") && [ -n "$cap" ]; then
-    FM_BACKEND_HERDR_COMPOSER_CAPS=$(printf 'styled=0\ncursor=0\nidentity=0\nrows=%s' "$lines")
+# and the row count. The capture is the FULL VISIBLE VIEWPORT, never a bounded
+# tail: an overlay rendered between the composer and the pane bottom - Claude
+# Code's slash-command popup is the verified shape (2.1.283) - pushes the
+# composer above a tail window, so the pre-Enter payload proof would read
+# empty, judge the typed command unsent, and clear it (the fm-control exit
+# breakage), and a tail bound estimated from the payload length cuts the top
+# off a composer that wraps narrower than the estimate or that a tall pane lets
+# grow taller. The viewport is the one bound that always contains the
+# composer. Styled capture is preferred. An empty or failed styled read falls
+# through to the plain capture so a missing ANSI format does not look like an
+# empty draft.
+fm_backend_herdr_composer_capture() {  # <target>
+  local target=$1 cap
+  if cap=$(fm_backend_herdr_visible_capture_ansi "$target" 2>/dev/null) && [ -n "$cap" ]; then
+    FM_BACKEND_HERDR_COMPOSER_CAPS=$(printf 'styled=1\ncursor=0\nidentity=0')
+  elif cap=$(fm_backend_herdr_visible_capture "$target") && [ -n "$cap" ]; then
+    FM_BACKEND_HERDR_COMPOSER_CAPS=$(printf 'styled=0\ncursor=0\nidentity=0')
   else
     return 1
   fi
@@ -3422,9 +3491,14 @@ fm_backend_herdr_composer_capture() {  # <target> <lines>
 }
 
 # fm_backend_herdr_composer_content: the selected composer's visible text.
-fm_backend_herdr_composer_content() {  # <target> [lines]
-  fm_backend_herdr_composer_capture "$1" "${2:-$FM_COMPOSER_CAPTURE_LINES}" || return 1
-  fm_composer_extract_selected_content "$FM_BACKEND_HERDR_COMPOSER_CAPS" "$FM_BACKEND_HERDR_COMPOSER_SCREEN"
+# The composer readers serve only the Claude payload proof, so the grok-tuned
+# dark-truecolor ghost strip is off (FM_COMPOSER_GHOST_LUMA_MAX=0): Claude
+# 2.1.283 draws a typed slash command in muted grey 38;2;112;112;112 (verified
+# live), which that strip dropped, judging a typed /exit unsent. Claude's own
+# ghost suggestion is SGR-2 dim and is still stripped.
+fm_backend_herdr_composer_content() {  # <target>
+  fm_backend_herdr_composer_capture "$1" || return 1
+  FM_COMPOSER_GHOST_LUMA_MAX=0 fm_composer_extract_selected_content "$FM_BACKEND_HERDR_COMPOSER_CAPS" "$FM_BACKEND_HERDR_COMPOSER_SCREEN"
 }
 
 # fm_backend_herdr_proof_text_var: rewrite the named variable into the form the
@@ -3497,16 +3571,23 @@ FM_BACKEND_HERDR_PROOF_BACKOFF=${FM_BACKEND_HERDR_PROOF_BACKOFF-0.1 0.2 0.3 0.5 
 # no blank row below the first). Claude caps its composer at a few rows and
 # scrolls a longer draft with the cursor, so a composer whose visible rows are
 # blank can still hold text above them; only a one-row composer is empty.
-# 1 when the composer cannot be read.
-fm_backend_herdr_composer_view() {  # <target> <lines>
-  local view line n=0 text=''
+# Like fm_backend_herdr_composer_content, it reads with the dark-truecolor
+# ghost strip off. A viewport that shows only the end of a Claude composer
+# grown past the pane is read again with the scrollback above it
+# (fm_backend_herdr_composer_grown_read). 1 when the composer cannot be read.
+fm_backend_herdr_composer_view() {  # <target>
+  local view line n=0 text='' grown=0
   FM_BACKEND_HERDR_VIEW_TEXT=
   FM_BACKEND_HERDR_VIEW_ROWS=0
   FM_BACKEND_HERDR_VIEW_WIDTH=0
   FM_BACKEND_HERDR_VIEW_TOP_BLANK=0
   FM_BACKEND_HERDR_VIEW_EMPTY=0
-  fm_backend_herdr_composer_capture "$1" "$2" || return 1
-  view=$(fm_composer_selected_rows_view "$FM_BACKEND_HERDR_COMPOSER_CAPS" "$FM_BACKEND_HERDR_COMPOSER_SCREEN") || return 1
+  fm_backend_herdr_composer_capture "$1" || return 1
+  if ! view=$(FM_COMPOSER_GHOST_LUMA_MAX=0 fm_composer_selected_rows_view "$FM_BACKEND_HERDR_COMPOSER_CAPS" "$FM_BACKEND_HERDR_COMPOSER_SCREEN"); then
+    fm_backend_herdr_composer_grown_read "$1" "$FM_BACKEND_HERDR_COMPOSER_SCREEN" || return 1
+    view=$(FM_COMPOSER_GHOST_LUMA_MAX=0 fm_composer_selected_rows_view "$FM_BACKEND_HERDR_COMPOSER_CAPS" "$FM_BACKEND_HERDR_COMPOSER_SCREEN") || return 1
+    grown=1
+  fi
   FM_BACKEND_HERDR_VIEW_EMPTY=1
   while IFS= read -r line; do
     n=$((n + 1))
@@ -3527,6 +3608,112 @@ $view
 EOF
   FM_BACKEND_HERDR_VIEW_ROWS=$n
   FM_BACKEND_HERDR_VIEW_TEXT=$(printf '%s\n' "$text" | LC_ALL=C awk '{$1=$1; printf "%s", $0}')
+  if [ "$grown" = 1 ]; then
+    text=$FM_BACKEND_HERDR_VIEW_TEXT
+    fm_backend_herdr_proof_text_var text
+    if [ "$text" != "$FM_BACKEND_HERDR_GROWN_TEXT" ]; then
+      FM_BACKEND_HERDR_VIEW_TEXT=
+      FM_BACKEND_HERDR_VIEW_ROWS=0
+      FM_BACKEND_HERDR_VIEW_WIDTH=0
+      FM_BACKEND_HERDR_VIEW_TOP_BLANK=0
+      FM_BACKEND_HERDR_VIEW_EMPTY=0
+      return 1
+    fi
+  fi
+}
+
+# fm_backend_herdr_screen_rows: <screen> as plain rows, one per line, with
+# trailing blanks removed.
+fm_backend_herdr_screen_rows() {  # <screen>
+  printf '%s\n' "$1" | fm_composer_strip_ansi | LC_ALL=C sed 's/[[:space:]]*$//'
+}
+
+# fm_backend_herdr_row_is_rule: 0 when <row> is a rule of box-drawing dashes.
+fm_backend_herdr_row_is_rule() {  # <row>
+  local row=$1
+  fm_composer_normalize_trim_var row
+  [ -n "$row" ] && [ -z "${row//─/}" ]
+}
+
+# fm_backend_herdr_composer_grown_read: Claude's inline view (Claude Code
+# 2.1.308 on Herdr 0.8.2, verified live) grows its composer with the draft, so
+# a draft taller than the pane pushes the composer's top rule and first rows
+# into scrollback, and the <viewport> shows only the composer's last rows above
+# its closing rule. For a viewport whose first rule has text above it, this
+# replaces the composer capture with the viewport plus the scrollback above it
+# (the last 200 rows), and succeeds only when that capture ends with exactly
+# the viewport's rows and, walking up from the viewport's closing rule, shows
+# only blank rows and indented composer rows back to the prompt-glyph row,
+# with a rule above that. FM_BACKEND_HERDR_GROWN_TEXT is then that composer's
+# text in the fm_backend_herdr_proof_text_var form, which
+# fm_backend_herdr_composer_view requires the shared reader's text to equal,
+# so a composer or transcript left in scrollback never stands in for the
+# composer the viewport cuts. A viewport whose rows above the rule are blank
+# lines alone proves nothing about the composer they belong to, so it stays
+# unreadable.
+fm_backend_herdr_composer_grown_read() {  # <target> <viewport>
+  local target=$1 line i n=0 top close=-1 glyph=-1 text=''
+  local -a vis=() all=()
+  FM_BACKEND_HERDR_GROWN_TEXT=
+  while IFS= read -r line; do
+    vis[n]=$line
+    if [ "$close" -lt 0 ]; then
+      if fm_backend_herdr_row_is_rule "$line"; then
+        close=$n
+      else
+        text+=$line
+      fi
+    fi
+    n=$((n + 1))
+  done <<EOF
+$(fm_backend_herdr_screen_rows "$2")
+EOF
+  [ "$close" -gt 0 ] && [ -n "${text//[[:space:]]/}" ] || return 1
+  fm_backend_herdr_composer_grown_capture "$target" || return 1
+  n=0
+  while IFS= read -r line; do
+    all[n]=$line
+    n=$((n + 1))
+  done <<EOF
+$(fm_backend_herdr_screen_rows "$FM_BACKEND_HERDR_COMPOSER_SCREEN")
+EOF
+  top=$(( ${#all[@]} - ${#vis[@]} ))
+  [ "$top" -gt 0 ] || return 1
+  i=0
+  while [ "$i" -lt "${#vis[@]}" ]; do
+    [ "${all[top + i]}" = "${vis[i]}" ] || return 1
+    i=$((i + 1))
+  done
+  text=''
+  i=$(( top + close - 1 ))
+  while [ "$i" -ge 1 ]; do
+    case "${all[i]}" in
+      '❯'*) glyph=$i; text="${all[i]#❯} $text"; break ;;
+      ''|'  '*) text="${all[i]} $text" ;;
+      *) return 1 ;;
+    esac
+    i=$((i - 1))
+  done
+  [ "$glyph" -ge 1 ] && fm_backend_herdr_row_is_rule "${all[glyph - 1]}" || return 1
+  fm_backend_herdr_proof_text_var text
+  [ -n "$text" ] || return 1
+  FM_BACKEND_HERDR_GROWN_TEXT=$text
+}
+
+# fm_backend_herdr_composer_grown_capture: replace the composer capture with
+# the viewport plus the scrollback above it, the last 200 rows, for
+# fm_backend_herdr_composer_grown_read.
+fm_backend_herdr_composer_grown_capture() {  # <target>
+  local target=$1 cap
+  fm_backend_herdr_target_observable "$target" || return 1
+  if cap=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source recent --lines 200 --format ansi 2>/dev/null) && [ -n "$cap" ]; then
+    FM_BACKEND_HERDR_COMPOSER_CAPS=$(printf 'styled=1\ncursor=0\nidentity=0')
+  elif cap=$(fm_backend_herdr_capture "$target" 200) && [ -n "$cap" ]; then
+    FM_BACKEND_HERDR_COMPOSER_CAPS=$(printf 'styled=0\ncursor=0\nidentity=0')
+  else
+    return 1
+  fi
+  FM_BACKEND_HERDR_COMPOSER_SCREEN=$cap
 }
 
 # fm_backend_herdr_composer_payload_wait: 0 as soon as a composer read-back
@@ -3541,8 +3728,8 @@ EOF
 # FM_BACKEND_HERDR_PROOF_READS is the number of reads and
 # FM_BACKEND_HERDR_PROOF_SEEN the last read's visible character count, or -1
 # when that read failed.
-fm_backend_herdr_composer_payload_wait() {  # <target> <text> <lines>
-  local target=$1 text=$2 lines=$3 delay
+fm_backend_herdr_composer_payload_wait() {  # <target> <text>
+  local target=$1 text=$2 delay
   local -a delays=()
   read -r -a delays <<< "$FM_BACKEND_HERDR_PROOF_BACKOFF"
   FM_BACKEND_HERDR_PROOF_READS=0
@@ -3551,7 +3738,7 @@ fm_backend_herdr_composer_payload_wait() {  # <target> <text> <lines>
   for delay in 0 ${delays[@]+"${delays[@]}"}; do
     [ "$delay" = 0 ] || sleep "$delay"
     FM_BACKEND_HERDR_PROOF_READS=$((FM_BACKEND_HERDR_PROOF_READS + 1))
-    if fm_backend_herdr_composer_view "$target" "$lines"; then
+    if fm_backend_herdr_composer_view "$target"; then
       fm_backend_herdr_composer_payload_shown "$text" "$FM_BACKEND_HERDR_VIEW_TEXT" && return 0
       FM_BACKEND_HERDR_PROOF_SEEN=$(fm_backend_herdr_visible_chars "$FM_BACKEND_HERDR_VIEW_TEXT")
       if fm_backend_herdr_composer_literal_tail "$text" "$FM_BACKEND_HERDR_VIEW_TEXT"; then
@@ -3644,8 +3831,8 @@ fm_backend_herdr_text_pieces() {  # <text> <size>
 # repetition longer than the rows the composer shows, because those rows read
 # the same either way. FM_BACKEND_HERDR_RETYPE_PROVEN is the visible
 # characters proven. 1 on the first piece that cannot be typed or proven.
-fm_backend_herdr_composer_retype() {  # <target> <text> <lines> <rows> <width>
-  local target=$1 text=$2 lines=$3 rows=$4 width=$5 size piece typed='' want seen got delay ok blank_before
+fm_backend_herdr_composer_retype() {  # <target> <text> <rows> <width>
+  local target=$1 text=$2 rows=$3 width=$4 size piece typed='' want seen got delay ok blank_before
   local blank_re=$'(^|\n)[[:blank:]]*\n$'
   local -a delays=() pieces=()
   read -r -a delays <<< "$FM_BACKEND_HERDR_PROOF_BACKOFF"
@@ -3670,7 +3857,7 @@ fm_backend_herdr_composer_retype() {  # <target> <text> <lines> <rows> <width>
     ok=0
     for delay in 0 ${delays[@]+"${delays[@]}"}; do
       [ "$delay" = 0 ] || sleep "$delay"
-      fm_backend_herdr_composer_view "$target" "$lines" || continue
+      fm_backend_herdr_composer_view "$target" || continue
       got=$FM_BACKEND_HERDR_VIEW_TEXT
       fm_backend_herdr_proof_text_var got
       [ "${#got}" -le "${#want}" ] || continue
@@ -3707,9 +3894,13 @@ fm_backend_herdr_composer_retype() {  # <target> <text> <lines> <rows> <width>
 # fm_backend_herdr_composer_view's one-row composer, because Claude scrolls a
 # draft whose visible rows can all be blank, and the presses go out as many
 # at a time as the composer shows rows, because a Ctrl+U on Claude's empty
-# composer does nothing; otherwise empty is the shared classifier's verdict
-# and each press is read back. 0 only when the composer is verified empty
-# again.
+# composer does nothing. A Claude composer that cannot be read is most often
+# one Claude's inline view grew past the pane with only blank rows in view
+# (fm_backend_herdr_composer_grown_read), which no read shows until enough rows
+# are gone, so those reads keep the presses going in batches rather than
+# counting as unchanged, still within the cap.
+# Otherwise empty is the shared classifier's verdict and each press is read
+# back. 0 only when the composer is verified empty again.
 fm_backend_herdr_composer_clear() {  # <target> <text> [claude]
   local target=$1 text=$2 claude=${3:-0} limit breaks presses=0 unchanged=0 content previous='' batch=1
   breaks=${text//[!$'\n']/}
@@ -3719,11 +3910,12 @@ fm_backend_herdr_composer_clear() {  # <target> <text> [claude]
     fm_backend_herdr_send_key_repeat "$target" C-u "$batch" || return 1
     presses=$((presses + batch))
     if [ "$claude" = 1 ]; then
-      if fm_backend_herdr_composer_view "$target" "$FM_BACKEND_HERDR_PROOF_CAPTURE_LINES"; then
+      if fm_backend_herdr_composer_view "$target"; then
         [ "$FM_BACKEND_HERDR_VIEW_EMPTY" = 1 ] && return 0
         content="$FM_BACKEND_HERDR_VIEW_ROWS:$FM_BACKEND_HERDR_VIEW_TEXT"
       else
-        content=$previous
+        content="unreadable:$presses"
+        batch=4
       fi
     elif fm_backend_herdr_composer_state_capture "$target"; then
       [ "$(fm_backend_herdr_composer_state_verdict "$target")" = empty ] && return 0
@@ -3746,16 +3938,17 @@ fm_backend_herdr_composer_clear() {  # <target> <text> [claude]
 
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
-  local raw_status footer_baseline='' allow_rendered=0 enter_sent=0 identity proof=0 send_rc=0 refused=0 seen total rows width
+  local raw_status footer_baseline='' allow_rendered=0 enter_sent=0 identity proof=0 send_rc=0 refused=0 seen total rows width busy_harness=''
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   # Claude on Herdr is the live-verified truncation shape: Enter is withheld
   # unless the composer, proven empty before the send, is proven to hold
   # exactly this payload. A suffix that then starts a turn must not report
   # empty. Other harnesses keep the unproven type-then-Enter path.
   identity=$(fm_backend_herdr_agent_identity_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE") || identity=
+  [ "${identity%%$'\t'*}" != polytoken ] || busy_harness=polytoken
   if [ "${identity%%$'\t'*}" = claude ]; then
     proof=1
-    if ! fm_backend_herdr_composer_view "$target" "$FM_BACKEND_HERDR_PROOF_CAPTURE_LINES"; then
+    if ! fm_backend_herdr_composer_view "$target"; then
       echo "warning: herdr: could not read the Claude composer in $FM_BACKEND_HERDR_PANE before typing, so nothing was typed" >&2
       printf 'send-failed'
       return 0
@@ -3793,7 +3986,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   # pieces the composer can show, each proven before the next.
   if [ "$send_rc" = 2 ]; then
     refused=1
-  elif [ "$proof" = 1 ] && ! fm_backend_herdr_composer_payload_wait "$target" "$text" "$FM_BACKEND_HERDR_PROOF_CAPTURE_LINES"; then
+  elif [ "$proof" = 1 ] && ! fm_backend_herdr_composer_payload_wait "$target" "$text"; then
     total=$(fm_backend_herdr_visible_chars "$text")
     if [ "$FM_BACKEND_HERDR_PROOF_SCROLLED" = 1 ] && fm_backend_herdr_text_has_key_controls "$text"; then
       refused=1
@@ -3806,7 +3999,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
         printf 'unknown'
         return 0
       fi
-      if ! fm_backend_herdr_composer_retype "$target" "$text" "$FM_BACKEND_HERDR_PROOF_CAPTURE_LINES" "$rows" "$width"; then
+      if ! fm_backend_herdr_composer_retype "$target" "$text" "$rows" "$width"; then
         refused=1
         echo "warning: herdr: after $FM_BACKEND_HERDR_PROOF_READS read(s) the Claude composer in $FM_BACKEND_HERDR_PANE showed only the last $FM_BACKEND_HERDR_PROOF_SEEN of $total characters of the message, and typing it again in pieces proved only the first $FM_BACKEND_HERDR_RETYPE_PROVEN, so Enter was not pressed" >&2
       fi
@@ -3837,7 +4030,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   if [ "$baseline" = idle ]; then
     allow_rendered=1
   else
-    footer_baseline=$(fm_backend_herdr_rendered_busy_state "$target")
+    footer_baseline=$(fm_backend_herdr_rendered_busy_state "$target" "$busy_harness")
   fi
   while :; do
     if fm_backend_herdr_send_key "$target" Enter; then
@@ -3861,7 +4054,12 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
       esac
       # Native stayed idle. Composer empty is positive delivery (a landed
       # Claude turn that never flipped agent_status). Proven pending retries.
+      # A picker that classifies pending must not receive that retry.
       verdict=$(fm_backend_herdr_composer_state "$target")
+      if fm_composer_blocking_dialog_noted >/dev/null; then
+        printf 'unknown'
+        return 0
+      fi
       case "$verdict" in
         empty) printf 'empty'; return 0 ;;
         pending|pending-unproven) ;;
@@ -3870,9 +4068,13 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
     else
       sleep "$sleep_s"
       verdict=$(fm_backend_herdr_composer_state "$target")
+      if fm_composer_blocking_dialog_noted >/dev/null; then
+        printf 'unknown'
+        return 0
+      fi
       if [ "$verdict" = pending ] && [ "$raw_status" != working ] \
         && [ "$footer_baseline" = idle ] \
-        && [ "$(fm_backend_herdr_rendered_busy_state "$target")" = busy ]; then
+        && [ "$(fm_backend_herdr_rendered_busy_state "$target" "$busy_harness")" = busy ]; then
         verdict=busy
       fi
       case "$verdict" in
@@ -3887,7 +4089,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
         printf 'send-failed'
       else
         fm_composer_queued_enter_verdict "$verdict" \
-          "$(fm_backend_herdr_queued_enter_busy "$target" "$allow_rendered")"
+          "$(fm_backend_herdr_queued_enter_busy "$target" "$allow_rendered" "$busy_harness")"
       fi
       return 0
     fi
@@ -4264,60 +4466,22 @@ fm_backend_herdr_event_reader_cmd() {
   printf '%s\n' "$FM_BACKEND_HERDR_ROOT/bin/backends/herdr-eventwait.py"
 }
 
-# fm_backend_herdr_escalation_marker: the per-pane dedupe marker path for a
-# <window> ("<session>:<pane_id>"), keyed identically to the watcher's
-# .stale-<key> (tr ':/.' '___'), under <state_dir>.
+# The per-pane escalation dedupe (marker path, apply, commit, clear) is the
+# shared owner's (bin/fm-transition-lib.sh); these keep herdr's marker prefix.
 fm_backend_herdr_escalation_marker() {  # <state_dir> <window>
-  local state=$1 window=$2 key
-  key=$(printf '%s' "$window" | tr ':/.' '___')
-  printf '%s/%s%s' "$state" "$FM_BACKEND_HERDR_ESCALATED_PREFIX" "$key"
+  fm_transition_marker "$1" "$FM_BACKEND_HERDR_ESCALATED_PREFIX" "$2"
 }
 
-# fm_backend_herdr_apply_transition: route one normalized record through the
-# shared policy table, maintaining the per-pane dedupe marker under <state_dir>.
-# On a fresh `actionable` (blocked) edge - policy actionable AND no marker yet -
-# it prints the record on stdout and returns 0 (the caller stops and hands the
-# record up). The caller commits the marker only after handling the record.
-# `absorb` (working) clears the marker and
-# returns 1. `defer`/`fallback`, and an already-marked `actionable`, return 1
-# with no output. <session> reconstructs the window ("<session>:<pane_id>") for
-# the marker key, matching the watcher's own key scheme.
 fm_backend_herdr_apply_transition() {  # <state_dir> <session> <record>
-  local state=$1 session=$2 record=$3 pane_id to action window marker
-  pane_id=$(fm_transition_pane_id "$record")
-  [ -n "$pane_id" ] || return 1
-  to=$(fm_transition_to_status "$record")
-  action=$(fm_transition_policy "$to")
-  window="$session:$pane_id"
-  marker=$(fm_backend_herdr_escalation_marker "$state" "$window")
-  case "$action" in
-    actionable)
-      if [ ! -e "$marker" ]; then
-        printf '%s' "$record"
-        return 0
-      fi
-      ;;
-    absorb)
-      rm -f "$marker" 2>/dev/null || true
-      ;;
-  esac
-  return 1
+  fm_transition_apply "$1" "$FM_BACKEND_HERDR_ESCALATED_PREFIX" "$2" "$3"
 }
 
 fm_backend_herdr_commit_transition() {  # <state_dir> <session> <record>
-  local state=$1 session=$2 record=$3 pane_id window marker
-  pane_id=$(fm_transition_pane_id "$record")
-  [ -n "$pane_id" ] || return 1
-  window="$session:$pane_id"
-  marker=$(fm_backend_herdr_escalation_marker "$state" "$window")
-  : > "$marker"
+  fm_transition_commit "$1" "$FM_BACKEND_HERDR_ESCALATED_PREFIX" "$2" "$3"
 }
 
 fm_backend_herdr_clear_transition() {  # <state_dir> <window>
-  local state=$1 window=$2 marker
-  [ -n "$window" ] || return 0
-  marker=$(fm_backend_herdr_escalation_marker "$state" "$window")
-  rm -f "$marker" 2>/dev/null || true
+  fm_transition_clear "$1" "$FM_BACKEND_HERDR_ESCALATED_PREFIX" "$2"
 }
 
 # fm_backend_herdr_wait_transition: the bounded event wait. Blocks up to

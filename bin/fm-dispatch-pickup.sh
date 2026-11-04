@@ -975,7 +975,7 @@ action_claim() { # <task-id> <issue-url>
 }
 
 action_bind() { # <task-id> <issue-url>
-  local id=$1 raw=$2 repo meta existing claimed lock tmp line
+  local id=$1 raw=$2 repo meta existing claimed lock tmp
   fm_pr_task_id_valid "$id" || die "not a usable task id: $id"
   fm_dispatch_issue_url_parse "$raw" || die "not a GitHub issue URL: $raw"
   require_gh_tools
@@ -1009,15 +1009,8 @@ action_bind() { # <task-id> <issue-url>
   lock=$(fm_meta_lock_path "$meta") || die "cannot lock the record for $id"
   fm_lock_acquire_wait "$lock" || die "cannot lock the record for $id"
   tmp=$(mktemp "$STATE/.fm-dispatch-meta.XXXXXX") || { fm_lock_release "$lock"; die "cannot stage the record for $id"; }
-  {
-    while IFS= read -r line || [ -n "$line" ]; do
-      case "$line" in
-        issue=*) ;;
-        *) printf '%s\n' "$line" ;;
-      esac
-    done < "$meta"
-    printf 'issue=%s\n' "$FM_DISPATCH_URL"
-  } > "$tmp" || { rm -f -- "$tmp"; fm_lock_release "$lock"; die "cannot stage the record for $id"; }
+  fm_pr_meta_set_ahead_of_tail "$meta" "issue=$FM_DISPATCH_URL" > "$tmp" \
+    || { rm -f -- "$tmp"; fm_lock_release "$lock"; die "cannot stage the record for $id"; }
   chmod 0600 "$tmp" 2>/dev/null || true
   mv -f -- "$tmp" "$meta" || { rm -f -- "$tmp"; fm_lock_release "$lock"; die "cannot record the issue on $id"; }
   fm_lock_release "$lock"
