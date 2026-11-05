@@ -1426,6 +1426,8 @@ assert_dirty_diagnostic() {
   case_dir=$(make_case "dirty-$kind-$mode")
   write_meta "$case_dir" "$mode" ship
   wt_commit_file "$case_dir" feature.txt hello
+  mkdir "$case_dir/wt/src"
+  wt_commit_file "$case_dir" src/keep.txt keep
   # Exercise both dirty refusal sites: remote-reachable work and local-only
   # work merged into local main but absent from every remote.
   if [ "$mode" = local-only ]; then
@@ -1439,10 +1441,13 @@ assert_dirty_diagnostic() {
     [ "$mode" != local-only ] || git -C "$case_dir/wt" add feature.txt
   fi
   if [ "$kind" != tracked ]; then
-    mkdir "$case_dir/wt/00 proof scratch"
-    printf '%s\n' 'manual server log' > "$case_dir/wt/00 proof scratch/server.log"
+    # Untracked files inside a tracked directory are where new source code
+    # lives, so they refuse; top-level scratch moves instead
+    # (test_top_level_leftovers_move_to_data).
+    mkdir -p "$case_dir/wt/src/00 proof scratch"
+    printf '%s\n' 'manual server log' > "$case_dir/wt/src/00 proof scratch/server.log"
     for n in 01 02 03 04 05 06 07 08 09 10 11; do
-      touch "$case_dir/wt/$n-scratch.txt"
+      touch "$case_dir/wt/src/$n-scratch.txt"
     done
     # Preserve the existing exemptions without counting them as leftovers.
     mkdir "$case_dir/wt/.claude"
@@ -1464,7 +1469,7 @@ assert_dirty_diagnostic() {
   fi
   if [ "$kind" != tracked ]; then
     grep -Fq '00 proof scratch/' "$case_dir/stderr" || fail "$kind/$mode: scratch folder not named"
-    grep -Fxq '  09-scratch.txt' "$case_dir/stderr" || fail "$kind/$mode: tenth path missing"
+    grep -Fxq '  src/09-scratch.txt' "$case_dir/stderr" || fail "$kind/$mode: tenth path missing"
     ! grep -q '10-scratch.txt\|11-scratch.txt\|\.claude/\|\.fm-grok-turnend' "$case_dir/stderr" \
       || fail "$kind/$mode: path list exceeded its bound or included exempt files"
     grep -Fq 'additional untracked paths omitted' "$case_dir/stderr" || fail "$kind/$mode: no truncation notice"
@@ -1491,6 +1496,78 @@ test_mixed_refusal_diagnostic() {
   assert_dirty_diagnostic mixed local-only
 }
 
+
+# A finished copy whose only uncommitted content is top-level scratch is landed
+# work: the scratch moves into the task's own data record, nothing is deleted,
+# and cleanup proceeds so the pool slot returns.
+assert_leftovers_moved() {
+  local mode=$1 case_dir rc dest
+  case_dir=$(make_case "leftovers-moved-$mode")
+  write_meta "$case_dir" "$mode" ship
+  wt_commit_file "$case_dir" feature.txt hello
+  if [ "$mode" = local-only ]; then
+    git -C "$case_dir/project" merge -q --ff-only fm/task-x1
+  else
+    git -C "$case_dir/wt" push -q origin fm/task-x1
+  fi
+  mkdir -p "$case_dir/wt/00 proof scratch/nested"
+  printf '%s\n' 'manual server log' > "$case_dir/wt/00 proof scratch/nested/server.log"
+  printf '%s\n' 'notes' > "$case_dir/wt/notes.md"
+  mkdir "$case_dir/wt/.claude"
+  touch "$case_dir/wt/.claude/settings.local.json"
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "leftovers/$mode: teardown should move top-level scratch and proceed: $(cat "$case_dir/stderr")"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "leftovers/$mode: teardown printed a REFUSED line"
+  dest="$case_dir/data/task-x1/leftovers"
+  [ "$(cat "$dest/00 proof scratch/nested/server.log" 2>/dev/null)" = 'manual server log' ] \
+    || fail "leftovers/$mode: the scratch folder was not preserved in $dest"
+  [ "$(cat "$dest/notes.md" 2>/dev/null)" = notes ] || fail "leftovers/$mode: the notes file was not preserved"
+  [ ! -e "$dest/.claude" ] || fail "leftovers/$mode: the exempt harness folder was moved as a leftover"
+  [ ! -e "$case_dir/wt/notes.md" ] && [ ! -e "$case_dir/wt/00 proof scratch" ] \
+    || fail "leftovers/$mode: a leftover stayed in the returned copy"
+  grep -Fq "moved untracked leftover notes.md into $dest" "$case_dir/stderr" \
+    || fail "leftovers/$mode: the move was not reported"
+  [ ! -f "$case_dir/state/task-x1.meta" ] || fail "leftovers/$mode: task metadata was not cleaned up"
+  pass "leftovers/$mode: top-level untracked scratch moves into data/<id>/leftovers and cleanup proceeds"
+}
+
+test_top_level_leftovers_move_to_data() {
+  assert_leftovers_moved no-mistakes
+  assert_leftovers_moved local-only
+}
+
+# Moving leftovers never stands in for the landed-work proof, and never
+# overwrites an earlier move.
+test_leftovers_never_bypass_refusals() {
+  local case_dir rc before
+  case_dir=$(make_case leftovers-unlanded)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello
+  printf '%s\n' 'notes' > "$case_dir/wt/notes.md"
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "leftovers-unlanded: unlanded commits must still refuse"
+  [ -f "$case_dir/wt/notes.md" ] || fail "leftovers-unlanded: a refused teardown moved a leftover"
+  [ ! -e "$case_dir/data/task-x1/leftovers" ] || fail "leftovers-unlanded: a refused teardown created the leftovers record"
+
+  case_dir=$(make_case leftovers-collision)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  printf '%s\n' 'new notes' > "$case_dir/wt/notes.md"
+  mkdir -p "$case_dir/data/task-x1/leftovers"
+  printf '%s\n' 'earlier notes' > "$case_dir/data/task-x1/leftovers/notes.md"
+  before=$(git -C "$case_dir/wt" status --porcelain)
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "leftovers-collision: a leftover that would overwrite an earlier one must refuse"
+  [ "$(cat "$case_dir/data/task-x1/leftovers/notes.md")" = 'earlier notes' ] \
+    || fail "leftovers-collision: an earlier leftover was overwritten"
+  [ "$before" = "$(git -C "$case_dir/wt" status --porcelain)" ] || fail "leftovers-collision: the copy changed"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "leftovers-collision: task metadata removed"
+  pass "moving leftovers never bypasses the landed-work refusal and never overwrites an earlier move"
+}
 # Treehouse's return runs `git clean -fd` (one -f). A nested repository stays.
 add_treehouse_clean_fd() {
   local case_dir=$1
@@ -5747,6 +5824,8 @@ test_dirty_worktree_refuses
 test_untracked_only_refusal_diagnostic
 test_tracked_edit_refusal_diagnostic
 test_mixed_refusal_diagnostic
+test_top_level_leftovers_move_to_data
+test_leftovers_never_bypass_refusals
 test_scout_nested_clone_returns_with_no_untracked_entries
 test_ship_nested_clone_is_refused_and_bytes_stay
 test_dirty_return_warns_which_slot_was_lost

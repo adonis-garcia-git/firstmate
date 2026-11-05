@@ -69,6 +69,12 @@
 # teardown refuses rather than risk discarding unlanded work.
 # Uncommitted changes are never landed; dirty refusals distinguish untracked-only
 # leftovers from tracked edits and list at most ten non-exempt untracked paths.
+# The one exception is a ship copy whose only such content is untracked entries
+# at its top level (scratch directories, notes) holding no nested repository:
+# once every other landed-work
+# check passes, those entries are moved, never deleted, into
+# data/<id>/leftovers/ and cleanup proceeds (teardown_move_leftovers). A tracked
+# edit, or an untracked file inside a tracked directory, still refuses.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
@@ -82,8 +88,9 @@
 # Before that return, teardown runs `git clean -ffdq` in the copy, and a forced
 # secondmate teardown does the same in each child copy it returns.
 # The second -f removes nested repositories, and -x stays off so ignored files remain.
-# A ship teardown without --force does not run that clean: it refuses untracked
-# entries, except those under the .claude/ allowance, so a nested repository
+# A ship teardown without --force does not run that clean: it moves top-level
+# untracked leftovers out as described above and refuses any other untracked
+# entry, except those under the .claude/ allowance, so a nested repository
 # there can still survive the return.
 # After a return that succeeds, teardown reads `git status --porcelain --untracked-files=all`.
 # Any remaining output, a status read that fails, or a copy that is missing or
@@ -657,6 +664,7 @@ TEARDOWN_LEGACY_PRESTAMP_SIZE=0
 TEARDOWN_BACKLOG_APPLIES=0
 TEARDOWN_BACKLOG_SKIP_REASON=
 TEARDOWN_WINDOWLESS=0
+TEARDOWN_LEFTOVERS_PENDING=0
 TEARDOWN_WINDOWLESS_SHAPE=0
 TEARDOWN_WINDOW_COUNT=$(LC_ALL=C grep -c '^window=' "$META" 2>/dev/null || true)
 TEARDOWN_BACKEND_COUNT=$(LC_ALL=C grep -c '^backend=' "$META" 2>/dev/null || true)
@@ -2055,6 +2063,56 @@ teardown_note_dirty_return() {
   printf '%s\n' "$residue" | sed 's/^/  /' >&2
 }
 
+
+# A finished ship copy whose only uncommitted content is untracked entries at
+# its top level - a scratch directory, a notes file - holds otherwise landed
+# work, yet the dirty refusal kept such copies out of the pool until they were
+# archived by hand. Those entries are moved, never deleted, into the task's own
+# data/<id>/leftovers/ once every other landed-work check has passed
+# (teardown_move_leftovers). Anything else still refuses exactly as before: a
+# tracked edit, an untracked file inside a tracked directory, which is where
+# new source code lives, or an entry holding a nested git repository, which can
+# carry unlanded commits of its own.
+# 0 when every non-exempt dirty entry is such a top-level untracked entry.
+teardown_dirt_is_leftovers_only() {
+  local entry path n=0
+  while IFS= read -r -d '' entry; do
+    case "$entry" in '?? '*) ;; *) return 1 ;; esac
+    path=${entry#?? }
+    case "$path" in .claude/*|.fm-grok-turnend|.fm-kimi-turnend) continue ;; esac
+    path=${path%/}
+    case "$path" in */*) return 1 ;; esac
+    [ -z "$(find "$WT/$path" -name .git -print -quit 2>/dev/null)" ] || return 1
+    n=$((n + 1))
+  done < <(git -C "$WT" status --porcelain=v1 -z --untracked-files=normal 2>/dev/null)
+  [ "$n" -gt 0 ]
+}
+
+# Move the top-level untracked entries teardown_dirt_is_leftovers_only accepted
+# into data/<id>/leftovers/, refusing rather than overwriting anything already
+# there. Reads NUL-separated status so no path spelling is misread.
+teardown_move_leftovers() {
+  local dest="$DATA/$ID/leftovers" entry path
+  mkdir -p "$dest" || {
+    echo "REFUSED: could not create $dest for the untracked leftovers in $WT." >&2
+    return 1
+  }
+  while IFS= read -r -d '' entry; do
+    case "$entry" in '?? '*) ;; *) continue ;; esac
+    path=${entry#?? }
+    path=${path%/}
+    case "$path" in */*|.claude|.fm-grok-turnend|.fm-kimi-turnend) continue ;; esac
+    if [ -e "$dest/$path" ] || [ -L "$dest/$path" ]; then
+      echo "REFUSED: untracked leftover $path in $WT would overwrite $dest/$path; move one of them aside, then rerun." >&2
+      return 1
+    fi
+    mv -- "$WT/$path" "$dest/$path" || {
+      echo "REFUSED: could not move untracked leftover $WT/$path into $dest." >&2
+      return 1
+    }
+    echo "teardown: moved untracked leftover $path into $dest" >&2
+  done < <(git -C "$WT" status --porcelain=v1 -z --untracked-files=normal)
+}
 validate_worktree_teardown_safety() {
   local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
@@ -2072,6 +2130,11 @@ validate_worktree_teardown_safety() {
     return 1
   fi
   dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' || true)
+  TEARDOWN_LEFTOVERS_PENDING=0
+  if [ -n "$dirty" ] && teardown_dirt_is_leftovers_only; then
+    TEARDOWN_LEFTOVERS_PENDING=1
+    dirty=
+  fi
 
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
@@ -3623,6 +3686,9 @@ if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
     else
       exit 1
     fi
+  fi
+  if [ "$TEARDOWN_LEFTOVERS_PENDING" = 1 ]; then
+    teardown_move_leftovers || exit 1
   fi
 fi
 
