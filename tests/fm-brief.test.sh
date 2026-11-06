@@ -1636,6 +1636,44 @@ test_crewmate_scaffolds_forbid_pool_administration() {
   pass "fm-brief.sh: every crewmate scaffold forbids administering the shared worktree pool"
 }
 
+# The shared-machine rule is one string across ship and scout scaffolds, and
+# the run-slot commands it renders work as written from any directory.
+test_crewmate_scaffolds_carry_shared_machine_rule() {
+  local home brief ship_rule scout_rule status_cmd out rc
+  home="$TMP_ROOT/shared-machine-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" machine-ship alpha --mode direct-PR >/dev/null 2>&1 \
+    || fail "fm-brief.sh ship scaffold exited non-zero"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" machine-scout alpha --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh scout scaffold exited non-zero"
+  brief="$home/data/machine-ship/brief.md"
+  ship_rule=$(awk '/^9\. This machine is shared/,/^$/' "$brief")
+  scout_rule=$(awk '/^9\. This machine is shared/,/^$/' "$home/data/machine-scout/brief.md")
+  [ -n "$ship_rule" ] || fail "ship brief emitted no shared-machine rule"
+  [ "$ship_rule" = "$scout_rule" ] || fail "ship and scout shared-machine rules have drifted apart"
+  # shellcheck disable=SC2016 # Literal brief text.
+  assert_contains "$ship_rule" 'Never use `pkill`, `killall`, or `kill $(pgrep ...)` by name or pattern' \
+    "the shared-machine rule lost the never-kill-by-pattern rule"
+  assert_contains "$ship_rule" "acquire --class cpu -- <command...>" "the shared-machine rule did not name the run-slot command"
+  assert_contains "$ship_rule" "--class net" "the shared-machine rule did not name the network-bound class"
+  assert_contains "$ship_rule" "run the affected test files with \`--maxWorkers=2\`" \
+    "the shared-machine rule lost the frontend affected-files rule"
+  assert_not_contains "$ship_rule" "1-minute load" "the shared-machine rule still gates runs on the load average"
+
+  # shellcheck disable=SC2016 # Literal backticks in a sed pattern.
+  status_cmd=$(printf '%s\n' "$ship_rule" | sed -n 's/^.*`\(FM_HOME=.* status\)`.*$/\1/p')
+  [ -n "$status_cmd" ] || fail "could not find the rendered run-slot status command"
+  out=$( (cd / && bash -c "$status_cmd") 2>&1); rc=$?
+  expect_code 0 "$rc" "the rendered run-slot status command ($status_cmd): $out"
+  assert_contains "$out" "cpu: 0/2 held, 0 waiting" "the rendered status command did not report this home's slots"
+
+  FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" machine-mate --secondmate alpha >/dev/null 2>&1 \
+    || fail "fm-brief.sh --secondmate exited non-zero"
+  assert_no_grep "fm-run-slot.sh" "$home/data/machine-mate/brief.md" "a secondmate charter took the crewmate shared-machine rule"
+  pass "fm-brief.sh: ship and scout scaffolds share one working shared-machine rule"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -1676,3 +1714,4 @@ test_branch_prefix_is_refused_where_it_does_not_apply
 test_branch_prefix_value_is_validated
 test_branch_prefix_command_is_shell_safe
 test_crewmate_scaffolds_forbid_pool_administration
+test_crewmate_scaffolds_carry_shared_machine_rule
