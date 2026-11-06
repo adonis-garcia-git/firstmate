@@ -61,11 +61,15 @@ run_slot() {  # <home> <args...>
     FM_PROC_ROOT_OVERRIDE="${RUN_SLOT_PROC:-$home/proc}" "$SLOT" "$@"
 }
 
-# bg_slot <home> <log> <args...>: start an acquire in the background.
+# bg_slot <home> <log> <args...>: start an acquire in the background. It is a
+# simple command, not a call to run_slot, so $! is the acquire process itself on
+# every bash; a backgrounded function runs in a subshell wrapper that some bash
+# versions keep as a separate process.
 bg_slot() {
   local home=$1 log=$2
   shift 2
-  run_slot "$home" "$@" > "$log" 2>&1 &
+  PATH="${RUN_SLOT_PATH:-$BASE_PATH}" FM_HOME="$home" FM_RUN_SLOT_POLL_SECS=0.1 \
+    FM_PROC_ROOT_OVERRIDE="${RUN_SLOT_PROC:-$home/proc}" "$SLOT" "$@" > "$log" 2>&1 &
   BG_PIDS+=("$!")
   BG_LAST=$!
 }
