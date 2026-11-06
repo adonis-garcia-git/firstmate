@@ -1168,14 +1168,14 @@ Either account may run any work.
 A Claude launch takes its account in this order:
 
 1. An explicit `--account <name>` on `bin/fm-spawn.sh` or `bin/fm-control.sh relaunch`, which must name a declared account.
-2. On a relaunch, the named account the task's own record names, while it is still declared by name here, is signed in, and, when another account is declared, quota-axi does not read it as `exhausted_now` on the 5-hour or weekly window. A reading that cannot be taken or refreshed keeps it. Otherwise the spawn prints a `notice:` line naming that account and why the worker moved off it, and the choice continues below. A record from a single-line pin is never kept: with no file a relaunch takes the ambient account like any launch, and with a single-line pin it takes the current pin.
+2. On a relaunch, the named account the task's own record names, while it is still declared by name here, is signed in and has finished first-run setup, and, when another account is declared, quota-axi does not read it as `exhausted_now` on the 5-hour or weekly window. A reading that cannot be taken or refreshed keeps it. Otherwise the spawn prints a `notice:` line naming that account and why the worker moved off it, and the choice continues below. A record from a single-line pin is never kept: with no file a relaunch takes the ambient account like any launch, and with a single-line pin it takes the current pin.
 3. The only declared account, when there is one.
 4. Otherwise, the account whose weight times its remaining quota is highest.
 
 Remaining quota is quota-axi's all-models `effectivePercentRemaining`, the lower of the 5-hour session and weekly windows.
 When quota-axi cannot refresh a reading (for example, Claude's quota endpoint is rate-limited) but still holds both windows, the choice ranks that account by the lower of those stale windows, and the notice marks the reading stale.
 Each root is read with its own `CLAUDE_CONFIG_DIR`, unset for `ordinary`, in the same cleared environment as the sign-in check, so one account's reading never answers for another.
-An account whose root is missing, whose quota cannot be read, whose quota is exhausted, or that is not signed in is skipped and named.
+An account whose root is missing, whose quota cannot be read, whose quota is exhausted, that is not signed in, or that has not finished Claude's first-run setup is skipped and named.
 A tie goes to the account declared first.
 The spawn prints a `notice:` line with every account's weighted reading.
 When no account qualifies, the launch refuses and names each account's reason rather than guessing, and `--account` still selects one explicitly.
