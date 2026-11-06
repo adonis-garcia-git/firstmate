@@ -95,6 +95,10 @@ has_counts() {  # <home> <class> <held>/<slots> <waiting>
   class_line "$1" "$2" | grep -q "^$2: $3 held, $4 waiting,"
 }
 
+status_has() {  # <home> <text>
+  run_slot "$1" status 2>&1 | grep -qF -- "$2"
+}
+
 test_usage_errors() {
   local home out rc
   home=$(make_home usage)
@@ -310,30 +314,46 @@ test_signals_are_forwarded_and_release() {
 }
 
 test_memory_floor_meminfo() {
-  local home dir out rc
+  local home dir out rc notes
   home=$(make_home mem-proc 'cpu_mem_floor_mb=1000')
   dir="$home/run"; mkdir -p "$dir"
   set_mem_kb "$home" 512000
+
+  # With no cpu holder the floor is waived, so one run always progresses.
+  out=$(run_slot "$home" acquire --class cpu -- touch "$dir/first-ran" 2>&1); rc=$?
+  expect_code 0 "$rc" "the first cpu run below the memory floor: $out"
+  assert_present "$dir/first-ran" "the first cpu run below the memory floor did not start"
+  bg_slot "$home" "$dir/holder.log" acquire --class cpu --wait -- sh -c "$(gate_cmd "$dir" holder)"
+  wait_for 10 "the waived holder to start" test -s "$dir/holder.pid"
+  assert_contains "$(run_slot "$home" status)" "cpu: 1/2 held, 0 waiting" "a waiting first run below the floor did not take its slot"
+
+  # With one holder and a free slot, the next run waits on memory.
   out=$(run_slot "$home" acquire --class cpu -- touch "$dir/ran" 2>&1); rc=$?
-  expect_code 75 "$rc" "acquire below the memory floor without --wait"
+  expect_code 75 "$rc" "a second acquire below the memory floor without --wait"
   assert_contains "$out" "reclaimable memory 500 MB is below the 1000 MB floor" "the memory refusal did not say why"
-  assert_absent "$dir/ran" "a run below the memory floor started"
+  assert_absent "$dir/ran" "a second run below the memory floor started"
   bg_slot "$home" "$dir/wait.log" acquire --class cpu --wait -- touch "$dir/ran"
-  wait_for 10 "the run to queue on memory" has_counts "$home" cpu 0/2 1
+  wait_for 10 "the run to queue on memory" has_counts "$home" cpu 1/2 1
   assert_contains "$(run_slot "$home" status)" "next: reclaimable memory 500 MB is below the 1000 MB floor" \
     "status did not show the memory wait"
+  set_mem_kb "$home" 600000
+  wait_for 10 "status to show the new memory reading" status_has "$home" "next: reclaimable memory 585 MB is below"
   sleep 0.3
   assert_absent "$dir/ran" "a queued run started below the memory floor"
   set_mem_kb "$home" 4096000
   wait "$BG_LAST" || fail "the queued run failed after memory freed"
   assert_present "$dir/ran" "the queued run never started after memory freed"
-  pass "the memory floor holds runs until /proc/meminfo reports enough available memory"
+  notes=$(grep -c 'first in line' "$dir/wait.log")
+  assert_equals 1 "$notes" "the memory wait note was reprinted as the reading changed: $(cat "$dir/wait.log")"
+  touch "$dir/holder.open"
+  wait_for 10 "the holder to release" has_counts "$home" cpu 0/2 0
+  pass "the memory floor is waived for a class's first run and holds further runs until /proc/meminfo reports enough"
 }
 
 test_memory_floor_vm_stat() {
-  local home fakebin out rc
+  local home dir fakebin out rc
   home=$(make_home mem-vmstat 'cpu_mem_floor_mb=1000' 'net_mem_floor_mb=400')
-  mkdir -p "$home/noproc"
+  dir="$home/run"; mkdir -p "$dir" "$home/noproc"
   fakebin=$(fm_fakebin "$home")
   # 10000 free + 20000 inactive + 2000 speculative pages of 16 KiB = 500 MB.
   cat > "$fakebin/vm_stat" <<'SH'
@@ -346,10 +366,12 @@ echo 'Pages speculative:                         2000.'
 echo 'Pages wired down:                        100000.'
 SH
   chmod +x "$fakebin/vm_stat"
+  bg_slot "$home" "$dir/holder.log" acquire --class cpu -- sh -c "$(gate_cmd "$dir" holder)"
+  wait_for 10 "the cpu holder to start" test -s "$dir/holder.pid"
   out=$(RUN_SLOT_PATH="$fakebin:$BASE_PATH" RUN_SLOT_PROC="$home/noproc" run_slot "$home" status 2>&1)
   assert_contains "$out" "reclaimable 500 MB" "vm_stat free, inactive, and speculative pages were not summed"
   out=$(RUN_SLOT_PATH="$fakebin:$BASE_PATH" RUN_SLOT_PROC="$home/noproc" run_slot "$home" acquire --class cpu -- true 2>&1); rc=$?
-  expect_code 75 "$rc" "cpu acquire below its floor through vm_stat"
+  expect_code 75 "$rc" "a second cpu acquire below its floor through vm_stat"
   out=$(RUN_SLOT_PATH="$fakebin:$BASE_PATH" RUN_SLOT_PROC="$home/noproc" run_slot "$home" acquire --class net -- true 2>&1); rc=$?
   expect_code 0 "$rc" "net acquire above its own floor through vm_stat: $out"
 
@@ -357,7 +379,9 @@ SH
   out=$(RUN_SLOT_PATH="$fakebin:$BASE_PATH" RUN_SLOT_PROC="$home/noproc" run_slot "$home" status 2>&1)
   assert_contains "$out" "reclaimable memory unknown, floor not enforced" "an unavailable memory probe was not reported"
   out=$(RUN_SLOT_PATH="$fakebin:$BASE_PATH" RUN_SLOT_PROC="$home/noproc" run_slot "$home" acquire --class cpu -- true 2>&1); rc=$?
-  expect_code 0 "$rc" "acquire when no memory probe works: $out"
+  expect_code 0 "$rc" "a second cpu acquire when no memory probe works: $out"
+  touch "$dir/holder.open"
+  wait "$BG_LAST" || fail "the cpu holder failed"
   pass "vm_stat feeds the memory floor where /proc/meminfo is absent, and an unknown reading is not enforced"
 }
 

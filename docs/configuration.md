@@ -1413,6 +1413,7 @@ Every generated ship and scout brief tells its worker to wrap such a run in `fm-
 The script runs the command while it holds a slot and frees the slot when the command exits or dies, so a crashed run never keeps one.
 Waiting runs start strictly in arrival order, so no run is overtaken and starved.
 A run starts only when its class has a free slot and reclaimable memory is at or above the class's memory floor.
+The memory floor is waived when no run of that class holds a slot, so one run of each class can always progress; every additional slot still waits for the floor.
 The load average is never consulted.
 `fm-run-slot.sh status` lists who holds each slot and who is waiting, for how long, and why the first waiter has not started.
 

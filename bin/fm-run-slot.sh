@@ -27,8 +27,10 @@
 #   - the caller is first in its class's queue (strict FIFO, so a run can
 #     never be overtaken and starved);
 #   - fewer than <class>_slots runs of that class hold a slot;
-#   - reclaimable memory is at least <class>_mem_floor_mb. Reclaimable memory
-#     is MemAvailable from /proc/meminfo where that file exists, otherwise the
+#   - reclaimable memory is at least <class>_mem_floor_mb, unless no run of
+#     that class holds a slot: the floor is waived for a class's first slot,
+#     so one run of each class can always progress, and applies to every
+#     additional slot. Reclaimable memory is MemAvailable from /proc/meminfo where that file exists, otherwise the
 #     free, inactive, and speculative pages reported by vm_stat (macOS). When
 #     neither probe works the floor is not enforced and status says so.
 # The load average is never consulted.
@@ -429,22 +431,27 @@ fmt_duration() {
 }
 
 # Why the head of <class>'s queue cannot start now, or empty when it can.
-# Sets BLOCK_REASON. Caller holds the lock and has pruned the class.
+# Sets BLOCK_REASON, with the current memory reading, and BLOCK_NOTE, the same
+# reason without the reading so it stays stable while a run waits. Caller
+# holds the lock and has pruned the class.
 evaluate_capacity() {
   local class=$1 held slots floor mem
-  BLOCK_REASON=
+  BLOCK_REASON='' BLOCK_NOTE=''
   count_tickets "$SLOTS/$class/held"
   held=$TICKET_COUNT
   slots=$(class_slots "$class")
   if [ "$held" -ge "$slots" ]; then
     BLOCK_REASON="all $slots $class slots are held"
+    BLOCK_NOTE=$BLOCK_REASON
     return 0
   fi
+  [ "$held" -gt 0 ] || return 0
   floor=$(class_floor "$class")
   [ "$floor" -gt 0 ] || return 0
   mem=$(reclaimable_mem_mb) || return 0
   if [ "$mem" -lt "$floor" ]; then
     BLOCK_REASON="reclaimable memory ${mem} MB is below the ${floor} MB floor"
+    BLOCK_NOTE="reclaimable memory is below the ${floor} MB floor"
   fi
 }
 
@@ -613,10 +620,10 @@ else
       lock
       prune_holders "$CLASS"
       queue_position
-      BLOCK_REASON=
+      BLOCK_NOTE=
       if [ "$POSITION" -eq 1 ]; then
         evaluate_capacity "$CLASS"
-        if [ -z "$BLOCK_REASON" ]; then
+        if [ -z "$BLOCK_NOTE" ]; then
           own_record "$(date +%s)"
           write_record "$SLOTS/$CLASS/held/$TICKET" || { unlock; die "cannot record the $CLASS slot under $SLOTS"; }
           rm -f -- "$SLOTS/$CLASS/queue/$TICKET"
@@ -625,7 +632,7 @@ else
         fi
       fi
       unlock
-      note="first in line for a $CLASS slot: ${BLOCK_REASON:-rechecking}"
+      note="first in line for a $CLASS slot: ${BLOCK_NOTE:-rechecking}"
     else
       note="waiting for a $CLASS slot: position $POSITION"
     fi
@@ -665,10 +672,10 @@ while :; do
   FORWARDED=0
   wait "$CHILD"
   CHILD_RC=$?
-  # A forwarded signal interrupts wait before the command has exited; wait
-  # again for its real status. An exited command is no longer a child of this
-  # shell, so this never spins on a recycled PID.
-  [ "$FORWARDED" -eq 1 ] && [ "$CHILD_RC" -gt 128 ] && fm_pid_alive "$CHILD" && continue
+  # A forwarded signal interrupts wait before the command has exited, or
+  # after bash has already reaped it; either way wait again, which returns the
+  # command's real status from bash's own record of the job.
+  [ "$FORWARDED" -eq 1 ] && [ "$CHILD_RC" -gt 128 ] && continue
   break
 done
 CHILD=
