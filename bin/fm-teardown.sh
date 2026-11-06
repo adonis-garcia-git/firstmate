@@ -67,6 +67,10 @@
 # by itself causes a false refusal of landed work.
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
+# Remote reachability never retires a ship with a recorded pr= on its own: a
+# non-local-only ship also REFUSES while that PR is still open, or while its
+# forge cannot say (recorded_pr_permits_teardown), because an open PR is pushed
+# by definition and cleanup would discard the record fm-pr-merge.sh needs.
 # Uncommitted changes are never landed; dirty refusals distinguish untracked-only
 # leftovers from tracked edits and list at most ten non-exempt untracked paths.
 # local-only projects additionally accept work merged into the local default
@@ -1742,6 +1746,35 @@ work_is_landed() {
   local branch=$1
   pr_is_merged "$branch" && return 0
   content_in_default
+}
+
+# A ship task's recorded PR is part of its landed-work test even when every
+# commit is already on a remote: pushing is what opening a PR requires, so
+# "reachable from a remote" alone would retire the task, its record, and the
+# metadata bin/fm-pr-merge.sh needs while the PR is still awaiting review.
+# Refuses while the recorded PR is open, and while its state cannot be read,
+# because an unread state cannot prove the PR is no longer open. A merged or
+# closed PR, or a merge-poll retirement receipt for exactly this PR (local
+# merged evidence, bin/fm-pr-lib.sh), passes.
+recorded_pr_permits_teardown() {
+  local verdict
+  [ -n "$PR_URL" ] || return 0
+  if fm_pr_url_parse "$PR_URL" \
+    && fm_pr_poll_retirement_receipt_valid "$STATE" "$ID" \
+    && [ "$FM_PR_RETIRE_URL" = "$FM_PR_URL" ]; then
+    return 0
+  fi
+  if ! verdict=$(fm_pr_open_state "$PR_URL"); then
+    echo "REFUSED: cannot read the state of task $ID's recorded PR $PR_URL from its forge, so teardown cannot prove the PR is no longer open." >&2
+    echo "Retry once the forge answers, or get the captain's explicit OK to retire the task with its PR still open, then --force." >&2
+    return 1
+  fi
+  case "$verdict" in
+    merged|closed) return 0 ;;
+  esac
+  echo "REFUSED: task $ID's recorded PR $PR_URL is still open and unmerged." >&2
+  echo "Land it (bin/fm-pr-merge.sh after the captain approves) or close it first; cleanup would discard the task record that merge needs. Only with the captain's explicit OK to retire the task with its PR still open, use --force." >&2
+  return 1
 }
 
 # The completion links this teardown already holds locally. A scout's
@@ -3610,6 +3643,11 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   fi
   require_orca_worktree_path_match "$ORCA_WORKTREE_ID" "$WT" || exit 1
   ORCA_PATH_MATCH_VERIFIED=1
+fi
+
+if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ] \
+    && [ "$FORCE" != "--force" ]; then
+  recorded_pr_permits_teardown || exit 1
 fi
 
 if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then

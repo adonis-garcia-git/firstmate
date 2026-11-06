@@ -313,6 +313,73 @@ This project'"'"'s CLAUDE.md imports files outside the current working directory
   pass "a Claude launch parked on its trust or external-imports dialog classifies unknown launch-prompt"
 }
 
+# Claude's first-run onboarding, as Claude Code 2.1.318-2.1.319 drew it on an
+# account root that had never finished setup: the theme picker wrapped at a
+# narrow pane width, the sign-in method picker, and the security notes.
+test_launch_prompt_claude_onboarding_screens() {
+  local state out name
+  state=$(new_state_dir launch-prompt-claude-onboarding)
+  "$EV" arm "$state" t1 >/dev/null
+  out=$(fm_busy_classify tmux w1 claude t1 "$state" 'Welcome to Claude Code v2.1.319
+
+ Let'"'"'s get started.
+
+ Choose the text style that looks best with your
+ terminal
+ To change this later, run /theme
+
+     Auto (match terminal)
+ ❯ ✔ Dark mode
+     Light mode
+     Dark mode (colorblind-friendly)
+     Light mode (colorblind-friendly)
+     Dark mode (ANSI colors only)
+     Light mode (ANSI colors only)')
+  [ "$out" = "unknown launch-prompt" ] \
+    || fail "a launch parked on Claude's first-run theme picker must classify unknown launch-prompt, got '$out'"
+  out=$(fm_busy_classify tmux w1 claude t1 "$state" ' Claude Code can be used with your Claude subscription or billed based on API usage through your Console account.
+
+ Select login method:
+
+ ❯ 1. Claude account with subscription · Individual, Team, or Enterprise
+   2. Anthropic Console account · API usage billing
+   3. 3rd-party platform · Amazon Bedrock, Microsoft Foundry, Google Vertex AI')
+  [ "$out" = "unknown launch-prompt" ] \
+    || fail "a launch parked on Claude's first-run sign-in method picker must classify unknown launch-prompt, got '$out'"
+  out=$(fm_busy_classify tmux w1 claude t1 "$state" ' Security notes:
+
+ 1. Claude can make mistakes.
+    You'"'"'re responsible for Claude'"'"'s actions and
+    should always
+    review them, especially when running code.
+
+ 2. Due to prompt injection risks, only use it with
+    code you trust
+    Learn more:
+    https://code.claude.com/docs/en/security
+
+ Press Enter to continue…')
+  [ "$out" = "unknown launch-prompt" ] \
+    || fail "a launch parked on Claude's first-run security notes must classify unknown launch-prompt, got '$out'"
+  name=$(printf '%s\n' ' Security notes:' '' ' Press Enter to continue…' | fm_busy_launch_prompt_name claude) \
+    || fail "the security notes screen has no launch-prompt name"
+  [ "$name" = "Claude first-run security notes" ] || fail "unexpected security notes name '$name'"
+  pass "a Claude launch parked on a first-run onboarding screen classifies unknown launch-prompt and is named"
+}
+
+# A worker quoting an onboarding heading in prose, without the screen's own
+# option or footer line, keeps its ordinary busy verdict.
+test_launch_prompt_claude_onboarding_requires_pairing() {
+  local state out
+  state=$(new_state_dir launch-prompt-claude-onboarding-prose)
+  "$EV" arm "$state" t1 >/dev/null
+  out=$(fm_busy_classify tmux w1 claude t1 "$state" '⏺ The first screen says "Choose the text style that looks best with your terminal".
+  The next one is headed Security notes: and Select login method: follows it.')
+  [ "$out" = "busy fm-spawn" ] \
+    || fail "a heading quoted in prose must not classify as a launch prompt, got '$out'"
+  pass "an onboarding heading quoted without its own option line keeps the busy verdict"
+}
+
 test_launch_prompt_pi_trust_dialog() {
   local state out h
   for h in pi pi-signed omp; do
@@ -631,6 +698,8 @@ test_record_without_sidecar_unknown
 test_source_mismatch_cross_adapter
 test_converted_adapters_ignore_footer_text
 test_launch_prompt_claude_trust_dialog
+test_launch_prompt_claude_onboarding_screens
+test_launch_prompt_claude_onboarding_requires_pairing
 test_launch_prompt_pi_trust_dialog
 test_launch_prompt_pi_requires_both_markers
 test_launch_prompt_gemini_dialogs

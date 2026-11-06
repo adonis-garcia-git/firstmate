@@ -72,7 +72,8 @@
 # The sign-in check asks the runner itself, with only HOME, PATH, TMPDIR,
 # USER, LOGNAME, and the selected root in its environment, so a credential
 # variable left in the caller cannot answer for a root that has no login:
-#   Claude: `claude auth status`, which exits 0 only when signed in.
+#   Claude: `claude auth status`, which exits 0 only when signed in, and then
+#           the root's first-run setup (fm_worker_account_claude_onboarded).
 #   Pi:     `pi auth check --provider <p> --json --no-refresh`; status "ready"
 #           passes. `pi auth check` loads no extensions, so it answers
 #           not_ready/provider_not_found for an extension-registered provider,
@@ -308,6 +309,48 @@ fm_worker_account_clean_env() {
   done
 }
 
+# fm_worker_account_claude_onboarded <root> <setting>
+# Returns 0 only when the Claude account at <root> (empty: the ordinary
+# account) has finished Claude's first-run onboarding, which Claude records as
+# "hasCompletedOnboarding": true in that root's .claude.json ($HOME/.claude.json
+# for the ordinary account). A root signed in without it, for example through
+# `claude auth login`, still opens every interactive launch on the theme
+# picker and the security notes, where an unattended worker parks until
+# someone answers. Otherwise prints one error naming the remedy and returns 1.
+fm_worker_account_claude_onboarded() {
+  local root=$1 setting=$2 config shown
+  if [ -n "$root" ]; then
+    config="$root/.claude.json"
+    shown=$root
+  else
+    config="${HOME:?HOME is required to read the ordinary Claude account}/.claude.json"
+    shown='the ordinary account'
+  fi
+  if [ -r "$config" ] && jq -e '.hasCompletedOnboarding == true' "$config" >/dev/null 2>&1; then
+    return 0
+  fi
+  if [ -n "$root" ]; then
+    echo "error: $setting pins Claude workers to $root, which has not finished Claude's first-run setup (no \"hasCompletedOnboarding\": true in $config), so every worker would park on the theme picker; run CLAUDE_CONFIG_DIR=$root claude once, pick a theme and accept the security notes, then exit, or change the pin" >&2
+  else
+    echo "error: $setting pins Claude workers to $shown, which has not finished Claude's first-run setup (no \"hasCompletedOnboarding\": true in $config), so every worker would park on the theme picker; run env -u CLAUDE_CONFIG_DIR claude once, pick a theme and accept the security notes, then exit, or change the pin" >&2
+  fi
+  return 1
+}
+
+# fm_worker_account_claude_unready <root>
+# Prints why a Claude account that failed fm_worker_account_check cannot take
+# a worker, with its remedy, for the callers that summarize a refusal in one
+# clause: an unfinished first-run setup when that is missing (one interactive
+# run there finishes setup and sign-in alike), otherwise not signed in.
+fm_worker_account_claude_unready() {
+  local root=$1
+  if ! fm_worker_account_claude_onboarded "$root" config/claude-account >/dev/null 2>&1; then
+    printf "has not finished Claude's first-run setup (run %s claude once, pick a theme and accept the security notes)\n" "$(fm_worker_account_claude_hint "$root")"
+  else
+    printf 'is not signed in (sign in with %s claude, then /login)\n' "$(fm_worker_account_claude_hint "$root")"
+  fi
+}
+
 # fm_worker_account_check <harness> <declared> <root> <executable> [<provider>] [<setting>]
 # Returns 0 only when the runner's own check says the selected root is signed
 # in for this launch; otherwise prints one error and returns 1.
@@ -320,16 +363,16 @@ fm_worker_account_check() {
   case "$harness" in
   claude)
     [ -z "$root" ] || clean+=("CLAUDE_CONFIG_DIR=$root")
-    if fm_run_timed "$FM_WORKER_ACCOUNT_CHECK_SECONDS" "${clean[@]}" \
+    if ! fm_run_timed "$FM_WORKER_ACCOUNT_CHECK_SECONDS" "${clean[@]}" \
       "$executable" auth status >/dev/null 2>&1 </dev/null; then
-      return 0
+      if [ -n "$root" ]; then
+        echo "error: $setting pins Claude workers to $root, which is not signed in (claude auth status); sign in with CLAUDE_CONFIG_DIR=$root claude, then /login, or change the pin" >&2
+      else
+        echo "error: $setting pins Claude workers to the ordinary account, which is not signed in (claude auth status); sign in with env -u CLAUDE_CONFIG_DIR claude, then /login, or change the pin" >&2
+      fi
+      return 1
     fi
-    if [ -n "$root" ]; then
-      echo "error: $setting pins Claude workers to $root, which is not signed in (claude auth status); sign in with CLAUDE_CONFIG_DIR=$root claude, then /login, or change the pin" >&2
-    else
-      echo "error: $setting pins Claude workers to the ordinary account, which is not signed in (claude auth status); sign in with env -u CLAUDE_CONFIG_DIR claude, then /login, or change the pin" >&2
-    fi
-    return 1
+    fm_worker_account_claude_onboarded "$root" "$setting" || return 1
     ;;
   pi | pi-signed)
     clean+=("PI_CODING_AGENT_DIR=$root")
@@ -500,7 +543,8 @@ fm_worker_account_claude_choose() {
       chosen=$name$'\t'$declared$'\t'$root
       break
     fi
-    skipped+=("$name: not signed in (sign in with $(fm_worker_account_claude_hint "$root") claude, then /login)")
+    reason=$(fm_worker_account_claude_unready "$root")
+    skipped+=("$name: ${reason#is }")
   done < <(printf '%s\n' "${ranked[@]+"${ranked[@]}"}" | LC_ALL=C sort -t $'\t' -k1,1nr -k2,2n)
   if [ -z "$chosen" ]; then
     reason=$(printf '%s; ' "${skipped[@]}")
@@ -534,7 +578,7 @@ fm_worker_account_claude_recorded_reason() {
     return 0
   fi
   if ! fm_worker_account_check claude "$declared" "$root" "$executable" 2>/dev/null; then
-    echo "is not signed in (claude auth status)"
+    fm_worker_account_claude_unready "$root"
     return 0
   fi
   [ "$(printf '%s\n' "$lines" | awk 'END { print NR }')" -gt 1 ] && command -v quota-axi >/dev/null 2>&1 || return 0
@@ -614,7 +658,7 @@ fm_worker_account_select_claude() {
   if [ "$how" = pin ]; then
     fm_worker_account_check claude "$declared" "$root" "$executable" "" "$setting" || return 1
   elif ! fm_worker_account_check claude "$declared" "$root" "$executable" 2>/dev/null; then
-    echo "error: --account '$name' selects Claude account $label, which is not signed in (claude auth status); sign in with $(fm_worker_account_claude_hint "$root") claude, then /login" >&2
+    echo "error: --account '$name' selects Claude account $label, which $(fm_worker_account_claude_unready "$root")" >&2
     return 1
   fi
   printf '%s\t%s\t\t%s\t%s\n' "$declared" "$root" "$name" "$how"

@@ -415,6 +415,7 @@ test_sweep_recovers_the_durable_secondmate_account() {
   printf '%s\n' "$w/primary-account" > "$w/home/config/claude-account"
   printf '%s\n' "$w/mate-account" > "$w/home/config/secondmate-accounts/sm1/claude-account"
   : > "$w/mate-account/.credentials.json"
+  printf '{"hasCompletedOnboarding":true}\n' > "$w/mate-account/.claude.json"
   cat > "$fb/claude" <<'SH'
 #!/usr/bin/env bash
 [ "${1:-}" = auth ] && [ "${2:-}" = status ] || exit 0

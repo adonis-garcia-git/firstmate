@@ -764,12 +764,40 @@ test_teardown_releases_the_idle_sleep_assertion() {
   pass "cleaning up the last live task releases the idle-sleep assertion"
 }
 
+# Make every supported forge report the recorded PR, merge request, or change
+# as merged, so a teardown that closes the backlog item has landed work behind
+# it: gh-axi for GitHub, glab for GitLab, gerrit-axi for Gerrit, and tea (with a
+# login for forgejo.example.com) for Forgejo.
+add_forges_report_merged() {
+  local case_dir=$1
+  add_gh_pr_state "$case_dir" merged
+  cat > "$case_dir/fakebin/glab" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '{"state":"merged"}'
+SH
+  cat > "$case_dir/fakebin/gerrit-axi" <<'SH'
+#!/usr/bin/env bash
+printf '{"ok":true,"changes":[{"change":%s,"status":"MERGED"}]}\n' "${2:-0}"
+SH
+  cat > "$case_dir/fakebin/tea" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-} ${2:-}" = "login list" ]; then
+  printf '%s\n' '[{"name":"fj","url":"https://forgejo.example.com"}]'
+  exit 0
+fi
+[ "${1:-}" = api ] || exit 1
+printf '%s\n' '{"state":"closed","merged":true,"head":{"sha":"0000000000000000000000000000000000000000"}}'
+SH
+  chmod +x "$case_dir/fakebin/glab" "$case_dir/fakebin/gerrit-axi" "$case_dir/fakebin/tea"
+}
+
 test_teardown_closes_the_backlog_item_itself() {
   local case_dir out
   case_dir=$(make_case tasks-axi-close)
   write_meta "$case_dir" no-mistakes ship
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   seed_backlog_in_flight "$case_dir"
+  add_forges_report_merged "$case_dir"
 
   out=$(run_teardown "$case_dir") || fail "teardown failed with a real backlog"
   [ "$(backlog_row_state "$case_dir")" = "done" ] \
@@ -793,6 +821,7 @@ test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note() {
   write_meta "$case_dir" no-mistakes ship
   printf 'pr=%s\n' "$gerrit_url" >> "$case_dir/state/task-x1.meta"
   seed_backlog_in_flight "$case_dir"
+  add_forges_report_merged "$case_dir"
   # Pin the refusal tasks-axi applies to a --pr link that is not a canonical
   # GitHub pull request, so this case keeps reproducing whatever the installed
   # release accepts.
@@ -824,6 +853,7 @@ SH
   write_meta "$case_dir" no-mistakes ship
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   seed_backlog_in_flight "$case_dir"
+  add_forges_report_merged "$case_dir"
   cp "$TMP_ROOT/tasks-axi-close-gerrit/fakebin/tasks-axi" "$case_dir/fakebin/tasks-axi"
   out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a landed GitHub task failed: $out"
   tasks-axi show task-x1 --file "$case_dir/data/backlog.md" \
@@ -839,6 +869,7 @@ test_teardown_closes_a_gitlab_task_with_its_merge_request_url_as_a_note() {
   write_meta "$case_dir" no-mistakes ship
   printf 'pr=%s\n' "$gitlab_url" >> "$case_dir/state/task-x1.meta"
   seed_backlog_in_flight "$case_dir"
+  add_forges_report_merged "$case_dir"
   # Pin the refusal tasks-axi applies to a --pr link that is neither a GitHub
   # nor a Forgejo pull request, so this case keeps reproducing whatever the
   # installed release accepts.
@@ -872,6 +903,7 @@ SH
     write_meta "$case_dir" no-mistakes ship
     printf 'pr=%s\n' "$url" >> "$case_dir/state/task-x1.meta"
     seed_backlog_in_flight "$case_dir"
+    add_forges_report_merged "$case_dir"
     cp "$TMP_ROOT/tasks-axi-close-gitlab/fakebin/tasks-axi" "$case_dir/fakebin/tasks-axi"
     out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a landed task with $url failed: $out"
     tasks-axi show task-x1 --file "$case_dir/data/backlog.md" \
@@ -888,6 +920,7 @@ test_teardown_manual_backend_leaves_the_backlog_to_the_operator() {
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   printf '%s\n' manual > "$case_dir/config/backlog-backend"
   seed_backlog_in_flight "$case_dir"
+  add_forges_report_merged "$case_dir"
 
   out=$(run_teardown "$case_dir") || fail "teardown failed with manual backlog backend"
   [ "$(backlog_row_state "$case_dir")" = in_flight ] \
@@ -956,6 +989,103 @@ test_no_mistakes_origin_remote_allows() {
   grep -F 'blockers are gone and date is due' "$case_dir/stdout" >/dev/null \
     || fail "nm-origin: teardown manual prompt did not preserve date-gate check"
   pass "no-mistakes worktree with HEAD on origin is torn down (no regression)"
+}
+
+# Override GitHub lookups so the recorded PR 7 reads in <state> (open, closed,
+# or merged) through gh-axi, the PR lib's fallback reader; the default gh fake
+# answers no GraphQL, as an unauthenticated gh would.
+add_gh_pr_state() {
+  local case_dir=$1 state=$2
+  cat > "$case_dir/fakebin/gh-axi" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "pr list") printf '%s\n' "count: 0 (showing first 0)" "pull_requests[]: []" ; exit 0 ;;
+  "pr view") printf '%s\n' "pull_request:" "  number: 7" "  state: $state" ; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh-axi"
+}
+
+# A ship whose branch is pushed and whose recorded PR the forge reads in
+# <state>: everything is on a remote, so only the recorded PR decides.
+make_pushed_ship_with_recorded_pr() {  # <name> <state>
+  local case_dir
+  case_dir=$(make_case "$1")
+  write_meta "$case_dir" no-mistakes ship
+  append_pr_meta_url "$case_dir"
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  add_gh_pr_state "$case_dir" "$2"
+  printf '%s\n' "$case_dir"
+}
+
+test_recorded_open_pr_with_pushed_branch_refuses() {
+  local case_dir rc
+  case_dir=$(make_pushed_ship_with_recorded_pr pr-open open)
+  seed_backlog_in_flight "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "pr-open: teardown should refuse while the recorded PR is open"
+  grep -F "recorded PR https://github.com/example/repo/pull/7 is still open and unmerged" "$case_dir/stderr" >/dev/null \
+    || fail "pr-open: the refusal did not name the open PR: $(cat "$case_dir/stderr")"
+  [ -e "$case_dir/state/task-x1.meta" ] \
+    || fail "pr-open: the refusal erased the task record fm-pr-merge.sh needs"
+  [ -d "$case_dir/wt" ] || fail "pr-open: the refusal removed the worktree"
+  [ "$(backlog_row_state "$case_dir")" != "done" ] \
+    || fail "pr-open: the backlog item was closed while its PR is open"
+  pass "a pushed ship whose recorded PR is still open is refused, keeping its record"
+}
+
+test_recorded_pr_unreadable_refuses() {
+  local case_dir rc
+  case_dir=$(make_pushed_ship_with_recorded_pr pr-unreadable open)
+  add_gh_axi_error "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "pr-unreadable: teardown should refuse when the PR state cannot be read"
+  grep -F "cannot read the state of task task-x1's recorded PR" "$case_dir/stderr" >/dev/null \
+    || fail "pr-unreadable: the refusal did not say the PR state was unreadable: $(cat "$case_dir/stderr")"
+  [ -e "$case_dir/state/task-x1.meta" ] || fail "pr-unreadable: the refusal erased the task record"
+  pass "a recorded PR whose state the forge cannot report is refused, not assumed closed"
+}
+
+test_recorded_closed_or_merged_pr_allows() {
+  local case_dir rc state
+  for state in closed merged; do
+    case_dir=$(make_pushed_ship_with_recorded_pr "pr-$state" "$state")
+    set +e
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 0 "$rc" "pr-$state: teardown should proceed once the recorded PR is $state"
+    ! grep -q REFUSED "$case_dir/stderr" || fail "pr-$state: teardown printed a REFUSED line: $(cat "$case_dir/stderr")"
+  done
+  pass "a pushed ship whose recorded PR is merged or closed is torn down"
+}
+
+test_recorded_open_pr_force_proceeds() {
+  local case_dir rc
+  case_dir=$(make_pushed_ship_with_recorded_pr pr-open-force open)
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "pr-open-force: an explicit --force should retire the task"
+  ! grep -q "still open and unmerged" "$case_dir/stderr" \
+    || fail "pr-open-force: --force still refused on the open PR"
+  pass "--force retires a task whose recorded PR is still open"
 }
 
 test_no_mistakes_truly_unpushed_refuses() {
@@ -2039,9 +2169,10 @@ test_windowless_leftover_retries_its_retained_legacy_stamp_without_the_flag() {
   local case_dir rc out
   case_dir=$(make_case windowless-retry)
   write_windowless_legacy_meta "$case_dir" no-mistakes ship "$case_dir/missing-wt"
-  printf '%s\n' 'pr=not-a-valid-url' >> "$case_dir/state/task-x1.meta"
   seed_backlog_in_flight "$case_dir"
   add_failing_rollback_perl "$case_dir"
+  # The pending close cannot be recorded: its path is already a directory.
+  mkdir "$case_dir/state/task-x1.backlog-close"
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -2052,7 +2183,7 @@ test_windowless_leftover_retries_its_retained_legacy_stamp_without_the_flag() {
     || fail "windowless-retry: the failed attempt did not leave its legacy stamp on the record"
 
   rm -f "$case_dir/fakebin/perl"
-  sed -i.bak '/^pr=/d' "$case_dir/state/task-x1.meta" && rm -f "$case_dir/state/task-x1.meta.bak"
+  rmdir "$case_dir/state/task-x1.backlog-close"
   out=$(run_teardown "$case_dir") \
     || fail "windowless-retry: the flag-less retry refused the retained legacy stamp"
   printf '%s\n' "$out" | grep -Fq 'legacy record accepted without spawn_gen: endpoint missing' \
@@ -2177,7 +2308,8 @@ test_legacy_record_rolls_the_stamp_back_when_the_marker_write_fails() {
   local case_dir rc before
   case_dir=$(make_case legacy-stamp-rollback)
   write_legacy_meta "$case_dir" no-mistakes ship
-  printf '%s\n' 'pr=not-a-valid-url' >> "$case_dir/state/task-x1.meta"
+  # The pending close cannot be recorded: its path is already a directory.
+  mkdir "$case_dir/state/task-x1.backlog-close"
   seed_backlog_in_flight "$case_dir"
   wt_commit "$case_dir" "landed legacy work"
   add_fork_with_pushed_branch "$case_dir"
@@ -2230,7 +2362,8 @@ test_retained_legacy_stamp_still_faces_the_endpoint_gate() {
   local case_dir rc stamped
   case_dir=$(make_case legacy-stamp-retained)
   write_legacy_meta "$case_dir" no-mistakes ship
-  printf '%s\n' 'pr=not-a-valid-url' >> "$case_dir/state/task-x1.meta"
+  # The pending close cannot be recorded: its path is already a directory.
+  mkdir "$case_dir/state/task-x1.backlog-close"
   seed_backlog_in_flight "$case_dir"
   wt_commit "$case_dir" "landed legacy work"
   add_fork_with_pushed_branch "$case_dir"
@@ -5700,6 +5833,10 @@ test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
+test_recorded_open_pr_with_pushed_branch_refuses
+test_recorded_pr_unreadable_refuses
+test_recorded_closed_or_merged_pr_allows
+test_recorded_open_pr_force_proceeds
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_secondmate_pr_registration_publishes_ready_line

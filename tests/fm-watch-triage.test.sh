@@ -7391,6 +7391,42 @@ test_exit_picker_stale_names_the_dialog() {
   pass "a pane on the exit picker is a named stale, from the one capture the poll already takes"
 }
 
+# A Claude worker launched on an account root that never finished first-run
+# setup parks on the theme picker while its busy record is still the fm-spawn
+# seed. The poll must not absorb it as busy, and the wake names the screen.
+test_first_run_launch_prompt_stale_names_the_screen() {
+  local dir state fakebin out capture_file window pid count_file
+  dir=$(make_case first-run-stale); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; count_file="$dir/captures"
+  window="test:fm-first-run"
+  printf '%s\n' \
+    " Let's get started." \
+    '' \
+    ' Choose the text style that looks best with your terminal' \
+    ' To change this later, run /theme' \
+    '' \
+    '     Auto (match terminal)' \
+    ' ❯ ✔ Dark mode' \
+    '     Light mode' \
+    '     Dark mode (colorblind-friendly)' > "$capture_file"
+  prime_picker_window "$state" firstrun "$window" ship "$capture_file" 'working: starting' >/dev/null
+  printf 'harness=claude\n' >> "$state/firstrun.meta"
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" firstrun >/dev/null
+  printf '0\n' > "$count_file"
+  export FM_FAKE_CREW_STATE='state: blocked · source: pane · launch-prompt: parked on Claude first-run theme picker before the brief started'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CAPTURE_COUNT_FILE="$count_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not surface a launch parked on the first-run theme picker: $(cat "$out")"
+  grep -F "stale: $window" "$out" >/dev/null || fail "the first-run wake was not a stale wake: $(cat "$out")"
+  grep -F 'blocked-on-prompt: Claude first-run theme picker' "$out" >/dev/null \
+    || fail "the first-run wake did not name the screen: $(cat "$out")"
+  unset FM_FAKE_CREW_STATE
+  pass "a launch parked on Claude's first-run theme picker surfaces as a stale wake naming the screen"
+}
+
 test_exit_picker_wedge_keeps_climbing() {
   local dir state fakebin out capture_file window key pid n
   dir=$(make_case exit-picker-wedge); state="$dir/state"; fakebin="$dir/fakebin"
@@ -7510,6 +7546,7 @@ test_closed_exit_picker_drops_saved_dialog_name() {
 }
 
 test_exit_picker_stale_names_the_dialog
+test_first_run_launch_prompt_stale_names_the_screen
 test_exit_picker_wedge_keeps_climbing
 test_quoted_exit_picker_stays_ordinary_stale
 test_secondmate_exit_picker_stays_quiet

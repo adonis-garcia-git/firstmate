@@ -186,6 +186,10 @@ check_claude_worker_account() {
       continue
     fi
     fm_worker_account_check claude "$declared" "$root" claude >/dev/null 2>&1 && continue
+    if ! fm_worker_account_claude_onboarded "$root" config/claude-account >/dev/null 2>&1; then
+      MISSING+=("Claude worker account $label$(claude_account_setup "$root")")
+      continue
+    fi
     MISSING+=("Claude worker account $label$(claude_account_signin "$root")")
   done <<<"$declared_lines"
 }
@@ -195,6 +199,16 @@ claude_account_signin() {  # <root>
     printf '%s (sign in: CLAUDE_CONFIG_DIR=%s claude, then /login)\n' "$1" "$1"
   else
     printf '(sign in: env -u CLAUDE_CONFIG_DIR claude, then /login)\n'
+  fi
+}
+
+# A root that has not finished Claude's first-run setup parks every worker on
+# its theme picker; one interactive run there finishes setup and sign-in alike.
+claude_account_setup() {  # <root>
+  if [ -n "$1" ]; then
+    printf '%s (finish first-run setup: CLAUDE_CONFIG_DIR=%s claude once, pick a theme, accept the security notes, and /login if asked)\n' "$1" "$1"
+  else
+    printf '(finish first-run setup: env -u CLAUDE_CONFIG_DIR claude once, pick a theme, accept the security notes, and /login if asked)\n'
   fi
 }
 

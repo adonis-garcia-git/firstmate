@@ -29,9 +29,11 @@
 # first-run onboarding (a subscription or API key already selected, and a
 # theme already chosen) - the guard targets a brand-new SCRATCH WORKTREE under
 # the operator's own already-onboarded config, exactly the shape a real
-# crewmate spawn produces, never a fresh CLAUDE_CONFIG_DIR. An unonboarded
-# machine reports that precondition explicitly rather than failing the
-# signature.
+# crewmate spawn produces. An unonboarded machine reports that precondition
+# explicitly rather than failing the signature. A second Claude case then
+# launches into a fresh, empty CLAUDE_CONFIG_DIR on purpose, the shape of an
+# account root that never finished first-run setup, and requires the theme
+# picker it opens on to classify the same way.
 #
 # Run explicitly with FM_LAUNCH_PROMPT_SIGNALS_LIVE=1. Refresh
 # docs/verification/runtime-backends.md ("Launch-prompt backstop signatures")
@@ -151,6 +153,22 @@ if [ -x "${CLAUDE_BIN:-}" ]; then
     'Is this a project you created or one you trust' '' \
     "$CLAUDE_BIN" --dangerously-skip-permissions hello
   pass "claude: a real launch parked on its own rendered trust dialog surfaces through the watcher gate"
+  # An account root that never finished Claude's first-run setup: a fresh,
+  # empty CLAUDE_CONFIG_DIR opens on the theme picker before any sign-in, so
+  # nothing is read from or written to the operator's own login.
+  CLAUDE_FRESH_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-launch-prompt-claude-root.XXXXXX") || fail "claude: could not create the fresh account root"
+  LABS+=("$CLAUDE_FRESH_ROOT")
+  CLAUDE_TAIL_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-launch-prompt-claude-tail.XXXXXX") || fail "claude: could not create the tail capture file"
+  LABS+=("$CLAUDE_TAIL_FILE")
+  check_harness claude fm-lp-claude-setup-$$ '' '' \
+    'Choose the text style that looks best with' "$CLAUDE_TAIL_FILE" \
+    env -u ANTHROPIC_API_KEY -u CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CONFIG_DIR="$CLAUDE_FRESH_ROOT" \
+    "$CLAUDE_BIN" --dangerously-skip-permissions hello
+  name=$(fm_busy_launch_prompt_name claude < "$CLAUDE_TAIL_FILE") \
+    || fail "claude: the real first-run theme picker has no launch-prompt name"
+  [ "$name" = "Claude first-run theme picker" ] \
+    || fail "claude: the real first-run screen was named '$name', expected 'Claude first-run theme picker'"
+  pass "claude: a real launch on a never-set-up account root parks on the first-run theme picker and surfaces through the watcher gate"
 else
   note "claude not installed - launch-prompt signature not checked"
 fi

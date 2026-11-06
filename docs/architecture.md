@@ -267,7 +267,7 @@ Each converted adapter reports its own turn lifecycle through a machine-readable
 Kimi behind Pi inherits Pi's lifecycle.
 Codex and standalone Kimi classify unknown behind explicit probes until a semantic source is live-verified for them, and Grok, Rovo, and AGY each keep one clearly isolated rendered-tail busy fallback that can only ever classify their own task.
 The one case where the contract reads rendered text for a converted adapter is the launch-prompt backstop (`fm_busy_launch_prompt_parked` in `bin/fm-busy-lib.sh`): when a record is still the untouched `fm-spawn` seed and the caller supplied a captured pane matching that harness's own recognized interactive launch prompt - a workspace-trust dialog, sign-in screen, or first-run menu - `fm_busy_classify` reports `unknown launch-prompt` instead of `busy fm-spawn`.
-That keeps a launch that never began its brief from holding the busy-age exemption for the whole `FM_BUSY_TURN_MAX_SECS` bound and surfaces it through the ordinary not-provably-working path instead.
+That keeps a launch that never began its brief from holding the busy-age exemption for the whole `FM_BUSY_TURN_MAX_SECS` bound and surfaces it through the ordinary not-provably-working path instead: `bin/fm-crew-state.sh` reports it `blocked` with the prompt named, and the watcher's stale wake names the same prompt.
 A record any real hook event has advanced is never reclassified this way however its pane looks, no captured tail means the record's own state stands, and the general busy bound is unchanged.
 The per-harness signature table lives in `bin/fm-busy-lib.sh`'s header, and [runtime backend verification](verification/runtime-backends.md#launch-prompt-backstop-signatures) owns the live evidence.
 

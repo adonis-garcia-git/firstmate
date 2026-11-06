@@ -625,6 +625,55 @@ The real pane renders this inside a bordered box, omitted here for readability; 
 That capture demonstrated why each signature function matches the FULL captured tail rather than the Grok/Rovo/AGY busy-footer convention of the last 12 non-blank lines: a bordered dialog box renders many short lines of pure border and padding (`│  ...  │`) that are NOT whitespace-only, so the 12-line reduction pushed this exact heading text out of the window and silently defeated the match on the first attempt.
 None of these three runs ever answered its dialog (Escape only, never Enter), so no credential store was written to and no model tokens were spent.
 
+### Claude first-run onboarding screens
+
+An account root that never finished Claude's first-run setup opens every launch on onboarding screens, before any brief runs.
+Verified 2026-11-06 on macOS (Darwin 25.5.0) against the real `claude` binary in a pseudo-terminal rendered by the `pyte` terminal emulator at 120x40, with only `HOME`, `PATH`, `USER`, `LANG`, `TERM`, and the selected `CLAUDE_CONFIG_DIR` in the environment.
+This machine has no tmux, so the guard's new fresh-root case (`FM_LAUNCH_PROMPT_SIGNALS_LIVE=1 bash tests/fm-launch-prompt-signals-live-e2e.test.sh`) was not run here; it is the command that refreshes this record.
+
+Claude Code 2.1.319, `CLAUDE_CONFIG_DIR=<empty dir> claude --dangerously-skip-permissions hello`, which `fm_busy_launch_prompt_name claude` names `Claude first-run theme picker`:
+
+```
+ Let's get started.
+
+ Choose the text style that looks best with your terminal
+ To change this later, run /theme
+
+     Auto (match terminal)
+ ❯ ✔ Dark mode
+     Light mode
+     Dark mode (colorblind-friendly)
+     Light mode (colorblind-friendly)
+     Dark mode (ANSI colors only)
+     Light mode (ANSI colors only)
+```
+
+A narrower pane wraps the heading before `terminal`, which is why the signature stops at `looks best with`.
+One Enter on that root, with no login stored, moves to the sign-in method picker, named `Claude first-run sign-in method picker`:
+
+```
+ Select login method:
+
+ ❯ 1. Claude account with subscription · Individual, Team, or Enterprise
+   2. Anthropic Console account · API usage billing
+   3. 3rd-party platform · Amazon Bedrock, Microsoft Foundry, Google Vertex AI
+```
+
+On a signed-in root that never finished setup, Claude Code 2.1.319 follows the theme picker with the security notes, named `Claude first-run security notes`; this capture is the supervising home's own pane read of a stuck worker, not a run of this record:
+
+```
+ Security notes:
+
+ 1. Claude can make mistakes.
+    You're responsible for Claude's actions and
+    should always
+    review them, especially when running code.
+
+ Press Enter to continue…
+```
+
+The same root with `"hasCompletedOnboarding": true` in its `.claude.json` opened straight at the composer, which is the record `fm_worker_account_claude_onboarded` reads.
+
 ## Worker account pin sign-in check
 
 `bin/fm-worker-account-lib.sh` decides whether a pinned account is signed in from vendor output: the exit status of `claude auth status`, the JSON of `pi auth check`, and the provider column of `pi --list-models`.

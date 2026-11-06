@@ -1194,6 +1194,8 @@ The refusal names the variable; remove that assignment from the raw command, or 
 
 Before any worker endpoint, local copy, or task record exists, and before a relaunch stops the running worker, Firstmate asks the runner itself whether the selected account is signed in: `claude auth status` for Claude, and `pi auth check --provider <provider> --json --no-refresh` for Pi, falling back to `pi --list-models <provider>` for a provider an extension registers.
 The check runs with only `HOME`, `PATH`, `TMPDIR`, `USER`, `LOGNAME`, and the pinned root in its environment, so a credential variable in firstmate's own environment cannot answer for an empty root.
+A Claude account must also have finished Claude's first-run setup, recorded as `"hasCompletedOnboarding": true` in the root's `.claude.json` (`~/.claude.json` for `ordinary`).
+A root signed in without it, for example through `claude auth login`, opens every launch on the theme picker and the security notes, so it is refused like a signed-out one; run `CLAUDE_CONFIG_DIR=<root> claude` once, pick a theme, accept the security notes, and exit.
 
 A pinned Claude launch also unsets the environment credentials Claude ranks above a stored login, such as `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, and the Bedrock and Vertex switches ([authentication precedence](https://code.claude.com/docs/en/authentication#authentication-precedence)).
 Pi ranks a root's stored logins above environment variables, so a pinned Pi launch unsets nothing.
@@ -1202,7 +1204,7 @@ A home that authenticates Claude through environment credentials on purpose shou
 
 ### Failures, reporting, and inheritance
 
-A malformed file, a root that is not a readable directory, or a signed-out account refuses the launch and names the file to fix; Firstmate never falls back to the ambient account and never changes a global login or copies a credential.
+A malformed file, a root that is not a readable directory, or a signed-out or not-yet-set-up account refuses the launch and names the file to fix; Firstmate never falls back to the ambient account and never changes a global login or copies a credential.
 The spawn prints the account and records the same fields in the task record, so the session-start digest shows which account each worker launched on.
 A single-line pin is `account=<root>`, a named Claude account is `account=<name> account_root=<root>`, and a Pi pin adds `account_provider=`.
 

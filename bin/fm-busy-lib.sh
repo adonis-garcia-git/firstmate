@@ -930,20 +930,49 @@ fm_busy_agy_tail_busy() {
 # disassembly, .agents/skills/harness-adapters/references/harness/claude.md
 # "Hook trust" sibling section). fm-claude-trust.sh pre-registers both before
 # launch; this is the backstop for when that registration did not take effect.
-# Each dialog's own question text is paired with one of its own rendered
-# option/footer lines, both required together: the question text alone is
+# It also matches Claude's first-run onboarding, which an account root that has
+# never finished it shows before anything else (the account check in
+# bin/fm-worker-account-lib.sh refuses such a root up front): the theme picker
+# ("Choose the text style that looks best with your terminal"), the sign-in
+# method picker ("Select login method:"), and the security notes ("Security
+# notes:" ... "Press Enter to continue"), all live-verified on Claude Code
+# 2.1.318-2.1.319 (same runtime-backends section).
+# Each screen's own heading is paired with one of its own rendered
+# option/footer lines, both required together: the heading alone is
 # plausible self-referential prose a firstmate-repo worker could easily render
-# on its own (fm-claude-trust.sh's header literally quotes both questions),
-# but the option/footer pairing only ever renders inside the real dialog.
+# on its own (fm-claude-trust.sh's header literally quotes both questions, and
+# this comment quotes every heading), but the pairing only ever renders inside
+# the real screen. The theme heading is matched without its last word because
+# a narrow pane wraps it there. Prints the screen's name on a match.
 fm_busy_claude_launch_prompt_tail() {
   local buf
   buf=$(cat)
   if printf '%s' "$buf" | grep -qiE "${FM_BUSY_CLAUDE_TRUST_PROMPT_REGEX:-Quick safety check: Is this a project you created or one you trust\\?}" \
     && printf '%s' "$buf" | grep -qiE 'No, exit|Enter to confirm'; then
+    printf '%s' 'Claude workspace-trust dialog'
     return 0
   fi
-  printf '%s' "$buf" | grep -qiE "${FM_BUSY_CLAUDE_IMPORTS_PROMPT_REGEX:-Allow external CLAUDE\\.md file imports\\?}" \
-    && printf '%s' "$buf" | grep -qiE 'No, disable external imports|Yes, allow external imports'
+  if printf '%s' "$buf" | grep -qiE "${FM_BUSY_CLAUDE_IMPORTS_PROMPT_REGEX:-Allow external CLAUDE\\.md file imports\\?}" \
+    && printf '%s' "$buf" | grep -qiE 'No, disable external imports|Yes, allow external imports'; then
+    printf '%s' 'Claude external-imports dialog'
+    return 0
+  fi
+  if printf '%s' "$buf" | grep -qiE 'Choose the text style that looks best with' \
+    && printf '%s' "$buf" | grep -qiE 'To change this later, run /theme|Dark mode \(colorblind-friendly\)|Light mode \(ANSI colors only\)'; then
+    printf '%s' 'Claude first-run theme picker'
+    return 0
+  fi
+  if printf '%s' "$buf" | grep -qiE '^[[:space:]]*Select login method:' \
+    && printf '%s' "$buf" | grep -qiE 'Claude account with subscription|Anthropic Console account'; then
+    printf '%s' 'Claude first-run sign-in method picker'
+    return 0
+  fi
+  if printf '%s' "$buf" | grep -qiE '^[[:space:]]*Security notes:[[:space:]]*$' \
+    && printf '%s' "$buf" | grep -qiE '^[[:space:]]*Press Enter to continue'; then
+    printf '%s' 'Claude first-run security notes'
+    return 0
+  fi
+  return 1
 }
 
 # fm_busy_pi_launch_prompt_tail: Pi's project-trust dialog. Live-verified on
@@ -962,7 +991,8 @@ fm_busy_pi_launch_prompt_tail() {
   local buf
   buf=$(cat)
   printf '%s' "$buf" | grep -qiE "${FM_BUSY_PI_LAUNCH_PROMPT_REGEX:-Trust project folder\\?}" \
-    && printf '%s' "$buf" | grep -qiE 'Do not trust'
+    && printf '%s' "$buf" | grep -qiE 'Do not trust' \
+    && printf '%s' 'Pi project-trust dialog'
 }
 
 # fm_busy_gemini_launch_prompt_tail: Gemini's workspace-trust dialog ("Do you
@@ -990,29 +1020,40 @@ fm_busy_gemini_launch_prompt_tail() {
   buf=$(cat)
   if printf '%s' "$buf" | grep -qiE "${FM_BUSY_GEMINI_TRUST_PROMPT_REGEX:-Do you trust the files in this folder\\?}" \
     && printf '%s' "$buf" | grep -qiE "Trust folder|Don't trust"; then
+    printf '%s' 'Gemini workspace-trust dialog'
     return 0
   fi
   if printf '%s' "$buf" | grep -qiE "${FM_BUSY_GEMINI_AUTH_PROMPT_REGEX:-How would you like to authenticate for this project\\?}" \
     && printf '%s' "$buf" | grep -qiE 'Use Gemini API Key|No authentication method selected'; then
+    printf '%s' 'Gemini auth-method picker'
     return 0
   fi
-  printf '%s' "$buf" | grep -qiE "${FM_BUSY_GEMINI_APIKEY_PROMPT_REGEX:-Enter Gemini API Key}"
+  printf '%s' "$buf" | grep -qiE "${FM_BUSY_GEMINI_APIKEY_PROMPT_REGEX:-Enter Gemini API Key}" \
+    && printf '%s' 'Gemini API key entry'
 }
 
-# fm_busy_launch_prompt_parked: dispatch to the signature above for <harness>,
-# or fail when this harness has none. Consumes the tail on stdin. Scoped to
-# exactly the harnesses fm-spawn.sh arms with the fm-spawn busy source
-# (claude*, opencode*, pi, pi-signed, omp, gemini) since only those can ever
-# read a pinned "busy fm-spawn" record; codex and standalone Kimi already
-# classify unknown before a record is ever consulted, and opencode ships no
-# trust dialog at all.
-fm_busy_launch_prompt_parked() {  # <harness>
+# fm_busy_launch_prompt_name: dispatch to the signature above for <harness>
+# and print the name of the launch prompt the tail on stdin shows, or fail when
+# it shows none or this harness has no signature. Scoped to exactly the
+# harnesses fm-spawn.sh arms with the fm-spawn busy source (claude*,
+# opencode*, pi, pi-signed, omp, gemini) since only those can ever read a
+# pinned "busy fm-spawn" record; codex and standalone Kimi already classify
+# unknown before a record is ever consulted, and opencode ships no trust
+# dialog at all. The name is for a supervisor-facing detail or wake reason;
+# fm_busy_launch_prompt_parked is the predicate the classifier uses.
+fm_busy_launch_prompt_name() {  # <harness>
   case "${1:-}" in
     claude*) fm_busy_claude_launch_prompt_tail ;;
     pi | pi-signed | omp) fm_busy_pi_launch_prompt_tail ;;
     gemini) fm_busy_gemini_launch_prompt_tail ;;
     *) return 1 ;;
   esac
+}
+
+# fm_busy_launch_prompt_parked: whether the tail on stdin shows <harness>'s
+# own launch prompt (fm_busy_launch_prompt_name), without printing its name.
+fm_busy_launch_prompt_parked() {  # <harness>
+  fm_busy_launch_prompt_name "$@" >/dev/null
 }
 
 # fm_busy_classify: semantic classification for a task whose endpoint the

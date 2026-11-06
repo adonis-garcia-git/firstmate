@@ -1462,6 +1462,26 @@ test_ruled_claude_composer_wins_over_its_popup_glyph_row() {
   pass "fm_composer_selected_rows_view: a ruled Claude composer wins over the glyph-marked popup row under its closing rule"
 }
 
+test_signed_out_claude_reads_empty_then_exit_alone() {
+  # Claude Code 2.1.318 signed out with an expired login (captured live in a
+  # 55-column pane, 2026-11-06): the turn ends on "Login expired", the
+  # composer is empty, and a typed /exit opens the slash-command popup under
+  # the closing rule. Before the popup fix the read-back took the popup rows
+  # for the composer and counted 65 characters for a 5-character /exit, so
+  # exit and relaunch refused to move a signed-out worker to another account.
+  local rule screen out
+  rule='───────────────────────────────────────────────────────'
+  screen=$'❯ hello\n\n⏺ Login expired · Please run /login\n\n✻ Worked for 0s · done 1:44 AM\n\n'"$rule"$'\n❯\xc2\xa0\n'"$rule"$'\n  ⏵⏵ bypass permissions on (shift+tab to cycle)\n                                Not logged in · Run /login'
+  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$(printf 'claude\tidle')")
+  [ "$out" = empty ] || fail "a signed-out Claude's empty composer must read empty, got '$out'"
+  out=$(fm_composer_selected_rows_view "$CAPS_STYLED" "$screen") || fail "a signed-out Claude composer should have a row view"
+  [ "$out" = b ] || fail "a signed-out Claude's empty composer must view as one blank row, got '$out'"
+  screen=$'❯ hello\n⏺ Login expired · Please run /login\n✻ Cogitated for 0s · done 1:47 AM\n'"$rule"$'\n❯ /exit\n'"$rule"$'\n  ❯ /exit                 Exit the CLI\n    /context              Visualize current context\n                          usage as a colored grid'
+  out=$(fm_composer_selected_rows_view "$CAPS_STYLED" "$screen") || fail "a signed-out Claude composer holding /exit should have a row view"
+  [ "$out" = $'t\t/exit' ] || fail "a signed-out Claude composer must read back the typed /exit alone, got '$out'"
+  pass "fm_composer: a signed-out Claude reads empty, then reads back a typed /exit without its popup"
+}
+
 test_ruled_bare_composer_keeps_text_past_a_blank_line() {
   # helm chat with an attachment types "<text>\n\nATTACHMENTS: <path>" into
   # the Claude composer on Herdr. Claude renders the typed blank line as a
@@ -1572,6 +1592,7 @@ test_ruled_bare_composer_keeps_text_past_a_blank_line
 test_ruled_bare_composer_keeps_typed_ascii_pipes
 test_selected_rows_view_reports_every_composer_row
 test_ruled_claude_composer_wins_over_its_popup_glyph_row
+test_signed_out_claude_reads_empty_then_exit_alone
 
 # The selected row sits on cursor row 1 so a tmux read whose cursor is that
 # row, and a cursorless read, both still see unsubmitted text.

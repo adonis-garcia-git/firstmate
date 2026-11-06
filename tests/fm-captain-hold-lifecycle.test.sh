@@ -2977,6 +2977,8 @@ test_retained_row_artifacts_survive_captain_answers() {
     || fail "could not release the approved merge"
   show=$(tasks_in "$home" show "$approved_id" --full) || fail "the approved merge disappeared"
   assert_not_contains "$show" "hold_kind: captain" "merge approval retained its captain hold kind"
+  # Teardown reads the recorded PR's state; the approved PR has merged.
+  configure_merged_github "$home"
   run_teardown "$home" "$approved_id" > "$home/approved-teardown.out" \
     2> "$home/approved-teardown.err" \
     || fail "approved merge cleanup failed: $(cat "$home/approved-teardown.err")"
@@ -3504,6 +3506,12 @@ done
 exec "$real_tasks_axi" "\$@"
 SH
   chmod +x "$home/fakebin/tasks-axi"
+  # Teardown reads the recorded change's state; this one has merged.
+  cat > "$home/fakebin/gerrit-axi" <<'SH'
+#!/usr/bin/env bash
+printf '{"ok":true,"changes":[{"change":%s,"status":"MERGED"}]}\n' "${2:-0}"
+SH
+  chmod +x "$home/fakebin/gerrit-axi"
 
   run_teardown "$home" "$id" > "$home/teardown.out" 2> "$home/teardown.err" \
     || fail "cleanup of a captain-held Gerrit task failed: $(cat "$home/teardown.err")"
@@ -3547,6 +3555,8 @@ test_merge_approval_releases_before_zero_done_retention() {
     "merge approval completed the zero-retention row before landing"
   assert_contains "$show" "Resolution mode: released" \
     "merge approval did not record the existing release mode"
+  # Teardown reads the recorded PR's state; the approved PR has merged.
+  configure_merged_github "$home"
   run_teardown "$home" "$id" > "$home/teardown.out" 2> "$home/teardown.err" \
     || fail "zero-retention cleanup failed: $(cat "$home/teardown.err")"
   assert_no_grep "$id" "$home/data/backlog.md" \
