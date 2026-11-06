@@ -520,6 +520,10 @@ test_watcher_surfaces_one_wake() {
   pr "$home" 8 "$HEAD_A" "$BASE_1" false false
   arm "$home"
   [ -f "$home/state/contributions.check.sh" ] || fail 'arm did not arm the contribution observer for enrolled PRs'
+  # The hourly recorded-PR sweep is not under test and the fake forge does not
+  # serve it; left due, it raises its own offline wake whenever a bounded run
+  # reaches it.
+  date +%s > "$home/state/.pr-reconcile-last"
   rc=0
   with_home "$home" env FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 \
     "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 15 > "$home/watcher.out" 2> "$home/watcher.err" || rc=$?
