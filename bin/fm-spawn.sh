@@ -449,8 +449,8 @@
 #   signed in. config/claude-account may declare several named Claude
 #   accounts; a Claude launch then takes --account <name> when given, a
 #   relaunch the named account its task record names while it is still
-#   declared, signed in, and not exhausted_now, and otherwise the declared
-#   first declared account above a 15% quota margin, else the one
+#   declared, signed in, and not exhausted_now, and otherwise the first
+#   declared account above a 15% quota margin, else the one
 #   quota-axi's spend priority says to use first. A pinned Claude
 #   launch sheds the environment credentials Claude ranks above the root's
 #   login; a pinned Pi launch needs --model <provider>/<id> for a declared
