@@ -379,15 +379,14 @@ seed_env() {
 # runner and more on a loaded Mac, and one spawn makes dozens of them, so a fixed
 # total bound measures the runner rather than the operation. Wait instead while
 # the operation keeps starting remote calls: return 0 once <reached-command>
-# succeeds, 1 if <pid> exits first (pass - when the exit is what is awaited),
-# and 2 when no new remote call starts for REMOTE_STALL_SECS, a generous bound
-# for any single call in this suite.
+# succeeds, 1 if <pid> exits first, and 2 when no new remote call starts for
+# REMOTE_STALL_SECS, a generous bound for any single call in this suite.
 REMOTE_STALL_SECS=30
-await_remote_progress() { # <pid|-> <reached-command...>
+await_remote_progress() { # <pid> <reached-command...>
   local pid=$1 count last='' since=$SECONDS
   shift
   until "$@"; do
-    if [ "$pid" != - ] && ! kill -0 "$pid" 2>/dev/null; then
+    if ! kill -0 "$pid" 2>/dev/null; then
       return 1
     fi
     count=$(cat "$SSH_COUNT" 2>/dev/null || true)
@@ -1035,8 +1034,9 @@ FM_FAKE_SSH_MODE=inherit-block remote_env "$ROOT/bin/fm-spawn.sh" ios --secondma
   > "$TMP_ROOT/spawn-concurrent.out" 2>&1 &
 spawn_concurrent=$!
 # Earlier inherited files traverse the worker before captain-shared.md.
-await_remote_progress "$spawn_concurrent" test -f "$TMP_ROOT/inherit.entered"
-case $? in
+rc=0
+await_remote_progress "$spawn_concurrent" test -f "$TMP_ROOT/inherit.entered" || rc=$?
+case $rc in
   1) fail "remote spawn exited before its blocked inheritance write" ;;
   2) fail "remote spawn stalled before its blocked inheritance write" ;;
 esac
@@ -1142,8 +1142,9 @@ EOF
 FM_FAKE_SSH_MODE=inherit-block remote_env "$ROOT/bin/fm-config-push.sh" \
   > "$TMP_ROOT/config-concurrent-first.out" 2>&1 &
 config_first=$!
-await_remote_progress "$config_first" test -f "$TMP_ROOT/inherit.entered"
-case $? in
+rc=0
+await_remote_progress "$config_first" test -f "$TMP_ROOT/inherit.entered" || rc=$?
+case $rc in
   1) fail "first inheritance transaction exited before its blocked write" ;;
   2) fail "first inheritance transaction stalled before its blocked write" ;;
 esac
@@ -1346,12 +1347,26 @@ FM_STATE_OVERRIDE="$WATCH_STATE" FM_SECONDMATE_LIVENESS_SECS=1 FM_POLL=1 \
   remote_env exec "$ROOT/bin/fm-watch.sh" \
   > "$TMP_ROOT/watch-liveness.out" 2> "$TMP_ROOT/watch-liveness.err" &
 watch_pid=$!
-# The relaunch is a guarded remote spawn, so the watcher exits on its wake only
-# after that whole chain of remote calls; it must then exit within the bound.
-if ! await_remote_progress - process_exited "$watch_pid"; then
+# The relaunch is a guarded remote spawn, so the watcher queues its wake only
+# after that whole chain of remote calls. Its liveness probes keep calling the
+# remote, so the exit after the wake is bounded on its own.
+relaunch_wake_queued() {
+  grep -F $'\tcheck\tsecondmate-relaunch-ios-' "$WATCH_STATE/.wake-queue" >/dev/null 2>&1
+}
+rc=0
+await_remote_progress "$watch_pid" relaunch_wake_queued || rc=$?
+if [ "$rc" -eq 2 ]; then
   kill "$watch_pid" 2>/dev/null || true
-  fail "the watcher did not exit on its auto-relaunch wake within ${REMOTE_STALL_SECS}s of its last remote call: $(cat "$TMP_ROOT/watch-liveness.out" "$TMP_ROOT/watch-liveness.err" 2>/dev/null)"
+  fail "the watcher stalled before its auto-relaunch wake: $(cat "$TMP_ROOT/watch-liveness.out" "$TMP_ROOT/watch-liveness.err" 2>/dev/null)"
 fi
+since=$SECONDS
+while ! process_exited "$watch_pid"; do
+  if [ $((SECONDS - since)) -ge "$REMOTE_STALL_SECS" ]; then
+    kill "$watch_pid" 2>/dev/null || true
+    fail "the watcher did not exit on its auto-relaunch wake within ${REMOTE_STALL_SECS}s: $(cat "$TMP_ROOT/watch-liveness.out" "$TMP_ROOT/watch-liveness.err" 2>/dev/null)"
+  fi
+  sleep 0.02
+done
 wait "$watch_pid" \
   || fail "the liveness watcher leg exited non-zero: $(cat "$TMP_ROOT/watch-liveness.err")"
 watch_pid=''
@@ -1613,8 +1628,9 @@ FM_FAKE_SSH_MODE=launch-block remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmat
   > "$TMP_ROOT/spawn-retirement.out" 2>&1 &
 spawn_retirement_pid=$!
 # The respawn performs readiness and inheritance jobs before launch.
-await_remote_progress "$spawn_retirement_pid" test -f "$TMP_ROOT/launch.entered"
-case $? in
+rc=0
+await_remote_progress "$spawn_retirement_pid" test -f "$TMP_ROOT/launch.entered" || rc=$?
+case $rc in
   1) fail "remote respawn exited before its blocked launch" ;;
   2) fail "remote respawn stalled before its blocked launch" ;;
 esac
