@@ -108,6 +108,10 @@
 # infrastructure every lane shares - the no-mistakes daemon and the worktree pool
 # their own slot came from - so ship and scout cannot drift apart. A secondmate
 # charter omits it: that home allocates and returns slots for its own crewmates.
+# They likewise share one shared-machine rule: never kill by name or pattern,
+# run heavy suites, builds, and evals through bin/fm-run-slot.sh (rendered with
+# this home's FM_HOME and absolute script path), and run only affected frontend
+# test files. A secondmate charter omits it; its crewmates' briefs carry it.
 # --mode, --forge, and --shape are refused on scout and secondmate scaffolds: a
 # scout's deliverable is a report rather than a merge, and a charter is not a
 # delivery contract.
@@ -680,6 +684,23 @@ IFS= read -r -d '' SHARED_NO_CD_RULE <<'EOF' || true
 EOF
 SHARED_NO_CD_RULE=${SHARED_NO_CD_RULE%$'\n'}
 
+# One shared string keeps the ship and scout shared-machine rule identical.
+# bin/fm-run-slot.sh owns the slot queue the rule points workers at.
+RUN_SLOT_CMD="FM_HOME=$(shell_quote "$FM_HOME") $(shell_quote "$FM_ROOT/bin/fm-run-slot.sh")"
+IFS= read -r -d '' SHARED_MACHINE_RULE <<EOF || true
+9. This machine is shared by many workers running as the same user.
+   - Never use \`pkill\`, \`killall\`, or \`kill \$(pgrep ...)\` by name or pattern; stop only processes you started, by the PID you recorded when you started them.
+     On macOS, \`pkill -f "pattern" -U 501\` treats \`-U\` and \`501\` as extra patterns and kills every process whose command line contains them, including other workers' runs.
+   - Run every heavy test suite, build, or eval in a run slot instead of watching the load average:
+     \`$RUN_SLOT_CMD acquire --class cpu --wait -- <command...>\`
+     It waits its first-come-first-served turn, runs the command, and frees the slot when the command exits or dies.
+     Use \`--class net\` instead for an eval that mostly waits on model or network calls.
+     \`$RUN_SLOT_CMD status\` shows who holds and who waits; a queued wait can be long, so run it like any long command.
+   - Never run a frontend's full unit or integration suite locally; run the affected test files with \`--maxWorkers=2\` in a run slot and let CI run the rest.
+   Pass this rule to every sub-agent you launch.
+EOF
+SHARED_MACHINE_RULE=${SHARED_MACHINE_RULE%$'\n'}
+
 if [ -n "$BASE_BRANCH" ]; then
   SETUP_BASE="You are in a disposable git worktree of $REPO, at a detached HEAD on a clean copy of its base branch.
 Base branch: $BASE_BRANCH"
@@ -732,6 +753,7 @@ $CREWMATE_PAUSE_INSTRUCTIONS
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 $SHARED_INFRA_RULE
 $SHARED_NO_CD_RULE
+$SHARED_MACHINE_RULE
 
 $WAIT_BLOCK$INBOX_SECTION
 
@@ -817,6 +839,7 @@ $ASK_USER_BLOCK
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 $SHARED_INFRA_RULE
 $SHARED_NO_CD_RULE
+$SHARED_MACHINE_RULE
 
 $WAIT_BLOCK$INBOX_SECTION
 
