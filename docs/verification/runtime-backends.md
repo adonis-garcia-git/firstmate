@@ -717,7 +717,7 @@ ok - quota-axi 0.1.55: an empty Claude root reads as unreadable in a valid snaps
 ```
 
 The positive read needs a real login, so it is not in the guard.
-On 2026-11-06 on Claude Code 2.1.319 and quota-axi 0.1.55 on macOS, a signed-in Team seat root and a signed-in Max root that reported no 5-hour window answered with quota-axi's all-models `spendPriority`, which the choice ranks by:
+On 2026-11-06 on Claude Code 2.1.319 and quota-axi 0.1.55 on macOS, a signed-in Team seat root and a signed-in Max root that reported no 5-hour window answered with the session and weekly windows the 15% margin reads and quota-axi's all-models `spendPriority`, which the choice falls back to when no account is above the margin:
 
 ```sh
 bash -c '. bin/fm-worker-account-lib.sh; fm_worker_account_claude_quota "$HOME/.claude-team"; fm_worker_account_claude_quota "$HOME/.claude-personal"'

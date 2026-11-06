@@ -435,25 +435,25 @@ test_local_secondmate_reads_the_launching_home_pin() {
   pass "a local secondmate reads the launching home's pin and its own home's file is never inherited over"
 }
 
-test_named_accounts_choose_by_spend_priority_with_a_margin() {
+test_named_accounts_choose_the_first_declared_above_the_margin() {
   local out rc id=acct-named personal
   new_case named claude
   personal="$HOME_DIR/user-home/.claude"
   signed_in_claude_root "$personal"
   signed_in_claude_root "$CASE/work"
-  named_accounts "personal | ordinary | 20" "" "	work |	$CASE/work	| 6.25  "
-  quota_reading "$personal" "80 80 90 through_reset 0.4"
-  quota_reading "$CASE/work" "60 90 60 through_reset 1.8"
+  named_accounts "	work |	$CASE/work	| 6.25  " "" "personal | ordinary | 20"
+  quota_reading "$CASE/work" "60 90 60 through_reset 0.4"
+  quota_reading "$personal" "80 80 90 through_reset 1.8"
   out=$(spawn_ship "$id-team"); rc=$?
   expect_code 0 "$rc" "a spawn over two named Claude accounts should succeed: $out"
-  assert_contains "$out" "account=work account_root=$CASE/work" "the smaller seat with headroom and the higher spend priority should win over the larger plan"
-  assert_contains "$out" "notice: chose Claude account work by spend priority, quota-axi's use-it-before-reset reading, as the highest spend priority among accounts above the 15% margin" \
-    "the spawn should say why it chose"
-  assert_contains "$out" "personal priority 0.4 (session 80%, week 90%)" "the notice should show the larger plan's priority"
-  assert_contains "$out" "work priority 1.8 (session 90%, week 60%)" "the notice should show the smaller seat's priority"
+  assert_contains "$out" "account=work account_root=$CASE/work" "the first declared seat with headroom should win despite the other's higher spend priority"
+  assert_contains "$out" "notice: chose Claude account work as the first declared account above the 15% margin" \
+    "the spawn should say which rule chose"
+  assert_contains "$out" "work priority 0.4 (session 90%, week 60%)" "the notice should show the seat's priority and windows"
+  assert_contains "$out" "personal priority 1.8 (session 80%, week 90%)" "the notice should show the other account's priority and windows"
   [ "$(grep '^account' "$HOME_DIR/state/$id-team.meta")" = "account=work"$'\n'"account_root=$CASE/work" ] ||
     fail "the task record should name the chosen account and its root: $(grep '^account' "$HOME_DIR/state/$id-team.meta")"
-  [ "$(cat "$CASE/quota-reads")" = "unset"$'\n'"$CASE/work" ] ||
+  [ "$(cat "$CASE/quota-reads")" = "$CASE/work"$'\n'"unset" ] ||
     fail "each declared root should be read once, under its own root only: $(cat "$CASE/quota-reads")"
   run_pane
   assert_grep "CLAUDE_CONFIG_DIR=$CASE/work" "$CASE/claude-worker" "the worker should run under the chosen root"
@@ -463,6 +463,8 @@ test_named_accounts_choose_by_spend_priority_with_a_margin() {
   out=$(spawn_ship "$id-session-margin"); rc=$?
   expect_code 0 "$rc" "a spawn should follow the margin: $out"
   assert_contains "$out" "account=personal account_root=ordinary" "a seat with 15% left in its 5-hour window should yield despite its higher priority"
+  assert_contains "$out" "notice: chose Claude account personal as the first declared account above the 15% margin" \
+    "the notice should say the next declared account was chosen"
   assert_contains "$out" "work priority 5 (session 15%, week 60%; at or under the 15% margin)" "the notice should say the seat is at the margin"
   run_pane
   assert_grep "CLAUDE_CONFIG_DIR=unset" "$CASE/claude-worker" "the worker should run on the ordinary account it was given"
@@ -472,58 +474,53 @@ test_named_accounts_choose_by_spend_priority_with_a_margin() {
   expect_code 0 "$rc" "a spawn should follow the weekly margin: $out"
   assert_contains "$out" "account=personal account_root=ordinary" "a seat near its weekly limit should yield"
 
-  quota_reading "$CASE/work" "60 100 60 through_reset 2.2"
+  quota_reading "$CASE/work" "60 100 60 through_reset 0.1"
   out=$(spawn_ship "$id-reset"); rc=$?
   expect_code 0 "$rc" "a spawn after the seat's 5-hour reset should succeed: $out"
-  assert_contains "$out" "account=work account_root=$CASE/work" "the seat should win again once its window resets"
+  assert_contains "$out" "account=work account_root=$CASE/work" "the seat should win again once its window resets, even with the lower priority"
 
-  quota_reading "$CASE/work" "100 100 100 through_reset unknown"
-  out=$(spawn_ship "$id-untouched"); rc=$?
-  expect_code 0 "$rc" "a spawn over an untouched seat should succeed: $out"
-  assert_contains "$out" "account=work account_root=$CASE/work" "an untouched seat after its weekly reset should rank by the derived priority"
-  assert_contains "$out" "work priority 1 derived from its windows (session 100%, week 100%)" \
-    "the notice should say the priority was derived when quota-axi publishes none"
-
-  quota_reading "$personal" "10 10 80 through_reset 0.2"
-  quota_reading "$CASE/work" "12 12 70 through_reset 3"
-  out=$(spawn_ship "$id-both-margin"); rc=$?
-  expect_code 0 "$rc" "a spawn with every account at the margin should still choose: $out"
-  assert_contains "$out" "account=work account_root=$CASE/work" "with every account at the margin the higher priority should win"
-  assert_contains "$out" "as no account is above the 15% margin, so the highest spend priority" "the notice should say why"
-
-  quota_reading "$personal" "50 50 50 through_reset unknown"
-  quota_reading "$CASE/work" "40 40 40 through_reset -2"
-  out=$(spawn_ship "$id-unknown"); rc=$?
-  expect_code 0 "$rc" "an unknown priority should not stop the spawn: $out"
-  assert_contains "$out" "account=work account_root=$CASE/work" "a known priority, even overdrawn, should rank before an unknown one"
-  assert_contains "$out" "personal priority unknown (session 50%, week 50%)" "the notice should say the priority is unknown"
-
-  quota_reading "$personal" "50 50 50 through_reset 0.3"
   quota_reading "$CASE/work" "stale 5 60 -60 86400"
   out=$(spawn_ship "$id-stale-reset"); rc=$?
   expect_code 0 "$rc" "a stale seat whose 5-hour window has since reset should succeed: $out"
-  assert_contains "$out" "account=work account_root=$CASE/work" "a held window whose reset has passed should count as full again"
+  assert_contains "$out" "account=work account_root=$CASE/work" "a held window whose reset has passed should put the seat back above the margin"
   assert_contains "$out" "work priority 3.733" "the stale seat's priority should be derived from its held windows"
   assert_contains "$out" "derived from its windows (stale: Claude quota endpoint rate limited; session 100%, week 60%)" \
     "the notice should mark the reading stale and count the reset window as full"
 
+  quota_reading "$CASE/work" "100 100 100 through_reset unknown"
+  out=$(spawn_ship "$id-untouched"); rc=$?
+  expect_code 0 "$rc" "a spawn over an untouched seat should succeed: $out"
+  assert_contains "$out" "account=work account_root=$CASE/work" "an untouched seat should take the worker"
+  assert_contains "$out" "work priority 1 derived from its windows (session 100%, week 100%)" \
+    "the notice should say the priority was derived when quota-axi publishes none"
+
+  quota_reading "$CASE/work" "12 12 70 through_reset 0.2"
+  quota_reading "$personal" "10 10 80 through_reset 3"
+  out=$(spawn_ship "$id-both-margin"); rc=$?
+  expect_code 0 "$rc" "a spawn with every account at the margin should still choose: $out"
+  assert_contains "$out" "account=personal account_root=ordinary" "with every account at the margin the higher spend priority should win over declaration order"
+  assert_contains "$out" "as no account is above the 15% margin, so the highest spend priority" "the notice should say why"
+
+  quota_reading "$CASE/work" "12 12 12 through_reset -2"
+  quota_reading "$personal" "10 10 10 through_reset unknown"
+  out=$(spawn_ship "$id-unknown"); rc=$?
+  expect_code 0 "$rc" "an unknown priority should not stop the spawn: $out"
+  assert_contains "$out" "account=work account_root=$CASE/work" "a known priority, even overdrawn, should rank before an unknown one"
+  assert_contains "$out" "personal priority unknown (session 10%, week 10%; at or under the 15% margin)" "the notice should say the priority is unknown"
+
+  quota_reading "$CASE/work" "12 12 62 through_reset 5"
   quota_reading "$personal" "87 none 87 projected_exhaustion -0.8062"
-  quota_reading "$CASE/work" "62 94 62 through_reset 2.3127"
   out=$(spawn_ship "$id-no-session"); rc=$?
   expect_code 0 "$rc" "a spawn over an account that reports no 5-hour window should succeed: $out"
-  assert_contains "$out" "account=work account_root=$CASE/work" "the seat on track to forfeit allowance should win over an account draining toward exhaustion"
-  assert_contains "$out" "personal priority -0.8062 (session ?%, week 87%)" "the notice should show the missing 5-hour window as unknown"
-  quota_reading "$CASE/work" "12 12 62 through_reset 5"
-  out=$(spawn_ship "$id-no-session-margin"); rc=$?
-  expect_code 0 "$rc" "a spawn should follow the margin: $out"
   assert_contains "$out" "account=personal account_root=ordinary" "a 5-hour window the account does not report must not put it at the margin"
+  assert_contains "$out" "personal priority -0.8062 (session ?%, week 87%)" "the notice should show the missing 5-hour window as unknown"
 
-  quota_reading "$personal" "20 20 20"
-  quota_reading "$CASE/work" "64 64 64"
+  quota_reading "$CASE/work" "12 12 12"
+  quota_reading "$personal" "10 10 10"
   out=$(spawn_ship "$id-tie"); rc=$?
   expect_code 0 "$rc" "a tied spawn should succeed: $out"
-  assert_contains "$out" "account=personal account_root=ordinary" "a tie should go to the account declared first"
-  pass "several named Claude accounts are chosen by spend priority, accounts at the 15% margin last, ties to the first declared"
+  assert_contains "$out" "account=work account_root=$CASE/work" "a tie should go to the account declared first"
+  pass "several named Claude accounts take the first declared above the 15% margin, else the highest spend priority, ties to the first declared"
 }
 
 test_named_accounts_skip_an_account_that_cannot_take_the_worker() {
@@ -700,7 +697,7 @@ test_recorded_named_account_is_kept_only_while_usable() {
   expect_code 0 "$rc" "an undeclared recorded account should yield: $out"
   assert_contains "$out" "account gone, which is no longer declared by name in config/claude-account" \
     "the notice should say the recorded account is no longer declared"
-  assert_contains "$out" "two"$'\t'"quota" "the quota choice should take the worker"
+  assert_contains "$out" "one"$'\t'"quota" "the quota choice should take the first declared account above the margin"
 
   printf '%s\n' "$CASE/two" > "$HOME_DIR/config/claude-account"
   out=$(select_recorded "$CASE/one" ""); rc=$?
@@ -834,7 +831,7 @@ test_raw_claude_command_receives_the_pin
 test_raw_claude_account_override_refuses_under_a_pin
 test_raw_claude_account_override_is_kept_without_a_pin
 test_local_secondmate_reads_the_launching_home_pin
-test_named_accounts_choose_by_spend_priority_with_a_margin
+test_named_accounts_choose_the_first_declared_above_the_margin
 test_named_accounts_skip_an_account_that_cannot_take_the_worker
 test_explicit_account_and_named_file_refusals
 test_recorded_named_account_is_kept_only_while_usable

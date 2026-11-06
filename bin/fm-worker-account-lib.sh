@@ -41,21 +41,24 @@
 #      (account_provider=) are never kept, so with no file a relaunch takes
 #      the ambient account and with a single-line pin the current pin;
 #   3. the only declared account (either form);
-#   4. among several declared accounts, the one quota-axi says to spend
-#      first: the highest all-models selection.spendPriority, quota-axi's
-#      use-it-before-reset reading (positive means allowance is on track to
-#      reach its reset unused). An account with FM_WORKER_ACCOUNT_MARGIN_PERCENT
-#      (15) or less left in its 5-hour or weekly window (the lower of those
-#      it reports) ranks after every account with headroom, so new workers
-#      move off an account before it runs out. When quota-axi
-#      publishes no scalar (a stale reading, or every window unused and
-#      untriggered) the same formula is derived from the windows it holds,
-#      counting a held window whose reset has since passed as full again; an
-#      account with no priority at all ranks after those that have one, by
-#      the lower of its windows. The weight does not enter the choice. Each
-#      root is read with its own CLAUDE_CONFIG_DIR (unset for ordinary) in the
-#      same cleared environment as the sign-in check, so an ambient account
-#      cannot answer for another. An unusable root, an unreadable reading, and
+#   4. among several declared accounts, the first declared whose 5-hour and
+#      weekly windows are both above a 15% margin (the lower of the windows
+#      the reading reports; a window it does not report does not count
+#      against it), so declaration order is the preference order: new
+#      workers move off an account near its limit and return to it as soon
+#      as a reset puts it back above the margin. Only when no account is
+#      above the margin does the choice fall to the highest all-models
+#      selection.spendPriority, quota-axi's use-it-before-reset reading
+#      (positive means allowance is on track to reach its reset unused).
+#      When quota-axi publishes no scalar (a stale reading, or every window
+#      unused and untriggered) the same formula is derived from the windows
+#      it holds, counting a held window whose reset has since passed as full
+#      again; an account with no priority at all ranks after those that have
+#      one, by the lower of its windows. A held window whose reset has passed
+#      also counts as full for the margin. The weight does not enter the
+#      choice. Each root is read with its own CLAUDE_CONFIG_DIR (unset for
+#      ordinary) in the same cleared environment as the sign-in check, so an
+#      ambient account cannot answer for another. An unusable root, an unreadable reading, and
 #      an exhausted account are skipped and named; a tie goes to the account
 #      declared first; the best candidate that also passes the sign-in check
 #      wins. When none qualifies the launch refuses and names every account's
@@ -102,7 +105,6 @@
 
 FM_WORKER_ACCOUNT_CHECK_SECONDS=${FM_WORKER_ACCOUNT_CHECK_SECONDS:-30}
 FM_WORKER_ACCOUNT_QUOTA_SECONDS=${FM_WORKER_ACCOUNT_QUOTA_SECONDS:-30}
-FM_WORKER_ACCOUNT_MARGIN_PERCENT=${FM_WORKER_ACCOUNT_MARGIN_PERCENT:-15}
 
 # Credentials Claude Code ranks above the /login stored in its config root
 # (code.claude.com/docs/en/authentication, "Authentication precedence"; the
@@ -552,7 +554,7 @@ fm_worker_account_claude_quota() {
 fm_worker_account_claude_choose() {
   local executable=$1 lines=$2 setting=${3:-config/claude-account} line name declared root reading kind pct runway session weekly
   local priority basis tier unknown key fallback detail reason remedy index=0 chosen='' why='' notice
-  local margin=$FM_WORKER_ACCOUNT_MARGIN_PERCENT
+  local margin=15
   local -a ranked=() readings=() skipped=()
   if ! command -v quota-axi >/dev/null 2>&1; then
     echo "error: $setting declares several Claude accounts, and choosing among them needs quota-axi, which is not installed; install it, or pass --account <name> to choose one" >&2
@@ -585,13 +587,18 @@ fm_worker_account_claude_choose() {
       skipped+=("$name: out of quota (session $session%, week $weekly%)")
       continue
     fi
-    # Rank keys: margin tier (0 when the lower of its windows is above the
-    # margin, else 1), whether the priority is unknown, the priority, and for
-    # an unknown priority the lower window, then declaration order.
-    read -r tier unknown key fallback <<<"$(LC_ALL=C awk -v m="$margin" -v p="$priority" -v pct="$pct" 'BEGIN {
-      t = (pct + 0 > m + 0) ? 0 : 1
-      if (p == "?") print t, 1, 0, pct + 0
-      else print t, 0, p + 0, 0
+    # Rank keys: margin tier (0 when the lower of its reported windows is
+    # above the margin, else 1); within tier 0 declaration order alone; within
+    # tier 1 whether the priority is unknown, the priority, and for an unknown
+    # priority the lower window, then declaration order.
+    read -r tier unknown key fallback <<<"$(LC_ALL=C awk -v m="$margin" -v p="$priority" -v pct="$pct" -v s="$session" -v w="$weekly" 'BEGIN {
+      low = ""
+      if (s != "?") low = s + 0
+      if (w != "?" && (low == "" || w + 0 < low)) low = w + 0
+      if (low == "") low = pct + 0
+      if (low > m + 0) print 0, 0, 0, 0
+      else if (p == "?") print 1, 1, 0, pct + 0
+      else print 1, 0, p + 0, 0
     }')"
     detail="session $session%, week $weekly%"
     [ "$kind" != stale ] || detail="stale: $runway; $detail"
@@ -608,8 +615,7 @@ fm_worker_account_claude_choose() {
     if fm_worker_account_check claude "$declared" "$root" "$executable" 2>/dev/null; then
       chosen=$name$'\t'$declared$'\t'$root
       case "$tier$unknown" in
-      00) why="the highest spend priority among accounts above the $margin% margin" ;;
-      01) why="no account above the $margin% margin has a spend priority, so the most remaining quota among them" ;;
+      0*) why="the first declared account above the $margin% margin" ;;
       10) why="no account is above the $margin% margin, so the highest spend priority" ;;
       *) why="no account is above the $margin% margin or has a spend priority, so the most remaining quota" ;;
       esac
@@ -623,7 +629,7 @@ fm_worker_account_claude_choose() {
     echo "error: $setting declares several Claude accounts, but none can take this worker: ${reason%; }; fix the account named, or pass --account <name> to choose one explicitly" >&2
     return 1
   fi
-  notice="notice: chose Claude account ${chosen%%$'\t'*} by spend priority, quota-axi's use-it-before-reset reading, as $why: $(printf '%s; ' "${readings[@]}")"
+  notice="notice: chose Claude account ${chosen%%$'\t'*} as $why: $(printf '%s; ' "${readings[@]}")"
   notice=${notice%; }
   [ "${#skipped[@]}" -eq 0 ] || notice="$notice; skipped: $(printf '%s; ' "${skipped[@]}")"
   echo "${notice%; }" >&2
