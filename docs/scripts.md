@@ -156,6 +156,7 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-external-review-lib.sh` | Shared readers for the forge=external review tool adapter, ready-URL pattern, backup remote, and remote URLs |
 | `fm-pr-merge.sh`         | Record PR metadata, merge a task's canonical full GitHub, GitLab, or Forgejo URL, refuse a Gerrit change because firstmate never submits one, then refuse an outcome it cannot prove landed or queued |
 | `fm-pr-reconcile.sh`     | Throttled, batched reconcile of recorded PRs against GitHub, queuing check wakes for PRs merged or closed externally |
+| `fm-pool-capacity.sh`    | Read-only report of free isolated copies in each Treehouse pool this home's tasks use; its `check` mode queues a check wake when a pool is nearly full |
 | `fm-pr-state.sh`         | Read-only: print one line per GitHub pull-request blocker it can see, reporting on checks that have reported rather than verdicting merge-readiness |
 | `fm-pr-reviewers.sh`     | Read-only: suggest reviewers from GitHub's own author mapping of recent commits on a pull request's changed files, never requesting one |
 | `fm-merge-outcome-lib.sh` | Publish a confirmed merge's durable, role-routed supervision outcome                 |

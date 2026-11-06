@@ -3792,6 +3792,15 @@ EOF
       touch "$STATE/.last-check"
       wake "$(printf '%s\n' "$recon_out" | head -1)"
     fi
+    # Pool-capacity warning: bin/fm-pool-capacity.sh self-throttles, queues
+    # its own durable check wake for a nearly full Treehouse pool, and prints
+    # that payload, so any output here only needs surfacing.
+    pool_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-pool-capacity.sh" check 2>/dev/null) || pool_out=""
+    if [ -n "$pool_out" ]; then
+      touch "$STATE/.last-check"
+      wake "$(printf '%s\n' "$pool_out" | head -1)"
+    fi
     touch "$STATE/.last-check"
     if [ -n "$contribution_check_output" ]; then
       wake "$contribution_check_output"
