@@ -2649,9 +2649,40 @@ Enter to confirm . Esc to cancel'
   "$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-lp >/dev/null
   local out; out=$(run_crew_state "$d" feat-lp)
   assert_not_contains "$out" "state: working" "a launch parked on its trust dialog must never read working"
-  assert_contains "$out" "state: unknown" "a parked launch reads unknown, not busy or idle"
-  assert_contains "$out" "launch-prompt" "the unknown verdict names the launch-prompt backstop as its source"
+  assert_contains "$out" "state: blocked" "a parked launch reads blocked, not busy, idle, or unknown"
+  assert_contains "$out" "launch-prompt: parked on Claude workspace-trust dialog" "the blocked verdict names the prompt the launch is parked on"
   pass "a launch parked on a recognized interactive prompt never reads working, closing the absorb path a stale watcher poll depends on"
+}
+
+# A worker launched on an account root that never finished Claude's first-run
+# setup parks on the theme picker before its brief starts. The busy record is
+# still the fm-spawn seed, so without the onboarding signature this read
+# `working · harness busy (fm-spawn)` for as long as nobody looked.
+test_no_run_first_run_theme_picker_is_blocked() {
+  reset_fakes
+  local d; d=$(new_case launch-prompt-theme)
+  make_repo_on_branch "$d/wt" fm/feat-theme
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-theme.meta" "window=fm:fm-feat-theme" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  FM_FAKE_BUSY_TEXT=' Welcome to Claude Code v2.1.319
+
+ Choose the text style that looks best with your terminal
+ To change this later, run /theme
+
+     Auto (match terminal)
+ ❯ ✔ Dark mode
+     Light mode
+     Dark mode (colorblind-friendly)'
+  export FM_FAKE_BUSY_TEXT
+  "$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-theme >/dev/null
+  local out; out=$(run_crew_state "$d" feat-theme)
+  assert_not_contains "$out" "state: working" "a launch parked on the first-run theme picker must never read working"
+  assert_contains "$out" "state: blocked · source: pane · launch-prompt: parked on Claude first-run theme picker" \
+    "a launch parked on the first-run theme picker reads blocked and names the screen"
+  pass "a launch parked on Claude's first-run theme picker reads blocked, naming the screen"
 }
 
 # A converted adapter must NOT read working from rendered footer text: the
@@ -5936,6 +5967,7 @@ test_external_review_done_reads_ready
 test_no_run_busy_pane
 test_no_run_overview_zero_branch_falls_through
 test_no_run_launch_prompt_parked_is_not_working
+test_no_run_first_run_theme_picker_is_blocked
 test_no_run_footer_text_alone_is_not_working
 test_no_run_grok_uses_isolated_fallback
 test_no_run_herdr_unknown_uses_backend_capture

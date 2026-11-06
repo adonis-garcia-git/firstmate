@@ -496,7 +496,9 @@ hash_pane() {
 # <tail40> is the same bounded capture already read for hashing and is passed
 # into the contract's harness-scoped rendered-text checks: the Grok/Rovo/AGY
 # busy fallbacks and the launch-prompt backstop that keeps a launch pinned at
-# its fm-spawn seed from reading as provably working.
+# its fm-spawn seed from reading as provably working. The full verdict is left
+# in WINDOW_BUSY_VERDICT for the caller.
+WINDOW_BUSY_VERDICT=''
 window_is_busy() {  # <window> <tail40>
   local w=$1 tail40=$2 task meta verdict
   task=$(window_to_task "$w" "$STATE")
@@ -507,6 +509,7 @@ window_is_busy() {  # <window> <tail40>
     verdict=$(fm_busy_classify "$(window_backend "$w")" "$w" "$(window_harness "$w")" \
       "${task:-unknown}" "$STATE" "$tail40")
   fi
+  WINDOW_BUSY_VERDICT=$verdict
   [ "${verdict%% *}" = busy ]
 }
 
@@ -3961,9 +3964,9 @@ EOF
     watcher_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" || continue
     tail40=$WATCHER_CAPTURE
     # The matcher is already defined in this shell. It reads the capture this
-    # poll already takes, and a miss drops a name the away daemon saved.
+    # poll already takes, and a miss (after the launch-prompt check below)
+    # drops a name the away daemon saved.
     dialog=$(fm_composer_blocking_dialog "$tail40") || dialog=
-    [ -n "$dialog" ] || clear_dialog_suffix "$task"
     h=$(printf '%s' "$tail40" | hash_pane)
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"
@@ -3978,6 +3981,12 @@ EOF
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
     if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+    # A launch parked on its harness's own launch prompt (a trust dialog or a
+    # first-run screen) names that prompt on its stale wake the same way.
+    if [ -z "$dialog" ] && [ "$WINDOW_BUSY_VERDICT" = 'unknown launch-prompt' ]; then
+      dialog=$(printf '%s' "$tail40" | fm_busy_launch_prompt_name "$(window_harness "$w")") || dialog=
+    fi
+    [ -n "$dialog" ] || clear_dialog_suffix "$task"
     if [ -n "$task" ] && [ "$busy_now" -ne 0 ]; then
       wait_over_steer "$w" "$task" "$kind" "$last"
     fi

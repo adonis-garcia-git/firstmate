@@ -1168,14 +1168,14 @@ Either account may run any work.
 A Claude launch takes its account in this order:
 
 1. An explicit `--account <name>` on `bin/fm-spawn.sh` or `bin/fm-control.sh relaunch`, which must name a declared account.
-2. On a relaunch, the named account the task's own record names, while it is still declared by name here, is signed in, and, when another account is declared, quota-axi does not read it as `exhausted_now` on the 5-hour or weekly window. A reading that cannot be taken or refreshed keeps it. Otherwise the spawn prints a `notice:` line naming that account and why the worker moved off it, and the choice continues below. A record from a single-line pin is never kept: with no file a relaunch takes the ambient account like any launch, and with a single-line pin it takes the current pin.
+2. On a relaunch, the named account the task's own record names, while it is still declared by name here, is signed in and has finished first-run setup, and, when another account is declared, quota-axi does not read it as `exhausted_now` on the 5-hour or weekly window. A reading that cannot be taken or refreshed keeps it. Otherwise the spawn prints a `notice:` line naming that account and why the worker moved off it, and the choice continues below. A record from a single-line pin is never kept: with no file a relaunch takes the ambient account like any launch, and with a single-line pin it takes the current pin.
 3. The only declared account, when there is one.
 4. Otherwise, the account whose weight times its remaining quota is highest.
 
 Remaining quota is quota-axi's all-models `effectivePercentRemaining`, the lower of the 5-hour session and weekly windows.
 When quota-axi cannot refresh a reading (for example, Claude's quota endpoint is rate-limited) but still holds both windows, the choice ranks that account by the lower of those stale windows, and the notice marks the reading stale.
 Each root is read with its own `CLAUDE_CONFIG_DIR`, unset for `ordinary`, in the same cleared environment as the sign-in check, so one account's reading never answers for another.
-An account whose root is missing, whose quota cannot be read, whose quota is exhausted, or that is not signed in is skipped and named.
+An account whose root is missing, whose quota cannot be read, whose quota is exhausted, that is not signed in, or that has not finished Claude's first-run setup is skipped and named.
 A tie goes to the account declared first.
 The spawn prints a `notice:` line with every account's weighted reading.
 When no account qualifies, the launch refuses and names each account's reason rather than guessing, and `--account` still selects one explicitly.
@@ -1194,6 +1194,8 @@ The refusal names the variable; remove that assignment from the raw command, or 
 
 Before any worker endpoint, local copy, or task record exists, and before a relaunch stops the running worker, Firstmate asks the runner itself whether the selected account is signed in: `claude auth status` for Claude, and `pi auth check --provider <provider> --json --no-refresh` for Pi, falling back to `pi --list-models <provider>` for a provider an extension registers.
 The check runs with only `HOME`, `PATH`, `TMPDIR`, `USER`, `LOGNAME`, and the pinned root in its environment, so a credential variable in firstmate's own environment cannot answer for an empty root.
+A Claude account must also have finished Claude's first-run setup, recorded as `"hasCompletedOnboarding": true` in the root's `.claude.json` (`~/.claude.json` for `ordinary`).
+A root signed in without it, for example through `claude auth login`, opens every launch on the theme picker and the security notes, so it is refused like a signed-out one; run `CLAUDE_CONFIG_DIR=<root> claude` once, pick a theme, accept the security notes, and exit.
 
 A pinned Claude launch also unsets the environment credentials Claude ranks above a stored login, such as `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, and the Bedrock and Vertex switches ([authentication precedence](https://code.claude.com/docs/en/authentication#authentication-precedence)).
 Pi ranks a root's stored logins above environment variables, so a pinned Pi launch unsets nothing.
@@ -1202,7 +1204,7 @@ A home that authenticates Claude through environment credentials on purpose shou
 
 ### Failures, reporting, and inheritance
 
-A malformed file, a root that is not a readable directory, or a signed-out account refuses the launch and names the file to fix; Firstmate never falls back to the ambient account and never changes a global login or copies a credential.
+A malformed file, a root that is not a readable directory, or a signed-out or not-yet-set-up account refuses the launch and names the file to fix; Firstmate never falls back to the ambient account and never changes a global login or copies a credential.
 The spawn prints the account and records the same fields in the task record, so the session-start digest shows which account each worker launched on.
 A single-line pin is `account=<root>`, a named Claude account is `account=<name> account_root=<root>`, and a Pi pin adds `account_provider=`.
 

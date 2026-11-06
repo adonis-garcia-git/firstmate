@@ -90,10 +90,16 @@ new_case() {
   : > "$CASE/launch.log"
 }
 
-# signed_in_claude_root <dir>: a Claude config root holding a stored login.
+# signed_in_claude_root <dir>: a Claude config root holding a stored login
+# that has finished Claude's first-run setup, as a usable worker account does.
+# The ordinary account (~/.claude) keeps that record beside it, in ~/.claude.json.
 signed_in_claude_root() {
   mkdir -p "$1"
   printf '{}\n' > "$1/.credentials.json"
+  case "$1" in
+    */user-home/.claude) printf '{"hasCompletedOnboarding":true}\n' > "$1.json" ;;
+    *) printf '{"hasCompletedOnboarding":true}\n' > "$1/.claude.json" ;;
+  esac
 }
 
 # spawn_ship <id> [fm-spawn args...]: a ship spawn from HOME_DIR whose invoking
@@ -105,7 +111,8 @@ spawn_ship() {
   # Every spawn in a case reuses the one fake pool slot, so retire earlier
   # tasks' records as their cleanup would; one live record owns a slot.
   rm -f "$HOME_DIR/state/"*.meta
-  signed_in_claude_root "$CASE/ambient-claude"
+  mkdir -p "$CASE/ambient-claude"
+  printf '{}\n' > "$CASE/ambient-claude/.credentials.json"
   : > "$CASE/launch.log"
   FM_FAKE_LAUNCH_LOG="$CASE/launch.log" FM_TEST_CLAUDE_CONFIG_DIR="$CASE/ambient-claude" \
     ANTHROPIC_API_KEY=ambient-invoker-key \
@@ -198,6 +205,31 @@ test_claude_pin_refuses_a_signed_out_root_despite_an_ambient_login() {
   assert_refused_before_launch "$id" "$out" "config/claude-account pins Claude workers to $CASE/work, which is not signed in"
   assert_absent "$CASE/work/.claude.json" "a refused spawn must not register trust in the pinned root"
   pass "a Claude pin refuses a signed-out root even when the invoking process has a usable login and API key"
+}
+
+# A root signed in without Claude's first-run setup (for example through
+# `claude auth login`) opens every launch on the theme picker, where an
+# unattended worker parks. The spawn refuses it before anything launches and
+# names the one interactive run that finishes setup.
+test_claude_pin_refuses_a_signed_in_root_that_never_finished_setup() {
+  local out rc id=acct-claude-setup
+  new_case claude-not-set-up claude
+  mkdir -p "$CASE/work"
+  printf '{}\n' > "$CASE/work/.credentials.json"
+  printf '%s\n' "$CASE/work" > "$HOME_DIR/config/claude-account"
+  out=$(spawn_ship "$id"); rc=$?
+  expect_code 1 "$rc" "a Claude pin to a root that never finished first-run setup must refuse"
+  assert_refused_before_launch "$id" "$out" "config/claude-account pins Claude workers to $CASE/work, which has not finished Claude's first-run setup"
+  assert_contains "$out" "run CLAUDE_CONFIG_DIR=$CASE/work claude once, pick a theme and accept the security notes" \
+    "the refusal should name the remedy"
+  printf '{"hasCompletedOnboarding":false,"numStartups":1}\n' > "$CASE/work/.claude.json"
+  out=$(spawn_ship "$id"); rc=$?
+  expect_code 1 "$rc" "a root whose setup is recorded as unfinished must refuse"
+  assert_refused_before_launch "$id" "$out" "which has not finished Claude's first-run setup"
+  printf '{"hasCompletedOnboarding":true,"numStartups":1}\n' > "$CASE/work/.claude.json"
+  out=$(spawn_ship "$id"); rc=$?
+  expect_code 0 "$rc" "the same root should launch once setup is finished: $out"
+  pass "a Claude pin refuses a signed-in root that never finished first-run setup, naming the remedy"
 }
 
 test_claude_ordinary_pin_unsets_the_config_root() {
@@ -738,6 +770,7 @@ test_remote_secondmate_account_override_refuses_locally
 test_absent_pin_keeps_the_launch_unchanged
 test_claude_pin_selects_the_root_and_sheds_ambient_credentials
 test_claude_pin_refuses_a_signed_out_root_despite_an_ambient_login
+test_claude_pin_refuses_a_signed_in_root_that_never_finished_setup
 test_claude_ordinary_pin_unsets_the_config_root
 test_malformed_pins_refuse_before_launch
 test_pi_pin_selects_the_root_and_the_declared_provider

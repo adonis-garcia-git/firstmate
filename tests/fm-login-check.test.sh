@@ -102,11 +102,20 @@ SH
   chmod +x "$home/fakebin/claude"
   printf '%s\n' "$pin" > "$home/config/claude-account"
   out=$(run_check "$home") || fail "the login probe failed with a Claude pin"
+  assert_equals "$out" "NEEDS_LOGIN: Claude worker account $pin (finish first-run setup: CLAUDE_CONFIG_DIR=$pin claude once, pick a theme, accept the security notes, and /login if asked)" \
+    "a pinned Claude worker account that never finished first-run setup was not asked for"
+  printf '{"hasCompletedOnboarding":true}\n' > "$pin/.claude.json"
+  out=$(run_check "$home") || fail "the login probe failed with a set-up Claude pin"
   assert_equals "$out" "NEEDS_LOGIN: Claude worker account $pin (sign in: CLAUDE_CONFIG_DIR=$pin claude, then /login)" \
     "a signed-out pinned Claude worker account was not asked for"
   : > "$pin/signed-in"
   out=$(run_check "$home") || fail "the login probe failed with a signed-in pin"
   assert_equals "$out" "" "a signed-in pinned Claude worker account was reported"
+  rm "$pin/.claude.json"
+  out=$(run_check "$home") || fail "the login probe failed with a signed-in pin that never finished setup"
+  assert_contains "$out" "(finish first-run setup: CLAUDE_CONFIG_DIR=$pin claude once" \
+    "a signed-in pinned Claude worker account that never finished first-run setup was not asked for"
+  printf '{"hasCompletedOnboarding":true}\n' > "$pin/.claude.json"
   printf 'not an absolute path\n' > "$home/config/claude-account"
   out=$(run_check "$home") || fail "the login probe failed with an invalid pin"
   assert_contains "$out" "Claude worker account (config/claude-account is invalid" "an invalid pin was not reported"

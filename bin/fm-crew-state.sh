@@ -165,7 +165,10 @@
 #   4. No current run for this crew (pre-validation, uninitialized repository,
 #      proven historical head, or kind=scout): fall back to the recorded
 #      backend's pane busy state, then the resolved status declaration
-#      when its verb maps to a recognized run-state. Decision-only events such as
+#      when its verb maps to a recognized run-state. A launch the busy contract
+#      reports parked on its harness's own interactive launch prompt (a trust
+#      dialog or first-run screen) is `blocked` with that prompt named, because
+#      its brief never started. Decision-only events such as
 #      `resolved` never become current state or detail.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
@@ -389,10 +392,11 @@ pane_readable() {  # <target>
 # recognized interactive prompt would report `working` here while the
 # watcher's own poll (which always captures a tail) already classifies it
 # unknown - the exact split issue #1792 describes for a different cause.
+# The tail stays in CREW_TAIL40 so a parked launch can name its prompt.
+CREW_TAIL40=''
 crew_busy_verdict() {  # <target>
-  local tail40
-  tail40=$(fm_backend_capture "$TASK_BACKEND" "$1" 40 "$EXPECTED_LABEL" 2>/dev/null) || tail40=''
-  fm_busy_classify "$TASK_BACKEND" "$1" "$HARNESS" "$ID" "$STATE" "$tail40"
+  CREW_TAIL40=$(fm_backend_capture "$TASK_BACKEND" "$1" 40 "$EXPECTED_LABEL" 2>/dev/null) || CREW_TAIL40=''
+  BUSY_VERDICT=$(fm_busy_classify "$TASK_BACKEND" "$1" "$HARNESS" "$ID" "$STATE" "$CREW_TAIL40")
 }
 
 # --- no-mistakes run lookup (authoritative when a run matches this branch) --
@@ -1401,10 +1405,18 @@ fi
 # verdict permits the status-log fallback below. Missing, malformed, stale, or
 # unverified semantic state remains unknown.
 if [ "$KIND" != secondmate ]; then
-  BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
-  case "${BUSY_VERDICT%% *}" in
-    busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
-    idle) ;;
+  crew_busy_verdict "$BACKEND_TARGET"
+  case "$BUSY_VERDICT" in
+    busy | busy\ *) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
+    idle | idle\ *) ;;
+    'unknown launch-prompt')
+      # The launch never got past an interactive screen, so the brief never
+      # started and nothing will move until someone answers it: a blocker
+      # for firstmate, not an unreadable state.
+      LAUNCH_PROMPT=$(printf '%s' "$CREW_TAIL40" | fm_busy_launch_prompt_name "$HARNESS") \
+        || LAUNCH_PROMPT='an interactive launch prompt'
+      emit blocked pane "launch-prompt: parked on $LAUNCH_PROMPT before the brief started; it needs a human answer or a relaunch on a ready account"
+      ;;
     *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
   esac
 fi

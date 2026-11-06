@@ -1339,6 +1339,36 @@ fm_pr_gerrit_read_revision() {  # <host> <number>
   FM_PR_RECORD_REVISION=$revision
 }
 
+# fm_pr_open_state <url>: whether the PR, merge request, or change at <url> is
+# still open, read live from its own forge. Prints one word and returns 0 only
+# when the forge answered: `merged`, `closed` (closed or abandoned without a
+# merge), or `open` (every other state, including a draft or a locked GitLab
+# request, because only a merge or a close ends the review). Returns 1, printing
+# nothing, for an unparseable URL or any forge read failure, so a caller can
+# never mistake "could not tell" for "not open".
+fm_pr_open_state() {  # <url>
+  local state
+  fm_pr_url_parse "$1" || return 1
+  case "$FM_PR_PROVIDER" in
+    github) fm_pr_github_read_record "$FM_PR_OWNER" "$FM_PR_REPO" "$FM_PR_NUMBER" || return 1 ;;
+    gitlab) fm_pr_gitlab_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1 ;;
+    forgejo) fm_pr_forgejo_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1 ;;
+    gerrit) fm_pr_gerrit_read_record "$FM_PR_HOST" "$FM_PR_NUMBER" || return 1 ;;
+    *) return 1 ;;
+  esac
+  if [ "$FM_PR_RECORD_MERGED" = true ]; then
+    printf 'merged'
+    return 0
+  fi
+  state=$(printf '%s' "$FM_PR_RECORD_STATE" | tr '[:upper:]' '[:lower:]')
+  case "$state" in
+    '') return 1 ;;
+    merged) printf 'merged' ;;
+    closed|abandoned) printf 'closed' ;;
+    *) printf 'open' ;;
+  esac
+}
+
 fm_pr_poll_retirement_data_valid() {
   local state=$1 id=$2 state_device data data_hash data_identity
   state_device=$(fm_pr_file_device "$state") || return 1
