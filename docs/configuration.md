@@ -1157,12 +1157,12 @@ The named form of `config/claude-account` declares one account per line as `<nam
 
 ```text
 # name | root | weight
-personal | ordinary | 20
 work | /Users/me/.claude-work | 6.25
+personal | ordinary | 20
 ```
 
 The root is `ordinary` or an absolute path, as in the single-line form, and names and roots must be unique.
-The weight is a positive number giving the account's relative capacity, for example 20 for a Max 20x plan and 6.25 for a Team Premium seat, each a multiple of Pro.
+The weight is a positive number giving the account's relative capacity, for example 20 for a Max 20x plan and 6.25 for a Team Premium seat, each a multiple of Pro; the automatic choice below does not use it.
 Either account may run any work.
 
 A Claude launch takes its account in this order:
@@ -1170,14 +1170,19 @@ A Claude launch takes its account in this order:
 1. An explicit `--account <name>` on `bin/fm-spawn.sh` or `bin/fm-control.sh relaunch`, which must name a declared account.
 2. On a relaunch, the named account the task's own record names, while it is still declared by name here, is signed in and has finished first-run setup, and, when another account is declared, quota-axi does not read it as `exhausted_now` on the 5-hour or weekly window. A reading that cannot be taken or refreshed keeps it. Otherwise the spawn prints a `notice:` line naming that account and why the worker moved off it, and the choice continues below. A record from a single-line pin is never kept: with no file a relaunch takes the ambient account like any launch, and with a single-line pin it takes the current pin.
 3. The only declared account, when there is one.
-4. Otherwise, the account whose weight times its remaining quota is highest.
+4. Otherwise, the first declared account with more than 15% left in each 5-hour and weekly window it reports, so the declaration order is the preference order.
+   A window the reading does not report does not count against the account.
+   New workers move off an account once it has 15% or less left in either window, and return to it as soon as a reset puts it back above 15%.
+   Only when no account has more than 15% left does the choice fall to the highest all-models `spendPriority`, quota-axi's use-it-before-reset reading.
 
-Remaining quota is quota-axi's all-models `effectivePercentRemaining`, the lower of the 5-hour session and weekly windows.
-When quota-axi cannot refresh a reading (for example, Claude's quota endpoint is rate-limited) but still holds both windows, the choice ranks that account by the lower of those stale windows, and the notice marks the reading stale.
+A positive `spendPriority` means the account's allowance is on track to reach its reset unused, so spending there first keeps quota from expiring on whichever account resets sooner.
+When quota-axi publishes no `spendPriority`, for example a stale reading or an account whose windows are both unused and not yet started, the choice derives it from the windows with quota-axi's own formula and the notice says so.
+When quota-axi cannot refresh a reading (for example, Claude's quota endpoint is rate-limited) but still holds both windows, the choice judges that account from those stale windows, counts a window whose reset has since passed as full, and the notice marks the reading stale.
+An account whose priority cannot be read or derived ranks after those with one, by the lower of its windows.
 Each root is read with its own `CLAUDE_CONFIG_DIR`, unset for `ordinary`, in the same cleared environment as the sign-in check, so one account's reading never answers for another.
 An account whose root is missing, whose quota cannot be read, whose quota is exhausted, that is not signed in, or that has not finished Claude's first-run setup is skipped and named.
 A tie goes to the account declared first.
-The spawn prints a `notice:` line with every account's weighted reading.
+The spawn prints a `notice:` line naming the rule that chose the account and every account's priority and windows.
 When no account qualifies, the launch refuses and names each account's reason rather than guessing, and `--account` still selects one explicitly.
 
 The quota read never prompts for macOS Keychain access.

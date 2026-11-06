@@ -41,18 +41,28 @@
 #      (account_provider=) are never kept, so with no file a relaunch takes
 #      the ambient account and with a single-line pin the current pin;
 #   3. the only declared account (either form);
-#   4. among several declared accounts, the one with the most weighted
-#      remaining quota: weight x quota-axi's all-models effectivePercentRemaining,
-#      which is the lower of the 5-hour session and weekly windows. Each root
-#      is read with its own CLAUDE_CONFIG_DIR (unset for ordinary) in the same
-#      cleared environment as the sign-in check, so an ambient account cannot
-#      answer for another. A stale reading (quota-axi could not refresh)
-#      ranks by its last known windows. An unusable root, an unreadable
-#      reading, and an exhausted account are skipped and named; a tie goes to
-#      the account declared first; the best candidate that also passes the
-#      sign-in check wins. When none qualifies the launch refuses and names
-#      every account's reason rather than guessing; --account still selects
-#      one explicitly.
+#   4. among several declared accounts, the first declared whose 5-hour and
+#      weekly windows are both above a 15% margin (the lower of the windows
+#      the reading reports; a window it does not report does not count
+#      against it), so declaration order is the preference order: new
+#      workers move off an account near its limit and return to it as soon
+#      as a reset puts it back above the margin. Only when no account is
+#      above the margin does the choice fall to the highest all-models
+#      selection.spendPriority, quota-axi's use-it-before-reset reading
+#      (positive means allowance is on track to reach its reset unused).
+#      When quota-axi publishes no scalar (a stale reading, or every window
+#      unused and untriggered) the same formula is derived from the windows
+#      it holds, counting a held window whose reset has since passed as full
+#      again; an account with no priority at all ranks after those that have
+#      one, by the lower of its windows. A held window whose reset has passed
+#      also counts as full for the margin. The weight does not enter the
+#      choice. Each root is read with its own CLAUDE_CONFIG_DIR (unset for
+#      ordinary) in the same cleared environment as the sign-in check, so an
+#      ambient account cannot answer for another. An unusable root, an unreadable reading, and
+#      an exhausted account are skipped and named; a tie goes to the account
+#      declared first; the best candidate that also passes the sign-in check
+#      wins. When none qualifies the launch refuses and names every account's
+#      reason rather than guessing; --account still selects one explicitly.
 # The quota read never prompts for Keychain access; an account quota-axi
 # cannot read names quota-axi's own remedy under that account's root.
 #
@@ -437,16 +447,30 @@ fm_worker_account_claude_raw_guard() {
 # fm_worker_account_claude_quota <root>
 # Reads one Claude root's quota through quota-axi under the cleared probe
 # environment plus that root (none for the ordinary account). Prints
-# "known<TAB>percent<TAB>runway<TAB>session<TAB>weekly" for a readable
-# reading, where percent is the all-models effectivePercentRemaining (the
-# lower of the session and weekly windows) and session and weekly are the
-# five_hour and seven_day windows' own remaining percentages (? when absent).
+# "known<TAB>percent<TAB>runway<TAB>session<TAB>weekly<TAB>priority<TAB>basis"
+# for a readable reading, where percent is the all-models
+# effectivePercentRemaining (the lower of the session and weekly windows) and
+# session and weekly are the five_hour and seven_day windows' own remaining
+# percentages (? when absent). priority is the all-models
+# selection.spendPriority with basis quota-axi; when quota-axi publishes none
+# it is derived from the two windows with quota-axi's own formula and basis
+# derived, and when that is impossible too it is ? with an empty basis.
 # When quota-axi could not refresh (state.stale, for example a rate-limited
 # quota endpoint) but still holds both windows, prints
-# "stale<TAB>percent<TAB>reason<TAB>session<TAB>weekly", where percent is the
-# lower of the two stale windows. Otherwise prints
+# "stale<TAB>percent<TAB>reason<TAB>session<TAB>weekly<TAB>priority<TAB>basis",
+# where a held window whose reset has passed counts as full and percent is
+# the lower of the two windows. Otherwise prints
 # "unreadable<TAB>reason<TAB>remedy", where remedy is quota-axi's own remedy
 # command or empty.
+#
+# The derivation is quota-axi's published per-scope selection formula: for
+# each window, gap = remaining / timeLeft - used / elapsed (percentages of the
+# window's cycle), averaged weighted by cycle length (5 hours, 7 days) and
+# clamped to [-100, 100]. A window unused and at the start of its cycle (no
+# reset yet at 100%, or a held reset already passed) is left out while the
+# other window is running, and gives 1 when both are; a window the reading
+# does not report is left out; a window with usage but no reset, or no window
+# at all, leaves the priority unknown.
 fm_worker_account_claude_quota() {
   local root=$1 out rc
   fm_worker_account_clean_env
@@ -463,16 +487,55 @@ fm_worker_account_claude_quota() {
     return 0
   fi
   printf '%s\n' "$out" | jq -r "$FM_QUOTA_ROW_JQ"'
+    def fm_epoch:
+      if type != "string" then null
+      else try (
+        sub("\\.[0-9]+"; "")
+        | capture("^(?<b>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?<z>Z|(?<s>[+-])(?<h>[0-9]{2}):?(?<m>[0-9]{2}))$")
+        | ((.b + "Z") | fromdateiso8601)
+          - (if .z == "Z" then 0
+             else (if .s == "+" then 1 else -1 end) * ((.h | tonumber) * 3600 + (.m | tonumber) * 60) end)
+      ) catch null end;
+    def fm_window($w; $cycle; $now):
+      if ($w | type) != "object" or ($w.percentRemaining | type) != "number" then {rem: null, gap: null, fresh: false, cycle: $cycle}
+      else ($w.resetsAt | fm_epoch) as $r | $w.percentRemaining as $p
+        | if $r != null and $r <= $now then {rem: 100, gap: 1, fresh: true, cycle: $cycle}
+          elif $r == null then
+            (if $p >= 100 then {rem: 100, gap: 1, fresh: true, cycle: $cycle}
+             else {rem: $p, gap: null, fresh: false, cycle: $cycle} end)
+          else ((($r - $now) / $cycle * 100) | if . > 100 then 100 else . end) as $left
+            | if $left < 0.01 then {rem: $p, gap: null, fresh: false, cycle: $cycle}
+              elif $left >= 100 then
+                {rem: $p, gap: (if $p >= 100 then 1 else null end), fresh: false, cycle: $cycle}
+              else {rem: $p, gap: ($p / $left - (100 - $p) / (100 - $left)), fresh: false, cycle: $cycle} end
+          end
+      end;
+    def fm_priority($windows):
+      [$windows[] | select(.rem != null)] as $ws
+      | if ($ws | length) == 0 or any($ws[]; .gap == null) then null
+      else [$ws[] | select(.fresh | not)] as $t
+        | if ($t | length) == 0 then 1
+          else (($t | map(.gap * .cycle) | add) / ($t | map(.cycle) | add))
+            | if . > 100 then 100 elif . < -100 then -100 else . end
+            | . * 10000 | round / 10000
+          end
+      end;
     quota_row(.; "claude"; "") as $row
     | if $row == null then "unreadable\tquota-axi reported no claude row\t"
       else
-        ([$row.quotaSemantics.effectiveAvailability[] | select(.scope == "all_models")] | first) as $all
-        | ([$row.windows[]? | select(.id == "five_hour") | .percentRemaining | numbers] | first) as $session
-        | ([$row.windows[]? | select(.id == "seven_day") | .percentRemaining | numbers] | first) as $weekly
+        now as $now
+        | ([$row.quotaSemantics.effectiveAvailability[]? | select(.scope == "all_models")] | first) as $all
+        | fm_window([$row.windows[]? | select(.id == "five_hour")] | first; 18000; $now) as $session
+        | fm_window([$row.windows[]? | select(.id == "seven_day")] | first; 604800; $now) as $weekly
+        | (if $all.selection.status == "known" and ($all.selection.spendPriority | type) == "number"
+           then "\($all.selection.spendPriority)\tquota-axi"
+           else fm_priority([$session, $weekly]) as $d
+             | if $d == null then "?\t" else "\($d)\tderived" end
+           end) as $priority
         | if $all != null and $all.status == "known" then
-            "known\t\($all.effectivePercentRemaining)\t\($all.runway.status)\t\($session // "?")\t\($weekly // "?")"
-          elif $row.state.stale == true and $session != null and $weekly != null then
-            "stale\t\([$session, $weekly] | min)\t\($row.state.error // "stale reading")\t\($session)\t\($weekly)"
+            "known\t\($all.effectivePercentRemaining)\t\($all.runway.status)\t\($session.rem // "?")\t\($weekly.rem // "?")\t\($priority)"
+          elif $row.state.stale == true and $session.rem != null and $weekly.rem != null then
+            "stale\t\([$session.rem, $weekly.rem] | min)\t\($row.state.error // "stale reading")\t\($session.rem)\t\($weekly.rem)\t\($priority)"
           else
             "unreadable\t\($row.state.error // $row.state.status // "no all-models reading")\t\($row.state.remedyCommand // "")"
           end
@@ -483,13 +546,15 @@ fm_worker_account_claude_quota() {
 # Step 4 of the header's selection order, among two or more named accounts
 # given as fm_worker_account_read lines. Prints "name<TAB>declared<TAB>root"
 # for the chosen account, which has passed the sign-in check, and one notice
-# on stderr naming every account's reading. A stale reading ranks by its last
-# known windows, so a rate-limited quota endpoint does not refuse the spawn,
-# and the notice marks it stale. When no account qualifies prints
-# one error naming each account's reason and returns 1.
+# on stderr naming every account's priority and why the chosen one won. A
+# stale reading ranks by the priority derived from its held windows, so a
+# rate-limited quota endpoint does not refuse the spawn, and the notice marks
+# it stale. When no account qualifies prints one error naming each account's
+# reason and returns 1.
 fm_worker_account_claude_choose() {
-  local executable=$1 lines=$2 setting=${3:-config/claude-account} line name declared weight root reading kind pct runway session weekly
-  local reason remedy score index=0 chosen='' notice
+  local executable=$1 lines=$2 setting=${3:-config/claude-account} line name declared root reading kind pct runway session weekly
+  local priority basis tier unknown key fallback detail reason remedy index=0 chosen='' why='' notice
+  local margin=15
   local -a ranked=() readings=() skipped=()
   if ! command -v quota-axi >/dev/null 2>&1; then
     echo "error: $setting declares several Claude accounts, and choosing among them needs quota-axi, which is not installed; install it, or pass --account <name> to choose one" >&2
@@ -499,7 +564,6 @@ fm_worker_account_claude_choose() {
     index=$((index + 1))
     name=${line%%$'\t'*}
     declared=${line#*$'\t'}
-    weight=${declared#*$'\t'}
     declared=${declared%%$'\t'*}
     if ! root=$(fm_worker_account_root claude "$declared"); then
       skipped+=("$name: $root is not a readable, searchable existing directory")
@@ -518,40 +582,54 @@ fm_worker_account_claude_choose() {
       fi
       continue
     fi
-    IFS=$'\t' read -r kind pct runway session weekly <<<"$reading"
-    if [ "$runway" = exhausted_now ] ||
-      ! score=$(LC_ALL=C awk -v w="$weight" -v p="$pct" 'BEGIN { s = w * p; printf "%.6f\t%g", s, s; exit !(s > 0) }'); then
+    IFS=$'\t' read -r kind pct runway session weekly priority basis <<<"$reading"
+    if [ "$runway" = exhausted_now ] || ! LC_ALL=C awk -v p="$pct" 'BEGIN { exit !(p + 0 > 0) }'; then
       skipped+=("$name: out of quota (session $session%, week $weekly%)")
       continue
     fi
-    if [ "$kind" = stale ]; then
-      readings+=("$name $weight x $pct% = ${score#*$'\t'} (stale: $runway; session $session%, week $weekly%)")
-    else
-      readings+=("$name $weight x $pct% = ${score#*$'\t'} (session $session%, week $weekly%)")
-    fi
-    ranked+=("${score%%$'\t'*}"$'\t'"$index"$'\t'"$name"$'\t'"$declared"$'\t'"$root")
+    # Rank keys: margin tier (0 when the lower of its reported windows is
+    # above the margin, else 1); within tier 0 declaration order alone; within
+    # tier 1 whether the priority is unknown, the priority, and for an unknown
+    # priority the lower window, then declaration order.
+    read -r tier unknown key fallback <<<"$(LC_ALL=C awk -v m="$margin" -v p="$priority" -v pct="$pct" -v s="$session" -v w="$weekly" 'BEGIN {
+      low = ""
+      if (s != "?") low = s + 0
+      if (w != "?" && (low == "" || w + 0 < low)) low = w + 0
+      if (low == "") low = pct + 0
+      if (low > m + 0) print 0, 0, 0, 0
+      else if (p == "?") print 1, 1, 0, pct + 0
+      else print 1, 0, p + 0, 0
+    }')"
+    detail="session $session%, week $weekly%"
+    [ "$kind" != stale ] || detail="stale: $runway; $detail"
+    [ "$tier" = 0 ] || detail="$detail; at or under the $margin% margin"
+    case "$basis" in
+    quota-axi) readings+=("$name priority $priority ($detail)") ;;
+    derived) readings+=("$name priority $priority derived from its windows ($detail)") ;;
+    *) readings+=("$name priority unknown ($detail)") ;;
+    esac
+    ranked+=("$tier"$'\t'"$unknown"$'\t'"$key"$'\t'"$fallback"$'\t'"$index"$'\t'"$name"$'\t'"$declared"$'\t'"$root")
   done <<<"$lines"
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    line=${line#*$'\t'}
-    line=${line#*$'\t'}
-    name=${line%%$'\t'*}
-    declared=${line#*$'\t'}
-    root=${declared#*$'\t'}
-    declared=${declared%%$'\t'*}
+  while IFS=$'\t' read -r tier unknown key fallback index name declared root; do
+    [ -n "$name" ] || continue
     if fm_worker_account_check claude "$declared" "$root" "$executable" 2>/dev/null; then
       chosen=$name$'\t'$declared$'\t'$root
+      case "$tier$unknown" in
+      0*) why="the first declared account above the $margin% margin" ;;
+      10) why="no account is above the $margin% margin, so the highest spend priority" ;;
+      *) why="no account is above the $margin% margin or has a spend priority, so the most remaining quota" ;;
+      esac
       break
     fi
     reason=$(fm_worker_account_claude_unready "$root")
     skipped+=("$name: ${reason#is }")
-  done < <(printf '%s\n' "${ranked[@]+"${ranked[@]}"}" | LC_ALL=C sort -t $'\t' -k1,1nr -k2,2n)
+  done < <(printf '%s\n' "${ranked[@]+"${ranked[@]}"}" | LC_ALL=C sort -t $'\t' -k1,1n -k2,2n -k3,3gr -k4,4gr -k5,5n)
   if [ -z "$chosen" ]; then
     reason=$(printf '%s; ' "${skipped[@]}")
     echo "error: $setting declares several Claude accounts, but none can take this worker: ${reason%; }; fix the account named, or pass --account <name> to choose one explicitly" >&2
     return 1
   fi
-  notice="notice: chose Claude account ${chosen%%$'\t'*} by weighted remaining quota (weight x the lower of its session and weekly remaining): $(printf '%s; ' "${readings[@]}")"
+  notice="notice: chose Claude account ${chosen%%$'\t'*} as $why: $(printf '%s; ' "${readings[@]}")"
   notice=${notice%; }
   [ "${#skipped[@]}" -eq 0 ] || notice="$notice; skipped: $(printf '%s; ' "${skipped[@]}")"
   echo "${notice%; }" >&2
@@ -565,7 +643,7 @@ fm_worker_account_claude_choose() {
 # reading is not exhausted_now. Otherwise prints why the worker moves off it.
 # An unreadable or stale quota reading is not evidence of exhaustion.
 fm_worker_account_claude_recorded_reason() {
-  local executable=$1 lines=$2 rec=$3 setting=${4:-config/claude-account} line declared root reading kind pct runway session weekly
+  local executable=$1 lines=$2 rec=$3 setting=${4:-config/claude-account} line declared root reading kind pct runway session weekly _rest
   line=$(printf '%s\n' "$lines" | awk -F '\t' -v n="$rec" '$1 != "" && $1 == n { print; exit }')
   if [ -z "$line" ]; then
     echo "is no longer declared by name in $setting"
@@ -584,7 +662,7 @@ fm_worker_account_claude_recorded_reason() {
   [ "$(printf '%s\n' "$lines" | awk 'END { print NR }')" -gt 1 ] && command -v quota-axi >/dev/null 2>&1 || return 0
   reading=$(fm_worker_account_claude_quota "$root")
   [ "${reading%%$'\t'*}" = known ] || return 0
-  IFS=$'\t' read -r kind pct runway session weekly <<<"$reading"
+  IFS=$'\t' read -r kind pct runway session weekly _rest <<<"$reading"
   LC_ALL=C awk -v r="$runway" -v p="$pct" -v s="$session" -v w="$weekly" 'BEGIN {
     if (r != "exhausted_now" && p + 0 > 0) exit
     if (w == "?" || (s != "?" && s + 0 <= w + 0)) win = "5-hour"
