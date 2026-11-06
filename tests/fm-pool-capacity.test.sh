@@ -50,12 +50,18 @@ pool_status() {  # <dir> <s1> <s2> <s3> <s4>
   printf '%s]\n' "$json" > "$dir/status.json"
 }
 
-run_pool() {  # <dir> [args...]
+run_pool_in_window() {  # <dir> [args...]
   local dir=$1
   shift
   PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
     FM_FAKE_TREEHOUSE_STATUS="$dir/status.json" FM_FAKE_TREEHOUSE_LOG="$dir/treehouse.log" \
-    FM_POOL_CHECK_SECS="${FM_POOL_CHECK_SECS:-0}" bash "$POOL" "$@"
+    bash "$POOL" "$@"
+}
+
+# Run as if the check interval since the last check has already elapsed.
+run_pool() {  # <dir> [args...]
+  rm -f "$1/home/state/.pool-capacity-last"
+  run_pool_in_window "$@"
 }
 
 test_report_counts_free_copies() {
@@ -114,7 +120,7 @@ test_check_is_throttled_and_scoped() {
   pool_status "$dir" in-use dirty dirty available
   run_pool "$dir" check >/dev/null || fail "first check failed"
   : > "$dir/treehouse.log"
-  out=$(FM_POOL_CHECK_SECS=600 run_pool "$dir" check) || fail "throttled check failed"
+  out=$(run_pool_in_window "$dir" check) || fail "throttled check failed"
   [ -z "$out" ] && [ ! -s "$dir/treehouse.log" ] || fail "a check inside the throttle window queried the pool"
   # A record whose copy is not a pool slot never makes Treehouse create a pool.
   rm -f "$dir/home/state/task-a.meta"
@@ -130,7 +136,7 @@ test_watcher_surfaces_a_nearly_full_pool() {
   dir=$(make_pool_case watcher)
   pool_status "$dir" in-use dirty dirty available
   PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
-    FM_FAKE_TREEHOUSE_STATUS="$dir/status.json" FM_POOL_CHECK_SECS=0 \
+    FM_FAKE_TREEHOUSE_STATUS="$dir/status.json" \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=1 FM_HEARTBEAT=999999 \
     "$ROOT/bin/fm-watch.sh" > "$dir/watch.out" 2> "$dir/watch.err" &
   pid=$!

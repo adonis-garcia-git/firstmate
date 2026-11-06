@@ -2089,32 +2089,53 @@ teardown_dirt_is_leftovers_only() {
 }
 
 # Move the top-level untracked entries teardown_dirt_is_leftovers_only accepted
-# into data/<id>/leftovers/, refusing rather than overwriting anything already
-# there. Reads NUL-separated status so no path spelling is misread.
+# into data/<id>/leftovers/, refusing before moving anything when any of them
+# would overwrite something already there. Reads NUL-separated status so no
+# path spelling is misread.
 teardown_move_leftovers() {
   local dest="$DATA/$ID/leftovers" entry path
-  mkdir -p "$dest" || {
-    echo "REFUSED: could not create $dest for the untracked leftovers in $WT." >&2
-    return 1
-  }
+  local -a paths=()
   while IFS= read -r -d '' entry; do
     case "$entry" in '?? '*) ;; *) continue ;; esac
     path=${entry#?? }
     path=${path%/}
     case "$path" in */*|.claude|.fm-grok-turnend|.fm-kimi-turnend) continue ;; esac
+    paths+=("$path")
+  done < <(git -C "$WT" status --porcelain=v1 -z --untracked-files=normal)
+  [ "${#paths[@]}" -gt 0 ] || return 0
+  for path in "${paths[@]}"; do
     if [ -e "$dest/$path" ] || [ -L "$dest/$path" ]; then
       echo "REFUSED: untracked leftover $path in $WT would overwrite $dest/$path; move one of them aside, then rerun." >&2
       return 1
     fi
+  done
+  mkdir -p "$dest" || {
+    echo "REFUSED: could not create $dest for the untracked leftovers in $WT." >&2
+    return 1
+  }
+  for path in "${paths[@]}"; do
     mv -- "$WT/$path" "$dest/$path" || {
       echo "REFUSED: could not move untracked leftover $WT/$path into $dest." >&2
       return 1
     }
     echo "teardown: moved untracked leftover $path into $dest" >&2
-  done < <(git -C "$WT" status --porcelain=v1 -z --untracked-files=normal)
+  done
+}
+
+# Run validate_worktree_teardown_safety and, when it accepted top-level
+# leftovers, move them aside before anything may clean the copy. Returns the
+# safety check's own status on refusal, so a lock-blocked check stays
+# distinguishable.
+teardown_safety_check_and_move_leftovers() {
+  local rc=0
+  validate_worktree_teardown_safety || rc=$?
+  [ "$rc" -eq 0 ] || return "$rc"
+  [ "$TEARDOWN_LEFTOVERS_PENDING" = 1 ] || return 0
+  teardown_move_leftovers
 }
 validate_worktree_teardown_safety() {
   local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
+  TEARDOWN_LEFTOVERS_PENDING=0
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
@@ -2130,7 +2151,6 @@ validate_worktree_teardown_safety() {
     return 1
   fi
   dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' || true)
-  TEARDOWN_LEFTOVERS_PENDING=0
   if [ -n "$dirty" ] && teardown_dirt_is_leftovers_only; then
     TEARDOWN_LEFTOVERS_PENDING=1
     dirty=
@@ -3676,19 +3696,16 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
 fi
 
 if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
-  if validate_worktree_teardown_safety; then
+  if teardown_safety_check_and_move_leftovers; then
     :
   else
     safety_rc=$?
     if [ "$safety_rc" -eq "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED" ]; then
       cleanup_stale_lock_for_safety_check "$WT" || exit 1
-      validate_worktree_teardown_safety || exit 1
+      teardown_safety_check_and_move_leftovers || exit 1
     else
       exit 1
     fi
-  fi
-  if [ "$TEARDOWN_LEFTOVERS_PENDING" = 1 ]; then
-    teardown_move_leftovers || exit 1
   fi
 fi
 
@@ -3881,7 +3898,7 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   # left by a killed crew process; see the script header for retry and stale-lock proof.
   post_lock_cleanup_check=
   if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
-    post_lock_cleanup_check=validate_worktree_teardown_safety
+    post_lock_cleanup_check=teardown_safety_check_and_move_leftovers
   fi
   if [ "$KIND" = scout ] || [ "$FORCE" = "--force" ]; then
     teardown_scrub_scratch_copy "$WT" || exit 1

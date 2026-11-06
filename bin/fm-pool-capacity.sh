@@ -31,11 +31,11 @@
 # sweep surfaces:
 #   check: pool-capacity: <project> has <n> free isolated copies of <max> (<d> dirty, <u> in use); clean up finished tasks or raise max_trees in <project>/treehouse.toml
 #
-# A pool is low when free < FM_POOL_FREE_MIN (default 3). Check mode records
+# A pool is low when free < 3. Check mode records
 # the warnings it queued in state/.pool-capacity-surfaced and queues nothing
 # while they are unchanged; when no pool is low it clears that record, so a pool
-# that fills again warns again. It runs at most once per FM_POOL_CHECK_SECS
-# (default 600) using state/.pool-capacity-last. A pool Treehouse cannot report
+# that fills again warns again. It runs at most once per 600 seconds using
+# state/.pool-capacity-last. A pool Treehouse cannot report
 # is skipped silently: this is advice, never a gate.
 #
 # Exit status: 0 on a report (including an empty one), 2 on a usage error.
@@ -53,10 +53,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-backend.sh"
 
 TREEHOUSE_DEFAULT_MAX_TREES=16
-FREE_MIN=${FM_POOL_FREE_MIN:-3}
-case "$FREE_MIN" in ''|*[!0-9]*) FREE_MIN=3 ;; esac
-CHECK_SECS=${FM_POOL_CHECK_SECS:-600}
-case "$CHECK_SECS" in ''|*[!0-9]*) CHECK_SECS=600 ;; esac
+FREE_MIN=3
+CHECK_SECS=600
 
 MODE=report
 case "${1:-}" in

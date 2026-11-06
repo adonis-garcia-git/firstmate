@@ -1555,6 +1555,7 @@ test_leftovers_never_bypass_refusals() {
   write_meta "$case_dir" no-mistakes ship
   wt_commit_file "$case_dir" feature.txt hello
   git -C "$case_dir/wt" push -q origin fm/task-x1
+  printf '%s\n' 'first' > "$case_dir/wt/a-first.md"
   printf '%s\n' 'new notes' > "$case_dir/wt/notes.md"
   mkdir -p "$case_dir/data/task-x1/leftovers"
   printf '%s\n' 'earlier notes' > "$case_dir/data/task-x1/leftovers/notes.md"
@@ -1565,6 +1566,7 @@ test_leftovers_never_bypass_refusals() {
   [ "$(cat "$case_dir/data/task-x1/leftovers/notes.md")" = 'earlier notes' ] \
     || fail "leftovers-collision: an earlier leftover was overwritten"
   [ "$before" = "$(git -C "$case_dir/wt" status --porcelain)" ] || fail "leftovers-collision: the copy changed"
+  [ ! -e "$case_dir/data/task-x1/leftovers/a-first.md" ] || fail "leftovers-collision: a refused move left the copy half moved"
   [ -f "$case_dir/state/task-x1.meta" ] || fail "leftovers-collision: task metadata removed"
   pass "moving leftovers never bypasses the landed-work refusal and never overwrites an earlier move"
 }
@@ -2505,6 +2507,66 @@ test_stale_index_lock_cleanup_rechecks_dirty_worktree() {
   assert_absent "$lock" "stale-lock-dirty-recheck: stale lock file should have been removed"
   [ -f "$case_dir/state/task-x1.meta" ] || fail "stale-lock-dirty-recheck: teardown completed despite dirty work"
   pass "stale lock cleanup rechecks and refuses dirty worktree before return"
+}
+
+# A crew still alive after the leftovers move writes new top-level scratch and
+# leaves a stale lock that fails the first return. The post-lock recheck must
+# move that scratch aside too, before the retried return's `git clean -fd`.
+test_stale_lock_recheck_moves_new_leftovers() {
+  local case_dir rc dest
+  case_dir=$(make_case stale-lock-new-leftovers)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt landed "landed work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  printf '%s\n' notes > "$case_dir/wt/notes.md"
+  add_lsof_no_holder "$case_dir"
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = return ]; then
+  shift
+  wt=""
+  for a in "$@"; do
+    case "$a" in
+      --force) ;;
+      *) wt=$a ;;
+    esac
+  done
+  lock=$(git -C "$wt" rev-parse --git-path index.lock)
+  marker=$(git -C "$wt" rev-parse --git-path fm-returned-once)
+  case "$lock" in /*) ;; *) lock="$wt/$lock" ;; esac
+  case "$marker" in /*) ;; *) marker="$wt/$marker" ;; esac
+  if [ ! -e "$marker" ]; then
+    : > "$marker"
+    printf '%s\n' 'late notes' > "$wt/notes2.md"
+    : > "$lock"
+    touch -t 200001010000 "$lock"
+  fi
+  if [ -e "$lock" ]; then
+    echo "fatal: Unable to create '$lock': File exists." >&2
+    exit 128
+  fi
+  git -C "$wt" clean -fdq
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "stale-lock-new-leftovers: teardown should succeed: $(cat "$case_dir/stderr")"
+  assert_grep "removed provably-stale git lock" "$case_dir/stderr" \
+    "stale-lock-new-leftovers: the post-lock recheck path was not exercised"
+  dest="$case_dir/data/task-x1/leftovers"
+  [ "$(cat "$dest/notes.md" 2>/dev/null)" = notes ] || fail "stale-lock-new-leftovers: the first leftover was not preserved"
+  [ "$(cat "$dest/notes2.md" 2>/dev/null)" = 'late notes' ] \
+    || fail "stale-lock-new-leftovers: scratch written after the first move was deleted by the retried return"
+  pass "the post-lock recheck moves new top-level scratch aside before the retried return cleans the copy"
 }
 
 test_non_linked_index_lock_path_is_checked_from_worktree() {
@@ -5852,6 +5914,7 @@ test_stale_index_lock_cleared_and_teardown_succeeds
 test_live_index_lock_is_never_removed_and_teardown_refuses
 test_lsof_error_never_clears_index_lock
 test_stale_index_lock_cleanup_rechecks_dirty_worktree
+test_stale_lock_recheck_moves_new_leftovers
 test_non_linked_index_lock_path_is_checked_from_worktree
 test_index_lock_mtime_read_failure_refuses
 test_transient_index_lock_clears_after_first_attempt_and_retry_succeeds
