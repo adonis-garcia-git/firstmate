@@ -519,6 +519,10 @@ test_watcher_surfaces_one_wake() {
   task "$home" ship1 pr=https://github.com/o/r/pull/8
   pr "$home" 8 "$HEAD_A" "$BASE_1" false false
   arm "$home"
+  # The watcher also runs the hourly recorded-PR reconcile sweep, whose batched
+  # GraphQL read this forge fixture does not serve; whether a run reaches it
+  # within its window is timing. Mark the sweep as just run so it is not due.
+  touch "$home/state/.pr-reconcile-last"
   [ -f "$home/state/contributions.check.sh" ] || fail 'arm did not arm the contribution observer for enrolled PRs'
   rc=0
   with_home "$home" env FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 \

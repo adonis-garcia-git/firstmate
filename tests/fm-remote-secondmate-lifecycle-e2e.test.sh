@@ -373,6 +373,37 @@ seed_env() {
   "$@"
 }
 
+# A remote spawn, relaunch, or inheritance push here is a chain of sequential
+# fake-SSH calls, and each call stages one job for the real remote job worker
+# and waits for its result. That round trip costs about a second on a portable
+# runner and more on a loaded Mac, and one spawn makes dozens of them, so a fixed
+# total bound measures the runner rather than the operation. Wait instead while
+# the operation keeps starting remote calls: return 0 once <reached-command>
+# succeeds, 1 if <pid> exits first, and 2 when no new remote call starts for
+# REMOTE_STALL_SECS, a generous bound for any single call in this suite.
+REMOTE_STALL_SECS=30
+await_remote_progress() { # <pid> <reached-command...>
+  local pid=$1 count last='' since=$SECONDS
+  shift
+  until "$@"; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      return 1
+    fi
+    count=$(cat "$SSH_COUNT" 2>/dev/null || true)
+    if [ "$count" != "$last" ]; then
+      last=$count
+      since=$SECONDS
+    elif [ $((SECONDS - since)) -ge "$REMOTE_STALL_SECS" ]; then
+      return 2
+    fi
+    sleep 0.02
+  done
+}
+
+process_exited() { # <pid>
+  ! kill -0 "$1" 2>/dev/null
+}
+
 REAL_GIT=$(command -v git)
 cat > "$FAKEBIN/git" <<SH
 #!/usr/bin/env bash
@@ -1002,15 +1033,13 @@ EOF
 FM_FAKE_SSH_MODE=inherit-block remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
   > "$TMP_ROOT/spawn-concurrent.out" 2>&1 &
 spawn_concurrent=$!
-spawn_inherit_wait=0
-# Earlier inherited files traverse the worker before captain-shared.md, so give
-# a loaded portable runner 30 seconds to reach this deliberately blocked write.
-while [ ! -f "$TMP_ROOT/inherit.entered" ]; do
-  kill -0 "$spawn_concurrent" 2>/dev/null || fail "remote spawn exited before its blocked inheritance write"
-  spawn_inherit_wait=$((spawn_inherit_wait + 1))
-  [ "$spawn_inherit_wait" -le 1500 ] || fail "remote spawn never reached its blocked inheritance write"
-  sleep 0.02
-done
+# Earlier inherited files traverse the worker before captain-shared.md.
+rc=0
+await_remote_progress "$spawn_concurrent" test -f "$TMP_ROOT/inherit.entered" || rc=$?
+case $rc in
+  1) fail "remote spawn exited before its blocked inheritance write" ;;
+  2) fail "remote spawn stalled before its blocked inheritance write" ;;
+esac
 cat > "$PARENT/data/captain-shared.md" <<'EOF'
 # Shared captain preferences
 This file is main-authoritative and maintained by the main firstmate.
@@ -1113,15 +1142,12 @@ EOF
 FM_FAKE_SSH_MODE=inherit-block remote_env "$ROOT/bin/fm-config-push.sh" \
   > "$TMP_ROOT/config-concurrent-first.out" 2>&1 &
 config_first=$!
-inherit_wait=0
-while [ ! -f "$TMP_ROOT/inherit.entered" ]; do
-  kill -0 "$config_first" 2>/dev/null || fail "first inheritance transaction exited before its blocked write"
-  inherit_wait=$((inherit_wait + 1))
-  # Match the earlier spawn/inheritance wait: a loaded portable runner can
-  # spend several seconds in the remote entrypoint before reaching this write.
-  [ "$inherit_wait" -le 1500 ] || fail "first inheritance transaction never reached its blocked write"
-  sleep 0.02
-done
+rc=0
+await_remote_progress "$config_first" test -f "$TMP_ROOT/inherit.entered" || rc=$?
+case $rc in
+  1) fail "first inheritance transaction exited before its blocked write" ;;
+  2) fail "first inheritance transaction stalled before its blocked write" ;;
+esac
 cat > "$PARENT/data/captain-shared.md" <<'EOF'
 # Shared captain preferences
 This file is main-authoritative and maintained by the main firstmate.
@@ -1321,15 +1347,26 @@ FM_STATE_OVERRIDE="$WATCH_STATE" FM_SECONDMATE_LIVENESS_SECS=1 FM_POLL=1 \
   remote_env exec "$ROOT/bin/fm-watch.sh" \
   > "$TMP_ROOT/watch-liveness.out" 2> "$TMP_ROOT/watch-liveness.err" &
 watch_pid=$!
-watch_wait=0
-while kill -0 "$watch_pid" 2>/dev/null && [ "$watch_wait" -lt 1500 ]; do
-  sleep 0.02
-  watch_wait=$((watch_wait + 1))
-done
-if kill -0 "$watch_pid" 2>/dev/null; then
+# The relaunch is a guarded remote spawn, so the watcher queues its wake only
+# after that whole chain of remote calls. Its liveness probes keep calling the
+# remote, so the exit after the wake is bounded on its own.
+relaunch_wake_queued() {
+  grep -F $'\tcheck\tsecondmate-relaunch-ios-' "$WATCH_STATE/.wake-queue" >/dev/null 2>&1
+}
+rc=0
+await_remote_progress "$watch_pid" relaunch_wake_queued || rc=$?
+if [ "$rc" -eq 2 ]; then
   kill "$watch_pid" 2>/dev/null || true
-  fail "the watcher did not exit on its auto-relaunch wake within the bound: $(cat "$TMP_ROOT/watch-liveness.out" "$TMP_ROOT/watch-liveness.err" 2>/dev/null)"
+  fail "the watcher stalled before its auto-relaunch wake: $(cat "$TMP_ROOT/watch-liveness.out" "$TMP_ROOT/watch-liveness.err" 2>/dev/null)"
 fi
+since=$SECONDS
+while ! process_exited "$watch_pid"; do
+  if [ $((SECONDS - since)) -ge "$REMOTE_STALL_SECS" ]; then
+    kill "$watch_pid" 2>/dev/null || true
+    fail "the watcher did not exit on its auto-relaunch wake within ${REMOTE_STALL_SECS}s: $(cat "$TMP_ROOT/watch-liveness.out" "$TMP_ROOT/watch-liveness.err" 2>/dev/null)"
+  fi
+  sleep 0.02
+done
 wait "$watch_pid" \
   || fail "the liveness watcher leg exited non-zero: $(cat "$TMP_ROOT/watch-liveness.err")"
 watch_pid=''
@@ -1590,15 +1627,13 @@ rm -f "$TMUX_STATE" "$TMP_ROOT/launch.entered" "$TMP_ROOT/launch.release"
 FM_FAKE_SSH_MODE=launch-block remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
   > "$TMP_ROOT/spawn-retirement.out" 2>&1 &
 spawn_retirement_pid=$!
-launch_wait=0
-# The respawn performs readiness and inheritance jobs before launch, so allow
-# the same 30-second loaded-runner bound as the earlier blocked worker path.
-while [ ! -f "$TMP_ROOT/launch.entered" ]; do
-  kill -0 "$spawn_retirement_pid" 2>/dev/null || fail "remote respawn exited before its blocked launch"
-  launch_wait=$((launch_wait + 1))
-  [ "$launch_wait" -le 1500 ] || fail "remote respawn never reached its blocked launch"
-  sleep 0.02
-done
+# The respawn performs readiness and inheritance jobs before launch.
+rc=0
+await_remote_progress "$spawn_retirement_pid" test -f "$TMP_ROOT/launch.entered" || rc=$?
+case $rc in
+  1) fail "remote respawn exited before its blocked launch" ;;
+  2) fail "remote respawn stalled before its blocked launch" ;;
+esac
 # Opt-in archival must cover the parent-side status on the real remote path.
 touch "$PARENT/config/status-archive"
 printf 'working: remote task history\ndone: remote task complete\n' > "$PARENT/state/ios.status"

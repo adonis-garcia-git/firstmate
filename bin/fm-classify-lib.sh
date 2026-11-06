@@ -432,6 +432,22 @@ status_paused_until() {  # <status-line> -> epoch on stdout
   fm_utc_iso_to_epoch "$token"
 }
 
+# A declared wait on the worker's own background process may also name that
+# process with `pid <N>` anywhere in its text. Prints the pid so a supervisor on
+# the same machine can see the moment that process has exited instead of waiting
+# for the until time or the cadence; returns 1 when the line is not a pause or
+# names no well-formed pid, so a bad token keeps the wait's other handling.
+status_paused_pid() {  # <status-line> -> pid on stdout
+  local line=$1 pid
+  status_is_paused "$line" || return 1
+  pid=$(printf '%s' "$line" \
+    | sed -n 's/.*[[:space:](][Pp][Ii][Dd][[:space:]][[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+    | head -1)
+  case "$pid" in ''|0*) return 1 ;; esac
+  [ "${#pid}" -le 9 ] || return 1
+  printf '%s\n' "$pid"
+}
+
 # --- optional event emission time -------------------------------------------
 # New writers may append "[at=<epoch>]" before the first colon, alongside key
 # and corr tags in any order. Epoch is UTC Unix seconds: canonical unsigned

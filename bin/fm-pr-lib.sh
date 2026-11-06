@@ -740,7 +740,18 @@ fm_pr_poll_artifacts_valid() {
 # never authentication. On success FM_PR_DATA_*, FM_PR_REG_*, and FM_PR_META_*
 # hold the parsed records.
 fm_pr_poll_artifacts_content_valid() {
-  local state=$1 id=$2 template=$3 state_device check data registration meta data_hash template_hash
+  local state=$1 id=$2 template=$3
+  fm_pr_poll_artifacts_records_valid "$state" "$id" || return 1
+  cmp -s "$template" "$state/$id.check.sh"
+}
+
+# Everything fm_pr_poll_artifacts_content_valid proves except that the check is
+# byte-identical to a template: the three poll artifacts are private and on the
+# state directory's device, the check hashes to the registration's recorded
+# template hash, and the sidecar, registration, and task metadata name one PR.
+# Success alone is never authentication.
+fm_pr_poll_artifacts_records_valid() {
+  local state=$1 id=$2 state_device check data registration meta data_hash template_hash
   fm_pr_task_id_valid "$id" || return 1
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
   state_device=$(fm_pr_file_device "$state") || return 1
@@ -753,7 +764,6 @@ fm_pr_poll_artifacts_content_valid() {
   fm_pr_private_file_valid "$registration" 600 "$state_device" || return 1
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
   [ "$(fm_pr_file_link_count "$meta")" = 1 ] || return 1
-  cmp -s "$template" "$check" || return 1
   fm_pr_poll_data_parse "$data" || return 1
   data_hash=$(fm_pr_sha256 "$data") || return 1
   template_hash=$(fm_pr_sha256 "$check") || return 1
@@ -856,6 +866,51 @@ fm_pr_poll_registration_rerecord_device() {  # <state> <id> <template>
     rm -f -- "$tmp"
     return 1
   fi
+  fm_pr_poll_artifacts_valid "$state" "$id" "$template"
+}
+
+# A firstmate update that changes the poll template leaves every poll armed
+# before it holding the previous release's bytes, which the strict
+# fm_pr_poll_artifacts_valid then refuses. This proves that is the only
+# difference: every artifact passes fm_pr_poll_artifacts_records_valid, so the
+# check still hashes to the template its own registration recorded and the
+# sidecar, registration, and task metadata name one PR; both recorded
+# identities name the live sidecar and check, so the files are the exact
+# generation that registration published; and the check differs from the
+# current template. A replaced, altered, re-moded, relinked, or re-pointed
+# artifact fails a proof here and stays refused. A pending retirement receipt
+# owns its artifacts, so none is re-armed while one exists.
+fm_pr_poll_template_drifted() {  # <state> <id> <template>
+  local state=$1 id=$2 template=$3 receipt
+  fm_pr_task_id_valid "$id" || return 1
+  [ -f "$template" ] || return 1
+  [ -f "$state/$id.pr-poll-registration" ] || return 1
+  receipt="$state/$id.pr-poll-retirement"
+  [ ! -e "$receipt" ] && [ ! -L "$receipt" ] || return 1
+  fm_pr_poll_artifacts_records_valid "$state" "$id" || return 1
+  [ "$(fm_pr_file_identity "$state/$id.pr-poll")" = "$FM_PR_REG_DATA_IDENTITY" ] || return 1
+  [ "$(fm_pr_file_identity "$state/$id.check.sh")" = "$FM_PR_REG_CHECK_IDENTITY" ] || return 1
+  ! cmp -s "$template" "$state/$id.check.sh"
+}
+
+# Re-arm a template-drifted poll (fm_pr_poll_template_drifted) on the current
+# template for the PR it already watches, publishing a fresh generation exactly
+# as bin/fm-pr-check.sh does; the previous release's bytes are replaced, never
+# executed. The caller holds the task's control lock and poll publication lock,
+# which serialize this with the watcher's validated check and retirement,
+# teardown, bin/fm-pr-merge.sh, and direct bin/fm-pr-check.sh publication. It
+# runs in a subshell so the preparation's umask and staging globals stay out of
+# the caller. Success means the strict fm_pr_poll_artifacts_valid accepts the
+# result.
+fm_pr_poll_template_rearm() {  # <state> <id> <template>
+  local state=$1 id=$2 template=$3
+  fm_pr_poll_template_drifted "$state" "$id" "$template" || return 1
+  (
+    fm_pr_poll_prepare "$state" "$id" "$FM_PR_REG_PROVIDER" "$FM_PR_REG_URL" \
+      "$FM_PR_REG_HOST" "$FM_PR_REG_PATH" "$FM_PR_REG_NUMBER" "$template" || exit 1
+    trap fm_pr_poll_cleanup EXIT
+    fm_pr_poll_publish_prepared
+  ) || return 1
   fm_pr_poll_artifacts_valid "$state" "$id" "$template"
 }
 
