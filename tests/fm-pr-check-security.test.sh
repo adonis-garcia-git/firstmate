@@ -3610,6 +3610,150 @@ SH
   pass "device re-record publication waits without rewriting its registration"
 }
 
+# A firstmate update that changes bin/fm-pr-poll.sh leaves every poll armed
+# before it holding the previous release's bytes. This stands in for that
+# release: the current template plus one trailing line, so the armed copy is a
+# genuine, self-consistent registration of a template the watcher no longer
+# ships.
+previous_poll_template() {  # <dir>
+  local dir=$1
+  { cat "$POLL"; printf '# previous release\n'; } > "$dir/previous-fm-pr-poll.sh"
+  printf '%s\n' "$dir/previous-fm-pr-poll.sh"
+}
+
+test_registering_a_custom_check_keeps_armed_polls() {
+  local dir state id n out rc
+  dir=$(make_case register-keeps-polls)
+  state="$dir/home/state"
+  n=0
+  for id in task-a task-b task-c; do
+    n=$((n + 1))
+    write_poll_meta "$state" "$id" "https://github.com/o/r/pull/$n"
+    seed_canonical_poll "$dir" "$id" "https://github.com/o/r/pull/$n"
+  done
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$state/merges.check.sh"
+  chmod 0700 "$state/merges.check.sh"
+  FM_HOME="$dir/home" "$REGISTER" merges >/dev/null || fail "could not register the custom check"
+  printf '# edited\n' >> "$state/merges.check.sh"
+  FM_HOME="$dir/home" "$REGISTER" merges >/dev/null || fail "could not re-register the custom check"
+  for id in task-a task-b task-c; do
+    fm_pr_poll_artifacts_valid "$state" "$id" "$POLL" \
+      || fail "registering a custom check invalidated the armed poll for $id"
+  done
+  add_stop_custom_check "$dir"
+  set +e
+  FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=OPEN \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "watcher failed after custom check registration: $(cat "$dir/watch.err")"
+  out=$(cat "$dir/watch.out")
+  case "$out" in
+    *'rejected unauthenticated state checks'*) fail "watcher rejected checks after a custom check registration: $out" ;;
+  esac
+  [ "$(grep -c -- '--json state' "$dir/gh.log")" -eq 3 ] \
+    || fail "not every armed poll ran after a custom check registration: $(cat "$dir/gh.log")"
+  pass "registering and re-registering a custom check leaves every armed PR poll authenticated"
+}
+
+test_template_updated_poll_stays_armed() {
+  local dir state out rc previous
+  dir=$(make_case template-update-merged)
+  state="$dir/home/state"
+  previous=$(previous_poll_template "$dir")
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1 "$previous"
+  # Assert the divergence so the case cannot pass vacuously: the armed copy is
+  # its own release's genuine registration, and only the template moved on.
+  fm_pr_poll_artifacts_valid "$state" task-a "$previous" || fail "previous-release fixture was not a genuine poll"
+  ! fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "previous-release fixture still authenticated against the current template"
+  set +e
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "template-updated poll watcher failed: $(cat "$dir/watch.err")"
+  out=$(cat "$dir/watch.out")
+  case "$out" in
+    *'rejected unauthenticated state checks'*) fail "watcher refused a poll whose only change was a template update: $out" ;;
+  esac
+  [ "$(grep -c '^check: .*task-a\.check\.sh: merged$' "$dir/watch.out")" -eq 1 ] \
+    || fail "template-updated poll did not surface its merge exactly once: $out"
+
+  dir=$(make_case template-update-rearm)
+  state="$dir/home/state"
+  previous=$(previous_poll_template "$dir")
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1 "$previous"
+  add_stop_custom_check "$dir"
+  set +e
+  FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=OPEN \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "template re-arm watcher failed: $(cat "$dir/watch.err")"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "template re-arm did not publish a strict current poll"
+  [ "$(sed -n 4p "$state/task-a.pr-poll-registration")" = https://github.com/o/r/pull/1 ] \
+    || fail "template re-arm changed the watched PR"
+  [ "$(file_mode "$state/task-a.check.sh")" = 600 ] || fail "template re-armed check is not private"
+  grep -F 'pr view https://github.com/o/r/pull/1 --json state' "$dir/gh.log" >/dev/null \
+    || fail "template re-armed poll did not run its validated check in the same cycle"
+  grep -F 're-armed PR poll for task-a on the current poll template' "$state/.watch-triage.log" >/dev/null \
+    || fail "template re-arm left no triage evidence"
+  ! ls "$state"/.fm-pr-poll-* >/dev/null 2>&1 || fail "template re-arm left staged artifacts behind"
+  pass "a poll armed by a previous release is re-armed on the current template and keeps detecting merges"
+}
+
+test_template_rearm_refuses_tampered_artifacts() {
+  local mutation dir state out rc previous before
+  for mutation in altered-check swapped-check altered-sidecar foreign-meta wrong-mode hardlinked-check \
+    pending-retirement; do
+    dir=$(make_case "template-rearm-refuses-$mutation")
+    state="$dir/home/state"
+    previous=$(previous_poll_template "$dir")
+    write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+    seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1 "$previous"
+    case "$mutation" in
+      altered-check) printf 'printf merged\n' >> "$state/task-a.check.sh" ;;
+      swapped-check)
+        cp "$state/task-a.check.sh" "$state/.swap"
+        chmod 0600 "$state/.swap"
+        mv -f -- "$state/.swap" "$state/task-a.check.sh"
+        ;;
+      altered-sidecar)
+        printf '%s\n%s\n%s\n%s\n%s\n' github https://github.com/o/r/pull/2 github.com o/r 2 \
+          > "$state/task-a.pr-poll"
+        ;;
+      foreign-meta) write_poll_meta "$state" task-a https://github.com/o/r/pull/2 ;;
+      wrong-mode) chmod 0640 "$state/task-a.check.sh" ;;
+      hardlinked-check) ln "$state/task-a.check.sh" "$dir/check.alias" ;;
+      pending-retirement)
+        : > "$state/task-a.pr-poll-retirement"
+        chmod 0600 "$state/task-a.pr-poll-retirement"
+        ;;
+    esac
+    before=$(poll_artifact_snapshot "$state" task-a)
+    ! fm_pr_poll_template_drifted "$state" task-a "$POLL" \
+      || fail "$mutation fixture was accepted as a template drift"
+    [ "$mutation" = pending-retirement ] && continue
+    set +e
+    FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=MERGED \
+      run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+    rc=$?
+    set -e
+    [ "$rc" -eq 0 ] || fail "$mutation watcher failed: $(cat "$dir/watch.err")"
+    out=$(cat "$dir/watch.out")
+    case "$out" in
+      "check: rejected unauthenticated state checks:"*"task-a.check.sh"*) ;;
+      *) fail "$mutation on a previous-release poll was not refused: $out" ;;
+    esac
+    [ "$(poll_artifact_snapshot "$state" task-a)" = "$before" ] \
+      || fail "$mutation let the watcher re-arm the refused poll"
+    ! grep -F -- '--json state' "$dir/gh.log" >/dev/null 2>&1 || fail "$mutation ran the refused poll"
+  done
+  pass "a previous-release poll is never re-armed around a tampered artifact or a pending retirement"
+}
+
 test_parser_matrix
 test_gitlab_merge_watch
 test_forgejo_merge_watch
@@ -3652,6 +3796,9 @@ test_device_renumbered_poll_stays_armed
 test_device_rerecord_refuses_tampered_artifacts
 test_device_rerecord_serializes_direct_rearm
 test_device_rerecord_serializes_rerecord
+test_registering_a_custom_check_keeps_armed_polls
+test_template_updated_poll_stays_armed
+test_template_rearm_refuses_tampered_artifacts
 test_postrename_poll_validation_revokes_and_retries
 test_bootstrap_leaves_unauthenticated_checks
 test_custom_snapshot_cleanup_on_signal

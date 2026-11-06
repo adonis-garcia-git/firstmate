@@ -3389,6 +3389,28 @@ rerecord_device_shifted_pr_poll() {  # <id>
   return 0
 }
 
+# A poll armed by a previous firstmate release holds that release's
+# bin/fm-pr-poll.sh bytes, so a self-update that changed the template would
+# otherwise leave every armed poll refused until each was re-armed by hand;
+# bin/fm-pr-lib.sh fm_pr_poll_template_rearm owns the proof and the
+# republication. Same return contract as rerecord_device_shifted_pr_poll.
+rearm_template_drifted_pr_poll() {  # <id>
+  local id=$1
+  fm_pr_poll_template_drifted "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" || return 1
+  PR_POLL_CONTROL_LOCK="$STATE/.control-$id.lock"
+  fm_lock_acquire_wait "$PR_POLL_CONTROL_LOCK" || exit 1
+  PR_POLL_PUBLISH_LOCK="$STATE/.pr-poll-publish-$id.lock"
+  fm_lock_acquire_wait "$PR_POLL_PUBLISH_LOCK" || exit 1
+  if fm_pr_poll_template_rearm "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+    triage_log "re-armed PR poll for $id on the current poll template after a firstmate update changed it"
+  else
+    triage_log "PR poll for $id was not re-armed on the current poll template; the locked proof or publication did not hold"
+  fi
+  pr_poll_publish_release || exit 1
+  pr_poll_control_release || exit 1
+  return 0
+}
+
 resurface_after_downtime() {
   # Handling successors already have a predecessor-delivered wake on the way.
   # Re-announcing from this cycle is what turned a lost handshake into an
@@ -3589,6 +3611,8 @@ while :; do
         id=$(basename "$c" .check.sh)
         if fm_pr_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
           || { rerecord_device_shifted_pr_poll "$id" \
+            && fm_pr_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; } \
+          || { rearm_template_drifted_pr_poll "$id" \
             && fm_pr_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; }; then
           is_pr_poll=1
           provider=$FM_PR_POLL_SNAPSHOT_PROVIDER
