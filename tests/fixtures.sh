@@ -38,10 +38,18 @@ export FM_TEST_GH_AXI_VERSION=0.1.29
 # baked in because account probes run in a cleared environment. It then
 # answers from the selected root's quota-reading file (CLAUDE_CONFIG_DIR, else
 # $HOME/.claude), in the schema 5 shape the real quota-axi prints:
-#   <percent> <session> <weekly> [<runway>]   a known all-models reading
+#   <percent> <session> <weekly> [<runway> [<priority>]]
+#                                             a known all-models reading whose
+#                                             spendPriority is <priority> (1 by
+#                                             default; `unknown` publishes none);
+#                                             <session> `none` reports no
+#                                             five_hour window
 #   unreadable <error> [<remedy command...>]  the auth-required shape
-#   stale <session> <weekly>                  the rate-limited shape: last
-#                                             known windows, no all-models reading
+#   stale <session> <weekly> [<session-reset> <weekly-reset>]
+#                                             the rate-limited shape: last
+#                                             known windows, no all-models
+#                                             reading; each reset is seconds
+#                                             from now (negative has passed)
 # A root with no file answers as unreadable credentials_missing.
 fm_test_fake_quota_axi() {
   local fakebin=$1 log=$2
@@ -59,10 +67,27 @@ if [ "\$1" = unreadable ]; then
   exit 0
 fi
 if [ "\$1" = stale ]; then
-  printf '{"schemaVersion":5,"providers":[{"provider":"claude","plan":"max","windows":[{"id":"five_hour","label":"session","kind":"session","percentRemaining":%s,"pace":{"status":"unknown","reason":"stale"}},{"id":"seven_day","label":"week","kind":"weekly","percentRemaining":%s,"pace":{"status":"unknown","reason":"stale"}}],"state":{"status":"stale","stale":true,"error":"Claude quota endpoint rate limited"},"quotaSemantics":{"status":"unknown","effectiveAvailability":[{"scope":"all_models","status":"unknown","boundedBy":["five_hour","seven_day"],"runway":{"status":"unknown"}}]},"accountKeys":["default"]}]}\n' "\$2" "\$3"
+  resets=('' '')
+  if [ \$# -ge 5 ]; then
+    i=0
+    for offset in "\$4" "\$5"; do
+      at=\$((\$(date +%s) + offset))
+      resets[i]=",\"resetsAt\":\"\$(date -u -d "@\$at" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "\$at" +%Y-%m-%dT%H:%M:%SZ)\""
+      i=\$((i + 1))
+    done
+  fi
+  printf '{"schemaVersion":5,"providers":[{"provider":"claude","plan":"max","windows":[{"id":"five_hour","label":"session","kind":"session","percentRemaining":%s%s,"pace":{"status":"unknown","reason":"stale"}},{"id":"seven_day","label":"week","kind":"weekly","percentRemaining":%s%s,"pace":{"status":"unknown","reason":"stale"}}],"state":{"status":"stale","stale":true,"error":"Claude quota endpoint rate limited"},"quotaSemantics":{"status":"unknown","effectiveAvailability":[{"scope":"all_models","status":"unknown","boundedBy":["five_hour","seven_day"],"runway":{"status":"unknown"},"selection":{"status":"unknown","unmeasurableWindowIds":["five_hour","seven_day"]}}]},"accountKeys":["default"]}]}\n' "\$2" "\${resets[0]}" "\$3" "\${resets[1]}"
   exit 0
 fi
-printf '{"schemaVersion":5,"providers":[{"provider":"claude","plan":"max","windows":[{"id":"five_hour","label":"session","kind":"session","percentRemaining":%s},{"id":"seven_day","label":"week","kind":"weekly","percentRemaining":%s}],"state":{"status":"fresh","stale":false},"quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":%s,"boundedBy":["five_hour","seven_day"],"runway":{"status":"%s","projectionConfidence":"established"},"selection":{"status":"known","spendPriority":1}}]},"accountKeys":["default"]}]}\n' "\$2" "\$3" "\$1" "\${4:-through_reset}"
+selection='{"status":"known","spendPriority":1}'
+session="{\"id\":\"five_hour\",\"label\":\"session\",\"kind\":\"session\",\"percentRemaining\":\$2},"
+[ "\$2" != none ] || session=
+if [ "\${5:-}" = unknown ]; then
+  selection='{"status":"unknown"}'
+elif [ -n "\${5:-}" ]; then
+  selection="{\"status\":\"known\",\"spendPriority\":\$5}"
+fi
+printf '{"schemaVersion":5,"providers":[{"provider":"claude","plan":"max","windows":[%s{"id":"seven_day","label":"week","kind":"weekly","percentRemaining":%s}],"state":{"status":"fresh","stale":false},"quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":%s,"boundedBy":["five_hour","seven_day"],"runway":{"status":"%s","projectionConfidence":"established"},"selection":%s}]},"accountKeys":["default"]}]}\n' "\$session" "\$3" "\$1" "\${4:-through_reset}" "\$selection"
 SH
   chmod +x "$fakebin/quota-axi"
 }

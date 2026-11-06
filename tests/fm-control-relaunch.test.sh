@@ -1088,7 +1088,7 @@ test_relaunch_quota_choice_is_made_once_and_unusable_accounts_refuse_before_stop
   printf '80 85 80\n' > "$dir/work/quota-reading"
   out=$(run_control "$dir" "$id" relaunch --note "choose by quota"); rc=$?
   expect_code 0 "$rc" "a relaunch over two named accounts should succeed"$'\n'"$out"
-  assert_contains "$out" "notice: chose Claude account work by weighted remaining quota" "the relaunch should say why it chose"
+  assert_contains "$out" "notice: chose Claude account work by spend priority" "the relaunch should say why it chose"
   [ "$(meta_field "$dir" "$id" account)" = work ] || fail "the record should name the account chosen by quota"
   [ "$(meta_field "$dir" "$id" account_root)" = "$dir/work" ] || fail "the record should carry the chosen account's root"
   [ "$(wc -l < "$dir/quota-reads" | tr -d ' ')" = 2 ] ||

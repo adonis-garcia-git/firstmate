@@ -717,14 +717,20 @@ ok - quota-axi 0.1.55: an empty Claude root reads as unreadable in a valid snaps
 ```
 
 The positive read needs a real login, so it is not in the guard.
-On the same Mac, a signed-in `ordinary` root and a signed-in non-default root whose macOS Keychain entry quota-axi had not yet been approved to read answered:
+On 2026-11-06 on Claude Code 2.1.319 and quota-axi 0.1.55 on macOS, a signed-in Team seat root and a signed-in Max root that reported no 5-hour window answered with quota-axi's all-models `spendPriority`, which the choice ranks by:
 
 ```sh
-bash -c '. bin/fm-worker-account-lib.sh; fm_worker_account_claude_quota ""; fm_worker_account_claude_quota "$HOME/.claude-work"'
+bash -c '. bin/fm-worker-account-lib.sh; fm_worker_account_claude_quota "$HOME/.claude-team"; fm_worker_account_claude_quota "$HOME/.claude-personal"'
 ```
 
 ```
-known	78	through_reset	88	78
+known	61	through_reset	91	61	2.2547	quota-axi
+known	87	projected_exhaustion	?	87	-0.7975	quota-axi
+```
+
+On 2026-10-01, a signed-in non-default root whose macOS Keychain entry quota-axi had not yet been approved to read answered:
+
+```
 unreadable	keychain_prompt_required	quota-axi --allow-keychain-prompt
 ```
 

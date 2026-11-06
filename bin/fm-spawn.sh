@@ -450,7 +450,7 @@
 #   accounts; a Claude launch then takes --account <name> when given, a
 #   relaunch the named account its task record names while it is still
 #   declared, signed in, and not exhausted_now, and otherwise the declared
-#   account with the most weighted remaining quota. A pinned Claude
+#   account quota-axi's spend priority says to use first. A pinned Claude
 #   launch sheds the environment credentials Claude ranks above the root's
 #   login; a pinned Pi launch needs --model <provider>/<id> for a declared
 #   provider and also carries --provider, and a raw Pi command refuses. The
