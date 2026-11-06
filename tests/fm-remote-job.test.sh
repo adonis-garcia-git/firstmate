@@ -54,6 +54,44 @@ cleanup_remote_job_fixture() {
 }
 trap cleanup_remote_job_fixture EXIT
 
+# A worker's own shutdown is bounded at a few seconds (its stop loop, the
+# heartbeat stop, and the supervisor's forwarded stop), so waiting far past that
+# on a worker that will not exit turns a silent CI cancel into a failure that
+# names every process still holding the worker tree open.
+WORKER_EXIT_SECS=60
+worker_tree_report() { # <pid>
+  ps -A -o pid=,ppid=,pgid=,state=,command= | awk -v root="$1" '
+    { pid[NR] = $1; ppid[NR] = $2; line[NR] = $0 }
+    END {
+      keep[root] = 1
+      for (changed = 1; changed;) {
+        changed = 0
+        for (i = 1; i <= NR; i++)
+          if (!(pid[i] in keep) && (ppid[i] in keep)) {
+            keep[pid[i]] = 1
+            changed = 1
+          }
+      }
+      for (i = 1; i <= NR; i++) if (pid[i] in keep) print line[i]
+    }'
+}
+worker_alive() { # <pid>
+  local state
+  state=$(ps -o state= -p "$1" 2>/dev/null) || return 1
+  [ -n "$state" ] && [[ "$state" != *Z* ]]
+}
+await_worker_exit() { # <what> <pid>
+  local what=$1 pid=$2 deadline=$((SECONDS + WORKER_EXIT_SECS))
+  while worker_alive "$pid"; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      fail "$what: worker pid $pid still alive after ${WORKER_EXIT_SECS}s; surviving worker tree (pid ppid pgid state command):
+$(worker_tree_report "$pid")"
+    fi
+    sleep 0.05
+  done
+  wait "$pid" 2>/dev/null || true
+}
+
 cp "$ROOT/bin/fm-remote-job-lib.sh" "$ROOT/bin/fm-remote-job-worker.sh" \
   "$ROOT/bin/fm-remote-delta-read.sh" "$REMOTE_ROOT/bin/"
 printf 'fixture\n' > "$REMOTE_ROOT/AGENTS.md"
@@ -722,7 +760,6 @@ GROUP_PID=$(cat "$JOB_DIR/.claim/group")
 printf 'invalid\n' > "$JOB_DIR/.claim/group"
 WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
 kill -TERM "$WORKER_PID"
-wait "$WORKER_PID" 2>/dev/null || true
 for _ in $(seq 1 100); do
   [ -f "$STATE_ROOT/worker.lock/quarantine" ] && break
   sleep 0.05
@@ -792,7 +829,7 @@ assert_absent "$RECOVERY_STATE/worker.lock/quarantine" "recovered worker retaine
 kill -0 "$QUARANTINED_PROCESS_PID" 2>/dev/null \
   || fail "worker recovery signalled a process whose supervisor identity did not match"
 kill -TERM "$RECOVERY_WORKER_PID"
-wait "$RECOVERY_WORKER_PID" 2>/dev/null || true
+await_worker_exit "the recovered worker supervisor did not stop on TERM" "$RECOVERY_WORKER_PID"
 RECOVERY_WORKER_PID=
 kill "$QUARANTINED_PROCESS_PID" 2>/dev/null || true
 wait "$QUARANTINED_PROCESS_PID" 2>/dev/null || true
@@ -862,7 +899,8 @@ done
 assert_present "$REPEAT_STATE/worker.ready" \
   "the worker after a repeatedly signalled shutdown never reported ready"
 kill -TERM "$REPEAT_WORKER_PID"
-wait "$REPEAT_WORKER_PID" 2>/dev/null || true
+await_worker_exit "the worker after a repeatedly signalled shutdown did not stop on TERM" \
+  "$REPEAT_WORKER_PID"
 REPEAT_WORKER_PID=
 pass "a repeatedly signalled shutdown still releases ownership for the next worker"
 
