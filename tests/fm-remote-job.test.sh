@@ -427,8 +427,19 @@ NEW_WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
 pass "worker identity binds the canonical configured code root"
 
 CRASHED_WORKER_PID=$NEW_WORKER_PID
-kill -KILL "$CRASHED_WORKER_PID"
-wait "$CRASHED_WORKER_PID" 2>/dev/null || true
+# A crash takes the whole worker tree down. Killing only the serving child is an
+# ordinary child exit that the restart supervisor recovers by design: it clears
+# that child's ownership and starts a replacement, which then races the stale
+# state this fixture forges below.
+CRASHED_WORKER_PGID=$(fm_remote_job_worker_process_group "$CRASHED_WORKER_PID") \
+  || fail "the crash fixture could not resolve the worker's isolated group"
+kill -KILL -- "-$CRASHED_WORKER_PGID"
+wait "$CRASHED_WORKER_PGID" 2>/dev/null || true
+for _ in $(seq 1 100); do
+  kill -0 -- "-$CRASHED_WORKER_PGID" 2>/dev/null || break
+  sleep 0.05
+done
+! kill -0 -- "-$CRASHED_WORKER_PGID" 2>/dev/null || fail "the crashed worker tree did not exit"
 assert_present "$STATE_ROOT/worker.lock" "an unclean exit did not retain the worker ownership lock"
 sleep 20 &
 OTHER_PID=$!
