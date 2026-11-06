@@ -30,9 +30,10 @@
 #   - reclaimable memory is at least <class>_mem_floor_mb, unless no run of
 #     that class holds a slot: the floor is waived for a class's first slot,
 #     so one run of each class can always progress, and applies to every
-#     additional slot. Reclaimable memory is MemAvailable from /proc/meminfo where that file exists, otherwise the
-#     free, inactive, and speculative pages reported by vm_stat (macOS). When
-#     neither probe works the floor is not enforced and status says so.
+#     additional slot. Reclaimable memory is MemAvailable from /proc/meminfo
+#     where that file exists, otherwise the free, inactive, and speculative
+#     pages reported by vm_stat (macOS). When neither probe works the floor
+#     is not enforced and status says so.
 # The load average is never consulted.
 #
 # Liveness: every holder and waiter record names the acquire process and, once
