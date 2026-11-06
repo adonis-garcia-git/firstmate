@@ -692,7 +692,7 @@ IFS= read -r -d '' SHARED_MACHINE_RULE <<EOF || true
    - Never use \`pkill\`, \`killall\`, or \`kill \$(pgrep ...)\` by name or pattern; stop only processes you started, by the PID you recorded when you started them.
      On macOS, \`pkill -f "pattern" -U 501\` treats \`-U\` and \`501\` as extra patterns and kills every process whose command line contains them, including other workers' runs.
    - Run every heavy test suite, build, or eval in a run slot instead of watching the load average:
-     \`$RUN_SLOT_CMD acquire --class cpu --wait -- <command...>\`
+     \`$RUN_SLOT_CMD acquire --class cpu -- <command...>\`
      It waits its first-come-first-served turn, runs the command, and frees the slot when the command exits or dies.
      Use \`--class net\` instead for an eval that mostly waits on model or network calls.
      \`$RUN_SLOT_CMD status\` shows who holds and who waits; a queued wait can be long, so run it like any long command.

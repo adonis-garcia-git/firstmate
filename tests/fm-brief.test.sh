@@ -1654,7 +1654,7 @@ test_crewmate_scaffolds_carry_shared_machine_rule() {
   # shellcheck disable=SC2016 # Literal brief text.
   assert_contains "$ship_rule" 'Never use `pkill`, `killall`, or `kill $(pgrep ...)` by name or pattern' \
     "the shared-machine rule lost the never-kill-by-pattern rule"
-  assert_contains "$ship_rule" "acquire --class cpu --wait -- <command...>" "the shared-machine rule did not name the run-slot command"
+  assert_contains "$ship_rule" "acquire --class cpu -- <command...>" "the shared-machine rule did not name the run-slot command"
   assert_contains "$ship_rule" "--class net" "the shared-machine rule did not name the network-bound class"
   assert_contains "$ship_rule" "run the affected test files with \`--maxWorkers=2\`" \
     "the shared-machine rule lost the frontend affected-files rule"

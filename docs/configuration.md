@@ -1409,7 +1409,7 @@ Firstmate cannot see which part of a worker's life uses the resource, so the num
 ## Run slots (config/run-slots)
 
 Workers on one machine run heavy test suites, builds, and evals through `bin/fm-run-slot.sh`, which hands out run slots first-come-first-served instead of letting each worker poll the load average.
-Every generated ship and scout brief tells its worker to wrap such a run in `fm-run-slot.sh acquire --class cpu --wait -- <command>`, or `--class net` for an eval that mostly waits on model or network calls.
+Every generated ship and scout brief tells its worker to wrap such a run in `fm-run-slot.sh acquire --class cpu -- <command>`, or `--class net` for an eval that mostly waits on model or network calls.
 The script runs the command while it holds a slot and frees the slot when the command exits or dies, so a crashed run never keeps one.
 Waiting runs start strictly in arrival order, so no run is overtaken and starved.
 A run starts only when its class has a free slot and reclaimable memory is at or above the class's memory floor.

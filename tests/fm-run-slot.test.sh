@@ -115,6 +115,10 @@ test_usage_errors() {
   expect_code 2 "$rc" "unknown class"
   out=$(run_slot "$home" acquire --class cpu 2>&1); rc=$?
   expect_code 2 "$rc" "acquire without a command"
+  out=$(run_slot "$home" acquire --class=cpu -- true 2>&1); rc=$?
+  expect_code 2 "$rc" "the --class=<value> spelling"
+  out=$(run_slot "$home" acquire --class cpu --wait -- true 2>&1); rc=$?
+  expect_code 2 "$rc" "the removed --wait flag"
   out=$(run_slot "$home" status extra 2>&1); rc=$?
   expect_code 2 "$rc" "status with an argument"
   out=$(PATH="$BASE_PATH" FM_HOME="$home" FM_RUN_SLOT_POLL_SECS=0 "$SLOT" status 2>&1); rc=$?
@@ -123,7 +127,7 @@ test_usage_errors() {
   expect_code 2 "$rc" "a non-numeric poll interval"
   out=$(run_slot "$home" --help 2>&1); rc=$?
   expect_code 0 "$rc" "--help"
-  assert_contains "$out" "acquire --class <cpu|net> [--wait] -- <command>" "--help did not print the usage"
+  assert_contains "$out" "acquire --class <cpu|net> -- <command>" "--help did not print the usage"
   pass "usage errors exit 2 and --help prints the header"
 }
 
@@ -183,32 +187,36 @@ test_runs_command_and_propagates_status() {
   pass "acquire runs the command with its stdin and arguments and returns its status"
 }
 
-test_no_wait_refuses_when_full() {
-  local home dir out rc
-  home=$(make_home nowait 'cpu_slots=1')
+test_full_class_queues_and_other_classes_proceed() {
+  local home dir out rc holder waiter
+  home=$(make_home full 'cpu_slots=1')
   dir="$home/run"; mkdir -p "$dir"
   bg_slot "$home" "$dir/holder.log" acquire --class cpu -- sh -c "$(gate_cmd "$dir" holder)"
+  holder=$BG_LAST
   wait_for 10 "the holder to start" test -s "$dir/holder.pid"
-  out=$(run_slot "$home" acquire --class cpu -- touch "$dir/ran" 2>&1); rc=$?
-  expect_code 75 "$rc" "acquire without --wait while every slot is held"
-  assert_contains "$out" "no cpu slot free: all 1 cpu slots are held" "a busy refusal did not say why"
-  assert_absent "$dir/ran" "a refused acquire ran its command"
+  bg_slot "$home" "$dir/waiter.log" acquire --class cpu -- touch "$dir/ran"
+  waiter=$BG_LAST
+  wait_for 10 "the second run to queue" has_counts "$home" cpu 1/1 1
+  wait_for 10 "the waiter to report why it waits" grep -q "first in line for a cpu slot: all 1 cpu slots are held" "$dir/waiter.log"
+  assert_absent "$dir/ran" "a run started while every slot was held"
   out=$(run_slot "$home" acquire --class net -- touch "$dir/net-ran" 2>&1); rc=$?
   expect_code 0 "$rc" "a net run while cpu slots are full: $out"
   assert_present "$dir/net-ran" "a net run queued behind cpu runs"
   touch "$dir/holder.open"
-  wait "$BG_LAST" || fail "the holder failed"
-  pass "without --wait a full class refuses with exit 75 and other classes are unaffected"
+  wait "$holder" || fail "the holder failed"
+  wait "$waiter" || fail "the queued run failed: $(cat "$dir/waiter.log")"
+  assert_present "$dir/ran" "the queued run never started after the slot freed"
+  pass "a full class queues further runs until a slot frees and other classes are unaffected"
 }
 
 test_fifo_order() {
   local home dir name waiting=0 pids=() p
   home=$(make_home fifo 'cpu_slots=1')
   dir="$home/run"; mkdir -p "$dir"
-  bg_slot "$home" "$dir/holder.log" acquire --class cpu --wait -- sh -c "$(gate_cmd "$dir" holder)"
+  bg_slot "$home" "$dir/holder.log" acquire --class cpu -- sh -c "$(gate_cmd "$dir" holder)"
   wait_for 10 "the holder to start" test -s "$dir/holder.pid"
   for name in w1 w2 w3 w4 w5; do
-    bg_slot "$home" "$dir/$name.log" acquire --class cpu --wait -- sh -c "echo $name >> '$dir/order'"
+    bg_slot "$home" "$dir/$name.log" acquire --class cpu -- sh -c "echo $name >> '$dir/order'"
     pids+=("$BG_LAST")
     waiting=$((waiting + 1))
     wait_for 10 "$name to queue" has_counts "$home" cpu 1/1 "$waiting"
@@ -224,25 +232,29 @@ test_fifo_order() {
 }
 
 test_concurrent_acquirers_never_exceed_slots() {
-  local home dir i pids=() p failed=0 max lines out rc
+  local home dir i pids=() p failed=0 max lines third
   home=$(make_home concurrent 'cpu_slots=2')
   dir="$home/run"; mkdir -p "$dir"
 
   # Both slots are usable at once, and only both.
-  bg_slot "$home" "$dir/g1.log" acquire --class cpu --wait -- sh -c "$(gate_cmd "$dir" g1)"
+  bg_slot "$home" "$dir/g1.log" acquire --class cpu -- sh -c "$(gate_cmd "$dir" g1)"
   pids+=("$BG_LAST")
-  bg_slot "$home" "$dir/g2.log" acquire --class cpu --wait -- sh -c "$(gate_cmd "$dir" g2)"
+  bg_slot "$home" "$dir/g2.log" acquire --class cpu -- sh -c "$(gate_cmd "$dir" g2)"
   pids+=("$BG_LAST")
   wait_for 10 "both gated holders to start" test -s "$dir/g1.pid" -a -s "$dir/g2.pid"
-  out=$(run_slot "$home" acquire --class cpu -- true 2>&1); rc=$?
-  expect_code 75 "$rc" "a third run while both slots are held"
+  bg_slot "$home" "$dir/third.log" acquire --class cpu -- touch "$dir/third-ran"
+  third=$BG_LAST
+  wait_for 10 "a third run to queue while both slots are held" has_counts "$home" cpu 2/2 1
+  assert_absent "$dir/third-ran" "a third run started while both slots were held"
   touch "$dir/g1.open" "$dir/g2.open"
   for p in "${pids[@]}"; do wait "$p" || fail "a gated holder failed"; done
+  wait "$third" || fail "the third run failed: $(cat "$dir/third.log")"
+  assert_present "$dir/third-ran" "the third run never started after the slots freed"
 
   pids=()
   : > "$dir/events"
   for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
-    bg_slot "$home" "$dir/a$i.log" acquire --class cpu --wait -- sh -c "echo + >> '$dir/events'; sleep 0.3; echo - >> '$dir/events'"
+    bg_slot "$home" "$dir/a$i.log" acquire --class cpu -- sh -c "echo + >> '$dir/events'; sleep 0.3; echo - >> '$dir/events'"
     pids+=("$BG_LAST")
   done
   for p in "${pids[@]}"; do wait "$p" || failed=$((failed + 1)); done
@@ -256,7 +268,7 @@ test_concurrent_acquirers_never_exceed_slots() {
 }
 
 test_killed_holder_and_waiter_free_their_places() {
-  local home dir out rc wrapper child queued_dead
+  local home dir wrapper child queued_dead
   home=$(make_home killed 'cpu_slots=1')
   dir="$home/run"; mkdir -p "$dir"
 
@@ -267,19 +279,19 @@ test_killed_holder_and_waiter_free_their_places() {
   child=$(cat "$dir/holder.pid")
   kill -9 "$wrapper"
   { wait "$wrapper"; } 2>/dev/null
-  out=$(run_slot "$home" acquire --class cpu -- true 2>&1); rc=$?
-  expect_code 75 "$rc" "a slot whose command still runs after its acquire process was killed"
   has_counts "$home" cpu 1/1 0 || fail "status lost a holder whose command is alive"
 
   # A killed waiter gives up its queue place.
-  bg_slot "$home" "$dir/dead.log" acquire --class cpu --wait -- touch "$dir/dead-ran"
+  bg_slot "$home" "$dir/dead.log" acquire --class cpu -- touch "$dir/dead-ran"
   queued_dead=$BG_LAST
   wait_for 10 "the doomed waiter to queue" has_counts "$home" cpu 1/1 1
-  bg_slot "$home" "$dir/next.log" acquire --class cpu --wait -- touch "$dir/next-ran"
+  bg_slot "$home" "$dir/next.log" acquire --class cpu -- touch "$dir/next-ran"
   wait_for 10 "the next waiter to queue" has_counts "$home" cpu 1/1 2
   kill -9 "$queued_dead"
   { wait "$queued_dead"; } 2>/dev/null
   wait_for 10 "the dead waiter to leave the queue" has_counts "$home" cpu 1/1 1
+  sleep 0.3
+  assert_absent "$dir/next-ran" "a waiter started while a killed acquire's command still held the slot"
 
   # When the command itself dies, the slot frees and the next waiter runs.
   kill -9 "$child"
@@ -300,7 +312,7 @@ test_signals_are_forwarded_and_release() {
   wait_for 10 "the trapping command to start" test -s "$dir/term.pid"
 
   # TERM while queued leaves the queue.
-  bg_slot "$home" "$dir/queued.log" acquire --class cpu --wait -- touch "$dir/queued-ran"
+  bg_slot "$home" "$dir/queued.log" acquire --class cpu -- touch "$dir/queued-ran"
   waiter=$BG_LAST
   wait_for 10 "the waiter to queue" has_counts "$home" cpu 1/1 1
   kill -TERM "$waiter"
@@ -327,16 +339,12 @@ test_memory_floor_meminfo() {
   out=$(run_slot "$home" acquire --class cpu -- touch "$dir/first-ran" 2>&1); rc=$?
   expect_code 0 "$rc" "the first cpu run below the memory floor: $out"
   assert_present "$dir/first-ran" "the first cpu run below the memory floor did not start"
-  bg_slot "$home" "$dir/holder.log" acquire --class cpu --wait -- sh -c "$(gate_cmd "$dir" holder)"
+  bg_slot "$home" "$dir/holder.log" acquire --class cpu -- sh -c "$(gate_cmd "$dir" holder)"
   wait_for 10 "the waived holder to start" test -s "$dir/holder.pid"
   assert_contains "$(run_slot "$home" status)" "cpu: 1/2 held, 0 waiting" "a waiting first run below the floor did not take its slot"
 
   # With one holder and a free slot, the next run waits on memory.
-  out=$(run_slot "$home" acquire --class cpu -- touch "$dir/ran" 2>&1); rc=$?
-  expect_code 75 "$rc" "a second acquire below the memory floor without --wait"
-  assert_contains "$out" "reclaimable memory 500 MB is below the 1000 MB floor" "the memory refusal did not say why"
-  assert_absent "$dir/ran" "a second run below the memory floor started"
-  bg_slot "$home" "$dir/wait.log" acquire --class cpu --wait -- touch "$dir/ran"
+  bg_slot "$home" "$dir/wait.log" acquire --class cpu -- touch "$dir/ran"
   wait_for 10 "the run to queue on memory" has_counts "$home" cpu 1/2 1
   assert_contains "$(run_slot "$home" status)" "next: reclaimable memory 500 MB is below the 1000 MB floor" \
     "status did not show the memory wait"
@@ -355,10 +363,11 @@ test_memory_floor_meminfo() {
 }
 
 test_memory_floor_vm_stat() {
-  local home dir fakebin out rc cpu_holder net_holder
+  local home dir fakebin out rc cpu_holder net_holder cpu_waiter net_waiter RUN_SLOT_PATH RUN_SLOT_PROC
   home=$(make_home mem-vmstat 'cpu_mem_floor_mb=1000' 'net_mem_floor_mb=400')
   dir="$home/run"; mkdir -p "$dir" "$home/noproc"
   fakebin=$(fm_fakebin "$home")
+  RUN_SLOT_PATH="$fakebin:$BASE_PATH" RUN_SLOT_PROC="$home/noproc"
   # 10000 free + 20000 inactive + 2000 speculative pages of 16 KiB = 500 MB.
   cat > "$fakebin/vm_stat" <<'SH'
 #!/bin/sh
@@ -375,23 +384,32 @@ SH
   bg_slot "$home" "$dir/net-holder.log" acquire --class net -- sh -c "$(gate_cmd "$dir" net-holder)"
   net_holder=$BG_LAST
   wait_for 10 "the cpu and net holders to start" test -s "$dir/holder.pid" -a -s "$dir/net-holder.pid"
-  out=$(RUN_SLOT_PATH="$fakebin:$BASE_PATH" RUN_SLOT_PROC="$home/noproc" run_slot "$home" status 2>&1)
+  out=$(run_slot "$home" status 2>&1)
   assert_contains "$out" "reclaimable 500 MB" "vm_stat free, inactive, and speculative pages were not summed"
-  out=$(RUN_SLOT_PATH="$fakebin:$BASE_PATH" RUN_SLOT_PROC="$home/noproc" run_slot "$home" acquire --class cpu -- true 2>&1); rc=$?
-  expect_code 75 "$rc" "a second cpu acquire below its floor through vm_stat"
-  out=$(RUN_SLOT_PATH="$fakebin:$BASE_PATH" RUN_SLOT_PROC="$home/noproc" run_slot "$home" acquire --class net -- true 2>&1); rc=$?
+  bg_slot "$home" "$dir/cpu-waiter.log" acquire --class cpu -- touch "$dir/cpu-ran"
+  cpu_waiter=$BG_LAST
+  wait_for 10 "a second cpu run to queue below its floor through vm_stat" has_counts "$home" cpu 1/2 1
+  status_has "$home" "next: reclaimable memory 500 MB is below the 1000 MB floor" \
+    || fail "status did not show the cpu memory wait through vm_stat: $(run_slot "$home" status 2>&1)"
+  out=$(run_slot "$home" acquire --class net -- true 2>&1); rc=$?
   expect_code 0 "$rc" "a second net acquire above its own floor through vm_stat: $out"
   # 10000 free + 5000 inactive + 2000 speculative pages of 16 KiB = 265 MB.
   sed -i.bak 's/^echo .Pages inactive: .*/echo "Pages inactive: 5000."/' "$fakebin/vm_stat"
-  out=$(RUN_SLOT_PATH="$fakebin:$BASE_PATH" RUN_SLOT_PROC="$home/noproc" run_slot "$home" acquire --class net -- true 2>&1); rc=$?
-  expect_code 75 "$rc" "a second net acquire below its own floor through vm_stat"
-  assert_contains "$out" "reclaimable memory 265 MB is below the 400 MB floor" "the net refusal did not name the net floor"
+  bg_slot "$home" "$dir/net-waiter.log" acquire --class net -- touch "$dir/net-ran"
+  net_waiter=$BG_LAST
+  wait_for 10 "a second net run to queue below its own floor through vm_stat" has_counts "$home" net 1/8 1
+  status_has "$home" "next: reclaimable memory 265 MB is below the 400 MB floor" \
+    || fail "status did not name the net floor: $(run_slot "$home" status 2>&1)"
+  assert_absent "$dir/cpu-ran" "a cpu run started below its floor through vm_stat"
+  assert_absent "$dir/net-ran" "a net run started below its floor through vm_stat"
 
   printf '#!/bin/sh\nexit 1\n' > "$fakebin/vm_stat"
-  out=$(RUN_SLOT_PATH="$fakebin:$BASE_PATH" RUN_SLOT_PROC="$home/noproc" run_slot "$home" status 2>&1)
+  out=$(run_slot "$home" status 2>&1)
   assert_contains "$out" "reclaimable memory unknown, floor not enforced" "an unavailable memory probe was not reported"
-  out=$(RUN_SLOT_PATH="$fakebin:$BASE_PATH" RUN_SLOT_PROC="$home/noproc" run_slot "$home" acquire --class cpu -- true 2>&1); rc=$?
-  expect_code 0 "$rc" "a second cpu acquire when no memory probe works: $out"
+  wait "$cpu_waiter" || fail "the queued cpu run failed when no memory probe works: $(cat "$dir/cpu-waiter.log")"
+  wait "$net_waiter" || fail "the queued net run failed when no memory probe works: $(cat "$dir/net-waiter.log")"
+  assert_present "$dir/cpu-ran" "a queued cpu run did not start when no memory probe works"
+  assert_present "$dir/net-ran" "a queued net run did not start when no memory probe works"
   touch "$dir/holder.open" "$dir/net-holder.open"
   wait "$cpu_holder" || fail "the cpu holder failed"
   wait "$net_holder" || fail "the net holder failed"
@@ -399,7 +417,7 @@ SH
 }
 
 test_secondmate_home_shares_root_queue() {
-  local root mate dir out rc
+  local root mate dir out holder waiter
   root=$(make_home shared-root 'cpu_slots=1')
   mate="$TMP_ROOT/shared-mate"
   mkdir -p "$mate/state" "$mate/config"
@@ -407,14 +425,19 @@ test_secondmate_home_shares_root_queue() {
   printf '%s\n' schema=fm-secondmate-parent.v1 route=local "parent_home=$root" > "$mate/.fm-secondmate-parent"
   dir="$root/run"; mkdir -p "$dir"
   bg_slot "$root" "$dir/holder.log" acquire --class cpu -- sh -c "$(gate_cmd "$dir" holder)"
+  holder=$BG_LAST
   wait_for 10 "the root holder to start" test -s "$dir/holder.pid"
-  out=$(RUN_SLOT_PROC="$root/proc" run_slot "$mate" acquire --class cpu -- touch "$dir/mate-ran" 2>&1); rc=$?
-  expect_code 75 "$rc" "a secondmate home acquiring while the root home's only slot is held"
+  RUN_SLOT_PROC="$root/proc" bg_slot "$mate" "$dir/mate.log" acquire --class cpu -- touch "$dir/mate-ran"
+  waiter=$BG_LAST
+  wait_for 10 "the secondmate run to queue behind the root holder" has_counts "$root" cpu 1/1 1
   out=$(RUN_SLOT_PROC="$root/proc" run_slot "$mate" status 2>&1)
-  assert_contains "$out" "cpu: 1/1 held" "a secondmate home did not read the root home's config and holders"
+  assert_contains "$out" "cpu: 1/1 held, 1 waiting" "a secondmate home did not read the root home's config and queue"
+  assert_absent "$dir/mate-ran" "a secondmate run started while the root home's only slot was held"
   assert_absent "$mate/state/run-slots" "a secondmate home kept its own run-slot state"
   touch "$dir/holder.open"
-  wait "$BG_LAST" || fail "the root holder failed"
+  wait "$holder" || fail "the root holder failed"
+  wait "$waiter" || fail "the secondmate run failed: $(cat "$dir/mate.log")"
+  assert_present "$dir/mate-ran" "the secondmate run never started after the root slot freed"
   pass "a local secondmate home shares the root home's machine-wide queue"
 }
 
@@ -422,7 +445,7 @@ test_usage_errors
 test_config_defaults_and_overrides
 test_config_refusals
 test_runs_command_and_propagates_status
-test_no_wait_refuses_when_full
+test_full_class_queues_and_other_classes_proceed
 test_fifo_order
 test_concurrent_acquirers_never_exceed_slots
 test_killed_holder_and_waiter_free_their_places

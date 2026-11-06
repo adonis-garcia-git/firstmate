@@ -4,18 +4,16 @@
 # instead of polling the load average and starting together.
 #
 # Usage:
-#   fm-run-slot.sh acquire --class <cpu|net> [--wait] -- <command> [args...]
+#   fm-run-slot.sh acquire --class <cpu|net> -- <command> [args...]
 #   fm-run-slot.sh status
 #   fm-run-slot.sh --help
 #
 # acquire runs <command> while holding one slot of the named class and frees
 # the slot when the command exits or dies. The command keeps this terminal's
 # stdin, stdout, and stderr, and acquire exits with the command's own status.
-# Without --wait, acquire takes a slot only when one is free right now and no
-# earlier caller is waiting for that class; otherwise it prints why on stderr
-# and exits 75 without running anything. With --wait, it joins the class's
-# first-in-first-out queue, prints its position on stderr whenever that
-# changes, and runs the command when its turn comes.
+# acquire always joins the class's first-in-first-out queue, prints its
+# position on stderr whenever that changes, and runs the command when its turn
+# comes.
 #
 # Classes:
 #   cpu  CPU- or memory-heavy runs: test suites, builds, local model work.
@@ -86,9 +84,8 @@
 #   FM_RUN_SLOT_POLL_SECS  seconds between queue checks while waiting
 #                          (default 1; a positive number such as 0.2).
 #
-# Exit status: the command's status after it ran; 75 when no slot was free
-# without --wait; 127 when the command cannot be executed; 2 on a usage
-# error; 1 on an unreadable config, an unresolvable root home, or a state
+# Exit status: the command's status after it ran; 127 when the command cannot
+# be executed; 2 on a usage error; 1 on an unreadable config, an unresolvable root home, or a state
 # failure.
 set -u
 
@@ -96,7 +93,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
-RUN_SLOT_BUSY_EXIT=75
 RUN_SLOT_CLASSES="cpu net"
 
 usage() {
@@ -114,7 +110,7 @@ die() {
 
 usage_error() {
   echo "fm-run-slot: $*" >&2
-  echo "usage: fm-run-slot.sh acquire --class <cpu|net> [--wait] -- <command> [args...] | status | --help" >&2
+  echo "usage: fm-run-slot.sh acquire --class <cpu|net> -- <command> [args...] | status | --help" >&2
   exit 2
 }
 
@@ -126,7 +122,6 @@ case "${1:-}" in
 esac
 
 CLASS=
-WAIT=0
 if [ "$SUBCOMMAND" = acquire ]; then
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -135,8 +130,6 @@ if [ "$SUBCOMMAND" = acquire ]; then
         CLASS=$2
         shift 2
         ;;
-      --class=*) CLASS=${1#--class=}; shift ;;
-      --wait) WAIT=1; shift ;;
       --) shift; break ;;
       *) usage_error "unexpected argument before --: $1" ;;
     esac
@@ -576,75 +569,56 @@ lock
 prune_holders "$CLASS"
 prune_queue "$CLASS"
 TICKET=$(next_ticket) || { unlock; die "cannot allocate a run-slot ticket under $SLOTS"; }
-if [ "$WAIT" -eq 0 ]; then
-  count_tickets "$SLOTS/$CLASS/queue"
-  ahead=$TICKET_COUNT
-  if [ "$ahead" -gt 0 ]; then
-    BLOCK_REASON="$ahead earlier run(s) are waiting for a $CLASS slot"
-  else
-    evaluate_capacity "$CLASS"
-  fi
-  if [ -n "$BLOCK_REASON" ]; then
-    TICKET=
+own_record
+write_record "$SLOTS/$CLASS/queue/$TICKET" || { unlock; die "cannot record the $CLASS queue entry under $SLOTS"; }
+unlock
+last_note=
+head_check_at=$((SECONDS + 5))
+while :; do
+  # Waiters behind the head only read the queue, without the lock or a
+  # fork, so a long queue costs nothing; a dead waiter ahead is dropped on
+  # sight and a recycled PID at the head is caught every few seconds.
+  queue_position
+  if [ "$POSITION" -eq 0 ]; then
+    # Our entry vanished (state was cleared by hand); queue again at the back.
+    lock
+    TICKET=$(next_ticket) || { unlock; die "cannot allocate a run-slot ticket under $SLOTS"; }
+    own_record
+    write_record "$SLOTS/$CLASS/queue/$TICKET" || { unlock; die "cannot record the $CLASS queue entry under $SLOTS"; }
     unlock
-    echo "fm-run-slot: no $CLASS slot free: $BLOCK_REASON; rerun with --wait to queue" >&2
-    exit "$RUN_SLOT_BUSY_EXIT"
+    continue
   fi
-  own_record "$OWN_ENQUEUED"
-  write_record "$SLOTS/$CLASS/held/$TICKET" || { unlock; die "cannot record the $CLASS slot under $SLOTS"; }
-  unlock
-else
-  own_record
-  write_record "$SLOTS/$CLASS/queue/$TICKET" || { unlock; die "cannot record the $CLASS queue entry under $SLOTS"; }
-  unlock
-  last_note=
-  head_check_at=$((SECONDS + 5))
-  while :; do
-    # Waiters behind the head only read the queue, without the lock or a
-    # fork, so a long queue costs nothing; a dead waiter ahead is dropped on
-    # sight and a recycled PID at the head is caught every few seconds.
+  if [ "$POSITION" -gt 1 ] && [ "$SECONDS" -ge "$head_check_at" ]; then
+    proc_matches "$HEAD_PID" "$HEAD_START" || rm -f -- "$SLOTS/$CLASS/queue/$HEAD_TICKET"
+    head_check_at=$((SECONDS + 5))
+  fi
+  if [ "$POSITION" -eq 1 ]; then
+    lock
+    prune_holders "$CLASS"
     queue_position
-    if [ "$POSITION" -eq 0 ]; then
-      # Our entry vanished (state was cleared by hand); queue again at the back.
-      lock
-      TICKET=$(next_ticket) || { unlock; die "cannot allocate a run-slot ticket under $SLOTS"; }
-      own_record
-      write_record "$SLOTS/$CLASS/queue/$TICKET" || { unlock; die "cannot record the $CLASS queue entry under $SLOTS"; }
-      unlock
-      continue
-    fi
-    if [ "$POSITION" -gt 1 ] && [ "$SECONDS" -ge "$head_check_at" ]; then
-      proc_matches "$HEAD_PID" "$HEAD_START" || rm -f -- "$SLOTS/$CLASS/queue/$HEAD_TICKET"
-      head_check_at=$((SECONDS + 5))
-    fi
+    BLOCK_NOTE=
     if [ "$POSITION" -eq 1 ]; then
-      lock
-      prune_holders "$CLASS"
-      queue_position
-      BLOCK_NOTE=
-      if [ "$POSITION" -eq 1 ]; then
-        evaluate_capacity "$CLASS"
-        if [ -z "$BLOCK_NOTE" ]; then
-          own_record "$(date +%s)"
-          write_record "$SLOTS/$CLASS/held/$TICKET" || { unlock; die "cannot record the $CLASS slot under $SLOTS"; }
-          rm -f -- "$SLOTS/$CLASS/queue/$TICKET"
-          unlock
-          break
-        fi
+      evaluate_capacity "$CLASS"
+      if [ -z "$BLOCK_NOTE" ]; then
+        own_record "$(date +%s)"
+        write_record "$SLOTS/$CLASS/held/$TICKET" || { unlock; die "cannot record the $CLASS slot under $SLOTS"; }
+        rm -f -- "$SLOTS/$CLASS/queue/$TICKET"
+        unlock
+        break
       fi
-      unlock
-      note="first in line for a $CLASS slot: ${BLOCK_NOTE:-rechecking}"
-    else
-      note="waiting for a $CLASS slot: position $POSITION"
     fi
-    if [ "$note" != "$last_note" ]; then
-      echo "fm-run-slot: $note" >&2
-      last_note=$note
-    fi
-    sleep "$POLL_SECS"
-  done
-  [ -z "$last_note" ] || echo "fm-run-slot: $CLASS slot granted after waiting $(fmt_duration "$(( $(date +%s) - OWN_ENQUEUED ))")" >&2
-fi
+    unlock
+    note="first in line for a $CLASS slot: ${BLOCK_NOTE:-rechecking}"
+  else
+    note="waiting for a $CLASS slot: position $POSITION"
+  fi
+  if [ "$note" != "$last_note" ]; then
+    echo "fm-run-slot: $note" >&2
+    last_note=$note
+  fi
+  sleep "$POLL_SECS"
+done
+[ -z "$last_note" ] || echo "fm-run-slot: $CLASS slot granted after waiting $(fmt_duration "$(( $(date +%s) - OWN_ENQUEUED ))")" >&2
 
 # Run the command with this terminal's stdin and SIGINT/SIGQUIT at their
 # defaults (a non-interactive shell's background job otherwise ignores both and
