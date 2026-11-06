@@ -519,6 +519,10 @@ test_watcher_surfaces_one_wake() {
   task "$home" ship1 pr=https://github.com/o/r/pull/8
   pr "$home" 8 "$HEAD_A" "$BASE_1" false false
   arm "$home"
+  # The watcher also runs the hourly recorded-PR reconcile sweep, whose batched
+  # GraphQL read this forge fixture does not serve; whether a run reaches it
+  # within its window is timing. Mark the sweep as just run so it is not due.
+  touch "$home/state/.pr-reconcile-last"
   [ -f "$home/state/contributions.check.sh" ] || fail 'arm did not arm the contribution observer for enrolled PRs'
   # The hourly recorded-PR sweep is not under test and the fake forge does not
   # serve it; left due, it raises its own offline wake whenever a bounded run

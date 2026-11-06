@@ -554,7 +554,7 @@ window_label() {
 # `_` so a window name is usable as a filename suffix. Every per-window file the
 # watcher keeps is named by it (.hash-, .count-, .stale-, .stale-since-,
 # .wedge-escalations-, .wedge-permanent-, .wedge-terminal-queued-,
-# .wedge-rollback-failed-, .paused-*, .writing-*, .waiting-*), and live homes
+# .wedge-rollback-failed-, .paused-*, .writing-*, .waiting-*, .wait-over-), and live homes
 # hold those markers on disk under the current format, so the format lives here
 # alone: a second copy is how a future change to it silently orphans a window's
 # markers instead of clearing them. The helpers below take the derived key
@@ -565,6 +565,43 @@ window_key() {  # <window>
   printf '%s' "${key//./_}"
 }
 
+
+# A worker that ends its turn on a declared wait for its own run sits idle until
+# something types into its pane, so a wait that is over must reach the worker
+# itself, not only firstmate's recheck. When the newest declared wait is a
+# `paused:` line whose `until` time has passed (status_paused_until) or whose
+# named `pid` (status_paused_pid) no longer exists on this machine, and the pane
+# is idle, this enqueues one steering-inbox record telling the worker its wait is
+# over and rings the doorbell once; bin/fm-task-inbox-lib.sh's ladder owns any
+# re-ring and escalation from there. A secondmate's pid is never read, because a
+# mate may run on another host. One record per declaration: .wait-over-<key>
+# holds the declaration line it was sent for, and the idempotent enqueue keeps a
+# lost marker from writing a second record. Firstmate's own due recheck
+# (handle_paused_stale, surface_nonterminal_stale) is unchanged.
+wait_over_steer() {  # <window> <task> <kind> <last-status-line>
+  local w=$1 task=$2 kind=$3 last=$4 key marker why until pid rec ring_rc=0
+  status_is_paused "$last" || return 0
+  key=$(window_key "$w")
+  marker="$STATE/.wait-over-$key"
+  [ "$(cat "$marker" 2>/dev/null || true)" != "$last" ] || return 0
+  if until=$(status_paused_until "$last") && [ "$(date +%s)" -ge "$until" ]; then
+    why="its declared until time has passed"
+  elif [ "$kind" != secondmate ] && pid=$(status_paused_pid "$last") \
+    && ! ps -p "$pid" >/dev/null 2>&1; then
+    why="its declared process $pid has exited"
+  else
+    return 0
+  fi
+  if ! rec=$(fm_task_inbox_write_idempotent "$STATE" "$task" \
+    "Your declared wait is over ($why): check your run, then resume the task or declare a new wait. The wait you declared: $last"); then
+    triage_log "wait-over steer for $task could not be enqueued ($why); firstmate's due recheck still stands"
+    return 0
+  fi
+  printf '%s\n' "$last" > "$marker" || true
+  case "$rec" in */handled/*) return 0 ;; esac
+  fm_task_inbox_ring "$(window_backend "$w")" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
+  triage_log "wait-over steer: $task ${rec##*/} ($why) result=$ring_rc"
+}
 inbox_steer_escalate_unavailable() {  # <window> <task> <record>
   local w=$1 task=$2 rec=$3 reason
   reason="stale: $w (unread firstmate instruction: $rec is unhandled and the worker's agent has exited or its endpoint is missing, so the doorbell was not typed; recover the worker)"
@@ -3932,6 +3969,9 @@ EOF
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
     if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+    if [ -n "$task" ] && [ "$busy_now" -ne 0 ]; then
+      wait_over_steer "$w" "$task" "$kind" "$last"
+    fi
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"

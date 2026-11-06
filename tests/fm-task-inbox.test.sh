@@ -29,6 +29,9 @@
 #   7. A fire-and-forget record stays outside the ladder, but one whose first
 #      ring did not land gets exactly one retry ring and never escalates. The
 #      retry waits while the worker has an open decision of its own.
+#   8. A declared wait that is over - its until time passed or its named pid
+#      exited - steers the idle worker once per declaration through this
+#      inbox and its doorbell, and leaves a busy worker alone.
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
@@ -1181,6 +1184,122 @@ test_watcher_dead_pane_ignores_stale_busy_state() {
   pass "watcher: dead-pane recovery overrides stale busy state"
 }
 
+
+# --- a declared wait that is over reaches the worker -------------------------
+# A worker that declared `paused:` on its own run and ended its turn is idle
+# until something types into its pane; firstmate's due recheck alone left four
+# workers parked overnight after their runs had finished. The watcher therefore
+# steers the worker itself once the declared until time passes or the declared
+# pid exits, through the ordinary inbox record and doorbell.
+utc_iso_at() {  # <epoch>
+  date -u -r "$1" +%Y-%m-%dT%H:%MZ 2>/dev/null || date -u -d "@$1" +%Y-%m-%dT%H:%MZ
+}
+
+wait_over_records() {  # <state> -> count of wait-over inbox records, handled or not
+  grep -l 'Your declared wait is over' "$1"/t1.inbox/*.msg "$1"/t1.inbox/handled/*.msg 2>/dev/null \
+    | wc -l | tr -d '[:space:]'
+}
+
+# One wait_over_steer pass through the production watcher functions.
+wait_over_once() {  # <case-dir> <status-line> [capture]
+  PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" FM_SEND_LOG="$1/send.log" \
+    FM_FAKE_TMUX_CAPTURE="${3:-$(idle_capture "$1")}" \
+    bash -c '. "$1" && wait_over_steer sess:fm-t1 t1 "$2" "$3"' _ "$WATCH" ship "$2" \
+    > "$1/check.out" 2>&1
+}
+
+test_status_paused_pid_classifier() {
+  local got
+  got=$(bash -c '. "$1"; status_paused_pid "$2"' _ "$ROOT/bin/fm-classify-lib.sh" \
+    'paused [at=1]: strict shards running (pid 4242); resume when it exits') \
+    || fail "a paused line naming its pid was not read"
+  [ "$got" = 4242 ] || fail "status_paused_pid read '$got' instead of 4242"
+  ! bash -c '. "$1"; status_paused_pid "$2"' _ "$ROOT/bin/fm-classify-lib.sh" \
+    'working [at=1]: started pid 4242' || fail "a non-pause line was read as a declared pid"
+  ! bash -c '. "$1"; status_paused_pid "$2"' _ "$ROOT/bin/fm-classify-lib.sh" \
+    'paused [at=1]: rapid test run; resume when it ends' || fail "a pause with no pid token named a pid"
+  ! bash -c '. "$1"; status_paused_pid "$2"' _ "$ROOT/bin/fm-classify-lib.sh" \
+    'paused [at=1]: run (pid 0) ends' || fail "pid 0 was accepted"
+  pass "status_paused_pid reads only a well-formed pid on a paused line"
+}
+
+test_watcher_steers_worker_when_until_passes() {
+  local dir state log pid i past
+  dir=$(setup_watch_case wait-over-until)
+  state="$dir/state"; log="$dir/send.log"; : > "$log"
+  past=$(utc_iso_at "$(( $(date +%s) - 120 ))")
+  printf 'paused [at=1]: strict shards running in the background; resume when they finish, until %s\n' \
+    "$past" > "$state/t1.status"
+  watch_bg "$state" "$dir/fakebin" "$dir/watch.out" \
+    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$(idle_capture "$dir")"
+  pid=$!
+  i=0
+  while [ "$i" -lt 100 ] && ! grep -qF 'Firstmate instruction waiting' "$log" 2>/dev/null; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  [ "$(wait_over_records "$state")" -eq 1 ] \
+    || fail "a passed until time did not steer the worker exactly once: $(ls -R "$state/t1.inbox" 2>&1)"
+  grep -F 'its declared until time has passed' "$state"/t1.inbox/*.msg >/dev/null \
+    || fail "the wait-over steer did not name the passed until time"
+  grep -qF "Firstmate instruction waiting" "$log" \
+    || fail "the wait-over steer did not ring the worker's doorbell: $(cat "$log")"
+  pass "watcher: a declared wait whose until time passed steers the idle worker through its inbox"
+}
+
+test_watcher_wait_over_steer_once_per_declaration() {
+  local dir state line dead live future
+  dir=$(setup_watch_case wait-over-pid)
+  state="$dir/state"; : > "$dir/send.log"
+  dead=$(dead_pid)
+  line="paused [at=1]: strict shards running (pid $dead); resume when it exits"
+  wait_over_once "$dir" "$line"
+  [ "$(wait_over_records "$state")" -eq 1 ] || fail "an exited declared pid did not steer the worker"
+  grep -F "its declared process $dead has exited" "$state"/t1.inbox/*.msg >/dev/null \
+    || fail "the wait-over steer did not name the exited pid"
+  [ "$(grep -c 'Firstmate instruction waiting' "$dir/send.log")" -eq 1 ] \
+    || fail "the wait-over steer did not ring exactly once"
+  wait_over_once "$dir" "$line"
+  [ "$(grep -c 'Firstmate instruction waiting' "$dir/send.log")" -eq 1 ] \
+    || fail "one declaration rang the worker more than once"
+  # A lost marker may re-ring the same unhandled record, never write a second.
+  rm -f "$state/.wait-over-sess_fm-t1"
+  wait_over_once "$dir" "$line"
+  [ "$(wait_over_records "$state")" -eq 1 ] || fail "one declaration steered the worker more than once"
+
+  dir=$(setup_watch_case wait-over-still-running)
+  state="$dir/state"; : > "$dir/send.log"
+  sleep 300 &
+  live=$!
+  future=$(utc_iso_at "$(( $(date +%s) + 3600 ))")
+  wait_over_once "$dir" "paused [at=1]: strict shards running (pid $live); resume when it exits, until $future"
+  kill "$live" 2>/dev/null; wait "$live" 2>/dev/null
+  [ "$(wait_over_records "$state")" -eq 0 ] || fail "a running declared pid before its until time steered the worker"
+  wait_over_once "$dir" "paused [at=1]: waiting on teammate review of the PR"
+  [ "$(wait_over_records "$state")" -eq 0 ] || fail "a wait naming no time and no pid steered the worker"
+  wait_over_once "$dir" "working [at=1]: strict shards running (pid $(dead_pid)), until 2020-01-01T00:00Z"
+  [ "$(wait_over_records "$state")" -eq 0 ] || fail "a working line was treated as a declared wait"
+  [ ! -s "$dir/send.log" ] || fail "a wait that is not over rang the doorbell"
+  pass "watcher: an exited declared pid steers the worker once per declaration, and a wait that is not over stays quiet"
+}
+
+test_watcher_wait_over_skips_busy_pane() {
+  local dir state pid past
+  dir=$(setup_watch_case wait-over-busy)
+  state="$dir/state"; : > "$dir/send.log"
+  printf 'some output\nBUSYTOKEN active\n' > "$dir/busy.capture"
+  past=$(utc_iso_at "$(( $(date +%s) - 120 ))")
+  printf 'paused [at=1]: strict shards running; resume when they finish, until %s\n' "$past" > "$state/t1.status"
+  watch_bg "$state" "$dir/fakebin" "$dir/watch.out" \
+    FM_SEND_LOG="$dir/send.log" FM_FAKE_TMUX_CAPTURE="$dir/busy.capture" FM_BUSY_REGEX=BUSYTOKEN
+  pid=$!
+  sleep 3
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  [ "$(wait_over_records "$state")" -eq 0 ] || fail "a busy worker was steered as if its wait were over"
+  [ ! -s "$dir/send.log" ] || fail "a busy worker's pane was typed into: $(cat "$dir/send.log")"
+  pass "watcher: a worker already busy past its declared time is left alone"
+}
 test_write_is_durable_and_exact
 test_doorbell_is_a_shell_noop
 test_doorbell_rejects_terminal_controls
@@ -1228,3 +1347,7 @@ test_watcher_retry_keeps_a_newer_mark
 test_watcher_escalates_once_after_budget
 test_watcher_dead_pane_escalates_once_without_ringing
 test_watcher_dead_pane_ignores_stale_busy_state
+test_status_paused_pid_classifier
+test_watcher_steers_worker_when_until_passes
+test_watcher_wait_over_steer_once_per_declaration
+test_watcher_wait_over_skips_busy_pane
