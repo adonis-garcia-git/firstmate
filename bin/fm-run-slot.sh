@@ -85,8 +85,9 @@
 #                          (default 1; a positive number such as 0.2).
 #
 # Exit status: the command's status after it ran; 127 when the command cannot
-# be executed; 2 on a usage error; 1 on an unreadable config, an unresolvable root home, or a state
-# failure.
+# be executed; 128+signal when a signal ends a queued wait (see Signals); 2 on
+# a usage error; 1 on an unreadable config, an unresolvable root home, or a
+# state failure.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
