@@ -351,7 +351,7 @@ test_memory_floor_meminfo() {
 }
 
 test_memory_floor_vm_stat() {
-  local home dir fakebin out rc
+  local home dir fakebin out rc cpu_holder net_holder
   home=$(make_home mem-vmstat 'cpu_mem_floor_mb=1000' 'net_mem_floor_mb=400')
   dir="$home/run"; mkdir -p "$dir" "$home/noproc"
   fakebin=$(fm_fakebin "$home")
@@ -367,21 +367,30 @@ echo 'Pages wired down:                        100000.'
 SH
   chmod +x "$fakebin/vm_stat"
   bg_slot "$home" "$dir/holder.log" acquire --class cpu -- sh -c "$(gate_cmd "$dir" holder)"
-  wait_for 10 "the cpu holder to start" test -s "$dir/holder.pid"
+  cpu_holder=$BG_LAST
+  bg_slot "$home" "$dir/net-holder.log" acquire --class net -- sh -c "$(gate_cmd "$dir" net-holder)"
+  net_holder=$BG_LAST
+  wait_for 10 "the cpu and net holders to start" test -s "$dir/holder.pid" -a -s "$dir/net-holder.pid"
   out=$(RUN_SLOT_PATH="$fakebin:$BASE_PATH" RUN_SLOT_PROC="$home/noproc" run_slot "$home" status 2>&1)
   assert_contains "$out" "reclaimable 500 MB" "vm_stat free, inactive, and speculative pages were not summed"
   out=$(RUN_SLOT_PATH="$fakebin:$BASE_PATH" RUN_SLOT_PROC="$home/noproc" run_slot "$home" acquire --class cpu -- true 2>&1); rc=$?
   expect_code 75 "$rc" "a second cpu acquire below its floor through vm_stat"
   out=$(RUN_SLOT_PATH="$fakebin:$BASE_PATH" RUN_SLOT_PROC="$home/noproc" run_slot "$home" acquire --class net -- true 2>&1); rc=$?
-  expect_code 0 "$rc" "net acquire above its own floor through vm_stat: $out"
+  expect_code 0 "$rc" "a second net acquire above its own floor through vm_stat: $out"
+  # 10000 free + 5000 inactive + 2000 speculative pages of 16 KiB = 265 MB.
+  sed -i.bak 's/^echo .Pages inactive: .*/echo "Pages inactive: 5000."/' "$fakebin/vm_stat"
+  out=$(RUN_SLOT_PATH="$fakebin:$BASE_PATH" RUN_SLOT_PROC="$home/noproc" run_slot "$home" acquire --class net -- true 2>&1); rc=$?
+  expect_code 75 "$rc" "a second net acquire below its own floor through vm_stat"
+  assert_contains "$out" "reclaimable memory 265 MB is below the 400 MB floor" "the net refusal did not name the net floor"
 
   printf '#!/bin/sh\nexit 1\n' > "$fakebin/vm_stat"
   out=$(RUN_SLOT_PATH="$fakebin:$BASE_PATH" RUN_SLOT_PROC="$home/noproc" run_slot "$home" status 2>&1)
   assert_contains "$out" "reclaimable memory unknown, floor not enforced" "an unavailable memory probe was not reported"
   out=$(RUN_SLOT_PATH="$fakebin:$BASE_PATH" RUN_SLOT_PROC="$home/noproc" run_slot "$home" acquire --class cpu -- true 2>&1); rc=$?
   expect_code 0 "$rc" "a second cpu acquire when no memory probe works: $out"
-  touch "$dir/holder.open"
-  wait "$BG_LAST" || fail "the cpu holder failed"
+  touch "$dir/holder.open" "$dir/net-holder.open"
+  wait "$cpu_holder" || fail "the cpu holder failed"
+  wait "$net_holder" || fail "the net holder failed"
   pass "vm_stat feeds the memory floor where /proc/meminfo is absent, and an unknown reading is not enforced"
 }
 
