@@ -91,6 +91,7 @@ Each effective `FM_HOME` contains private operational directories.
 - Private secondmate config-reread generations with their retry and quarantine state.
 - Per-task steering-inbox records under `state/<id>.inbox/` (`bin/fm-task-inbox-lib.sh`).
 - Parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
+- The machine-wide run-slot queue under the root home's `state/run-slots/` (`bin/fm-run-slot.sh`).
 
 `config/` holds local gitignored operating choices, including explicit extension bindings under `config/extensions.d/`.
 
@@ -1411,6 +1412,34 @@ When every place is held, `bin/fm-spawn.sh` launches nothing, creates no record,
 A malformed or unreadable file refuses every fresh ship or scout spawn until it is fixed, rather than guessing the intended limit, and so does a local home's state directory or task record that cannot be read while counting a capped project's holders.
 Firstmate cannot see which part of a worker's life uses the resource, so the number bounds whole workers from launch to handoff, and the tightest resource every worker needs should decide it.
 [`bin/fm-project-capacity-lib.sh`](../bin/fm-project-capacity-lib.sh) owns the file format, what holds a place, and why concurrent spawns cannot both take the last one.
+
+## Run slots (config/run-slots)
+
+Workers on one machine run heavy test suites, builds, and evals through `bin/fm-run-slot.sh`, which hands out run slots first-come-first-served instead of letting each worker poll the load average.
+Every generated ship and scout brief tells its worker to wrap such a run in `fm-run-slot.sh acquire --class cpu -- <command>`, or `--class net` for an eval that mostly waits on model or network calls.
+The script runs the command while it holds a slot and frees the slot when the command exits or dies, so a crashed run never keeps one.
+Waiting runs start strictly in arrival order, so no run is overtaken and starved.
+A run starts only when its class has a free slot and reclaimable memory is at or above the class's memory floor.
+The memory floor is waived when no run of that class holds a slot, so one run of each class can always progress; every additional slot still waits for the floor.
+The load average is never consulted.
+`fm-run-slot.sh status` lists who holds each slot and who is waiting, for how long, and why the first waiter has not started.
+
+The optional local, gitignored `config/run-slots` file sets the limits, one `key=value` per line, with blank lines and `#` comments ignored:
+
+```text
+# defaults
+cpu_slots=2
+cpu_mem_floor_mb=2048
+net_slots=8
+net_mem_floor_mb=1024
+```
+
+A slot count is a positive integer, and a memory floor is a non-negative number of megabytes where `0` turns the floor off.
+The network class has its own larger count, so evals that mostly wait on the network never queue behind CPU-heavy runs.
+An unknown key, a repeated key, or a malformed line or value stops every acquire and status with the file and line named, rather than guessing the intended limit.
+Slots are per machine: the file and the queue live in the machine's root Firstmate home, so every local secondmate home and its workers share one queue.
+The file is not inherited by remote secondmate homes, whose workers run on another machine.
+The [`bin/fm-run-slot.sh`](../bin/fm-run-slot.sh) header owns the commands, exit codes, memory probes, liveness rules, and state format.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
@@ -2758,7 +2787,8 @@ FM_STATE_OVERRIDE=       # alternate state dir, mainly for tests
 FM_DATA_OVERRIDE=        # alternate data dir, mainly for tests
 FM_PROJECTS_OVERRIDE=    # alternate projects dir, mainly for tests
 FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
-FM_PROC_ROOT_OVERRIDE=   # alternate /proc root for Linux process-identity reads in fm-wake-lib.sh and fm-teardown.sh, mainly for tests
+FM_PROC_ROOT_OVERRIDE=   # alternate /proc root for Linux process-identity reads in fm-wake-lib.sh and fm-teardown.sh and the meminfo read in fm-run-slot.sh, mainly for tests
+FM_RUN_SLOT_POLL_SECS=1   # seconds between queue checks while bin/fm-run-slot.sh waits for a run slot; a positive number such as 0.2
 FM_SYSTEM_WAKE_EPOCH_OVERRIDE=   # pin the last-system-wake epoch used by awake-time beacon ages in fm-wake-lib.sh (0 means the system never slept), mainly for tests and diagnostics
 FM_BACKEND=             # optional runtime backend override for new spawns; tmux/herdr/zellij/orca/cmux/paseo/rex support ship/scout spawns, codex-app is not accepted
 FM_TRACE_CONTEXT=       # optional trace-context override; see "Trace context propagation"
